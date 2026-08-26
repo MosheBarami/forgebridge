@@ -563,6 +563,15 @@ export function checkClaimedTests(docs: readonly Doc[], facts: RepoFacts): Viola
  * `$ ` lines. An inline `` `forgebridge daemon` `` in a prose sentence or a table
  * cell is not checked, because inline code is used for names as often as for
  * invocations and the false-positive rate would make the gate noise.
+ *
+ * A trailing colon is stripped before the manifest is consulted, because a
+ * fenced block just as often holds a binary's *output* as its invocation, and
+ * that output is prefixed `forgebridge-mcp: …`. No `bin` entry can end in a
+ * colon, so without the strip such a line could never satisfy the rule however
+ * the binary was named — a rule nothing can pass is a rule someone deletes.
+ * Stripping rather than skipping keeps the gate's reach over that output: a
+ * transcript of what `forgebridge-relay` prints still fails while there is no
+ * `forgebridge-relay`, which is the claim worth catching in a sample.
  */
 export function checkBinNames(docs: readonly Doc[], facts: RepoFacts): Violation[] {
   const out: Violation[] = [];
@@ -576,6 +585,7 @@ export function checkBinNames(docs: readonly Doc[], facts: RepoFacts): Violation
       const tokens = line.replace(/^\s*\$\s+/, '').trim().split(/\s+/);
       let head = tokens[0] ?? '';
       if (head === 'npx' || head === 'sudo' || head === 'bunx' || head === 'pnpm') head = tokens[1] ?? '';
+      head = head.replace(/:$/, '');
       if (head !== facts.binPrefix && !head.startsWith(`${facts.binPrefix}-`)) return;
       if (facts.binNames.has(head)) return;
       if (carriesMilestone(unitAt(doc.text, lineIndex))) return;

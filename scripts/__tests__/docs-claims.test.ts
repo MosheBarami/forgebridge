@@ -910,6 +910,24 @@ describe('self-test: D7 rejects a binary that is not declared', () => {
     expect(checkBinNames(doc('The `acme daemon` command is the CLI entry point.'), FIXTURE_FACTS)).toEqual([]);
   });
 
+  it('accepts a transcript of what a declared binary prints', () => {
+    // A fenced block holds output as often as it holds commands, and output is
+    // prefixed `acme-daemon: …`. No bin entry can end in a colon, so without
+    // the strip this line could never pass however the binary was named.
+    expect(
+      checkBinNames(doc('```\nacme-daemon: listening on http://127.0.0.1:7317\n```'), FIXTURE_FACTS),
+    ).toEqual([]);
+  });
+
+  it('still fails on a transcript of a binary no manifest declares', () => {
+    // The control for the line above. Stripping the colon must not turn the
+    // rule off for sample output — a README quoting what `acme-relay` prints is
+    // claiming an `acme-relay` exists.
+    const found = checkBinNames(doc('```\nacme-relay: forwarding to the daemon\n```'), FIXTURE_FACTS);
+    expect(found).toHaveLength(1);
+    expect(report(found)).toContain('acme-relay');
+  });
+
   it('does not fire when the repository has no scope to derive a family from', () => {
     expect(checkBinNames(doc('```bash\nacme run\n```'), { ...FIXTURE_FACTS, binPrefix: '' })).toEqual([]);
   });
