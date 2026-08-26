@@ -15,5 +15,5 @@
     "lint": "echo 'lint: protocol (configured in M04 follow-up)'"
   },
   "dependencies": { "zod": "^3.24.1" },
-  "devDependencies": { "typescript": "^5.7.2", "vitest": "^2.1.8" }
+  "devDependencies": { "typescript": "^5.7.2", "vitest": "^4.1.11" }
 }
