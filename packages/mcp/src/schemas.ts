@@ -1,0 +1,103 @@
+import { z } from 'zod';
+import { ChangeSet, InstancePath, LIMITS, Link, RollbackRequest } from '@forgebridge/protocol';
+
+/**
+ * Tool input schemas, taken apart from the frozen contract rather than written
+ * again.
+ *
+ * `ChangeSet` is a `ZodEffects` because of its `superRefine`, so its fields are
+ * reached through `.innerType().shape`. That indirection is worth it: the bound
+ * on `summary`, the 500-operation ceiling and the whole `Operation` union then
+ * come from `packages/protocol` by reference. A hand-written `z.string().max(300)`
+ * here would be a second copy of a contract that is only allowed to have one,
+ * and the copy would be the one that goes stale.
+ *
+ * `.describe()` returns a clone, so annotating for the model cannot mutate the
+ * protocol's own schema.
+ */
+const changeSetShape = ChangeSet.innerType().shape;
+const rollbackShape = RollbackRequest.shape;
+
+/** Optional everywhere: the daemon knows its own default project. */
+export const projectIdArg = changeSetShape.projectId
+  .optional()
+  .describe('Project UUID. Omit to use the project this daemon defaults to — read it with forge.list_projects.');
+
+export const changeSetIdArg = changeSetShape.id.describe('The changeset UUID returned by forge.propose_changeset.');
+
+export const instancePathArg = InstancePath.describe(
+  'Dotted instance path from a Roblox service root, e.g. "ServerScriptService.Shop.PurchaseHandler". Every segment must be a safe identifier; the protocol refuses anything else.',
+);
+
+/** `forge.list_projects`, `forge.list_models`, `forge.link_status`. */
+export const emptyInput = {} satisfies z.ZodRawShape;
+
+export const proposeChangeSetInput = {
+  projectId: projectIdArg,
+  baseVersion: changeSetShape.baseVersion.describe(
+    'The tree version these operations were built against. A fresh project is 0. If it is wrong the call is refused with stale_base, and that refusal names the version the project is actually at — rebuild against that number and propose again.',
+  ),
+  summary: changeSetShape.summary.describe(
+    'One line a human will read in the approval prompt. Say what changes and why, not how many operations there are.',
+  ),
+  operations: changeSetShape.operations.describe(
+    'Ordered operations, applied in order and each reported individually. setProperty may not write Parent or Name — use moveInstance, which reports both endpoints and journals a reversible move.',
+  ),
+  runId: changeSetShape.runId.describe('Optional run UUID, when this ChangeSet belongs to a run you already started.'),
+} satisfies z.ZodRawShape;
+
+export const diffChangeSetInput = { changeSetId: changeSetIdArg } satisfies z.ZodRawShape;
+
+export const applyChangeSetInput = {
+  changeSetId: changeSetIdArg.describe(
+    'The changeset a human has already approved. This tool cannot approve one; an unapproved id is refused with not_approved.',
+  ),
+} satisfies z.ZodRawShape;
+
+export const readTreeInput = {
+  projectId: projectIdArg,
+  path: InstancePath.optional().describe('Subtree to read. Omit for the service roots.'),
+  depth: z
+    .number()
+    .int()
+    .min(1)
+    .max(LIMITS.MAX_PATH_DEPTH)
+    .optional()
+    .describe(`How many levels below path to return. The protocol bounds path depth at ${LIMITS.MAX_PATH_DEPTH}.`),
+} satisfies z.ZodRawShape;
+
+export const readScriptInput = {
+  projectId: projectIdArg,
+  path: instancePathArg,
+} satisfies z.ZodRawShape;
+
+export const runTestsInput = {
+  projectId: projectIdArg,
+  changeSetId: changeSetIdArg.optional().describe('Test the state after this changeset, when one has been applied.'),
+} satisfies z.ZodRawShape;
+
+export const rollbackInput = {
+  journalId: rollbackShape.journalId.describe('Journal entry to reverse. Every apply writes one.'),
+  expectedVersion: rollbackShape.expectedVersion.describe(
+    'The tree version you believe the project is at. If it has moved since, the rollback is refused with stale_base rather than replayed onto a tree it no longer fits.',
+  ),
+  reason: rollbackShape.reason.describe('Why, in the user’s words where you have them. It is journalled.'),
+} satisfies z.ZodRawShape;
+
+export const tailOutputInput = {
+  link: Link.shape.id
+    .optional()
+    .describe('Link id, when more than one Studio session is paired. Omit for the default project’s session.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe('How many of the most recent messages to return. The daemon serves at most its own ceiling regardless.'),
+} satisfies z.ZodRawShape;
+
+/** Every tool's input schema as one object, for validation and for tests. */
+export function objectOf<Shape extends z.ZodRawShape>(shape: Shape): z.ZodObject<Shape> {
+  return z.object(shape);
+}
