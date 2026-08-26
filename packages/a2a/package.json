@@ -1,0 +1,28 @@
+{
+  "name": "@forgebridge/a2a",
+  "version": "0.1.0",
+  "description": "The ForgeBridge A2A connector. An Agent Card and the A2A task surface, translated onto the daemon's /v1 endpoints.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": ["dist"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "echo 'lint: a2a (configured in M04 follow-up)'"
+  },
+  "dependencies": {
+    "@forgebridge/protocol": "*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@forgebridge/daemon": "*",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  }
+}
