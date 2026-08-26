@@ -540,7 +540,12 @@ describe('the widened gate reads the whole repository', () => {
     // Spot-check the derivations the rules lean on. Each is a fact a document
     // could state wrongly, which is exactly why none of them is read from one.
     expect(FACTS.packages.has('protocol')).toBe(true);
-    expect(FACTS.packages.has('luau-analysis')).toBe(false);
+    expect(FACTS.packages.has('luau-analysis')).toBe(true);
+    // A name no package has ever carried, so this stays a real negative even
+    // as the workspace grows. The positive above used to be this assertion's
+    // subject, back when `luau-analysis` was the milestone every document was
+    // describing in the present tense before it existed.
+    expect(FACTS.packages.has('ghost')).toBe(false);
     expect(FACTS.npmScripts.has('verify:boundaries')).toBe(true);
     expect(FACTS.binPrefix).toBe('forgebridge');
     expect(FACTS.workflowStems.has('ci')).toBe(true);
@@ -557,10 +562,10 @@ describe('the widened gate reads the whole repository', () => {
 });
 
 describe('D1 — a document that names packages/<x> names a real package', () => {
-  // `packages/luau-analysis` has never existed and was described in the present
-  // tense in three files. Two of them are files the old gate does not read.
-  // A directory without a manifest does not count either: `packages/cli` is an
-  // empty `src/`, which is why the README marks it `M28 — empty`.
+  // `packages/luau-analysis` was described in the present tense in three files
+  // before it existed — two of them files the old gate does not read. It exists
+  // now; the rule is what keeps the *next* such name honest. A directory without
+  // a manifest does not count as a package either.
   it('names no package that has no manifest, without a milestone marker', () => {
     expect(report(checkPackageExistence(DOCS, FACTS))).toBe('');
   });
