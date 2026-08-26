@@ -141,20 +141,22 @@ jobs:
       - run: npm run build
 
       - name: Fail if the build wrote into the working tree
-        # No generated artefact is committed in this repository today — build
-        # output (`dist/`, `.turbo/`, `*.tsbuildinfo`) is gitignored, so a clean
-        # tree after `npm run build` is the expected state and this step should
-        # never fire. What it catches is the ways that quietly stops being true:
-        # a build step writing back into `src/`, a task mutating
+        # Generated artefacts ARE committed in this repository — M08 landed, and
+        # `packages/protocol/schema/` and
+        # `packages/sdk-python/src/forgebridge/models.py` are projections of the
+        # Zod contract that live in the tree. This step is not what keeps them
+        # fresh: `npm run build` is `tsc`, it does not run the generator, so a
+        # stale projection produces no diff here. The staleness check is
+        # `verify:schemas` above, which regenerates in memory and compares.
+        #
+        # What this step guards is the rest of the tree. Build output (`dist/`,
+        # `.turbo/`, `*.tsbuildinfo`) is gitignored, so a clean tree after a
+        # build is the expected state and a diff means something wrote where
+        # nothing should: a build step writing back into `src/`, a task mutating
         # `package-lock.json`, or a new output path that nothing added to
         # `.gitignore` and that would otherwise start arriving in unrelated PRs
-        # as noise.
-        #
-        # It becomes a staleness check when M08 lands and the OpenAPI, JSON
-        # Schema and Python projections of `packages/protocol` are generated and
-        # committed: from then on a diff here means the committed output no
-        # longer matches the schemas, and the regenerated files have to land in
-        # the PR rather than appear at release time.
+        # as noise. A diff under the generated paths reaches here too — but by
+        # then `verify:schemas` has already failed, and that is the error to read.
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::The build modified tracked files. Commit the regenerated output."

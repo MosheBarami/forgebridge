@@ -284,10 +284,15 @@ scripts/                 sync-catalog · generate-schemas · verify-assets
 docs/                    architecture, protocol, threat model, milestones, ADRs
 ```
 
-Every directory above has code and tests in it, except the two marked otherwise. A
-milestone number is not a claim of completeness: `packages/mcp` has not been tried from any
-of the editors M26 names, `packages/a2a` cannot drive a full run because no `/v1` route
-exposes one, and `forgebridge run` refuses for the same reason. Each row in
+Every `packages/*` row and `plugin/` has code and its own tests in it. The remaining rows are
+not packages and do not pretend to be: `assets/brands/` holds third-party marks and their
+provenance manifest, `scripts/` holds the gates and their self-tests, `docs/` holds prose, and a
+row whose right-hand column is a bare milestone — `examples/`, `apps/web/` — names a directory
+that stays empty or absent until that milestone lands.
+
+A milestone number is not a claim of completeness: `packages/mcp` has not been tried from any of
+the editors M26 names, `packages/a2a` cannot drive a full run because no `/v1` route exposes one,
+and `forgebridge run` refuses for the same reason. Each row in
 [`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
 
 `apps/relay/`, `packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and

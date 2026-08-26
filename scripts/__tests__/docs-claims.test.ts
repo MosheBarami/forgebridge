@@ -456,10 +456,17 @@ describe('REPO-LAYOUT describes the enforcement this repo actually has', () => {
   });
 });
 
-describe('the CI comment counts the plugin tests it points at', () => {
+describe('every document that counts the plugin tests counts them right', () => {
   // The TODO explaining why the Luau suite is not in CI quotes its size. It said
   // 103 after the suite had grown to 118 — a small number, in the one comment a
   // reviewer would use to judge how much is going unrun.
+  //
+  // `docs/MILESTONES.md` quotes the same number twice, and its live-status
+  // paragraph now says in as many words that this file decides it. That sentence
+  // is the reason the second assertion below exists: the count was allowed to
+  // stay in a hand-maintained document *because* a gate reads it, and a promise
+  // of enforcement with no enforcement behind it is the exact defect this whole
+  // file was written to catch.
   const luauCount = readdirSync(path.join(ROOT, 'plugin/tests'))
     .filter((file) => file.endsWith('.luau') && file !== 'run.luau' && file !== 'Fake.luau')
     .reduce(
@@ -474,6 +481,19 @@ describe('the CI comment counts the plugin tests it points at', () => {
 
   it('quotes the count the suite actually produces', () => {
     expect(CI, `the CI TODO is stale; the suite has ${luauCount} tests`).toContain(`${luauCount} Luau tests`);
+  });
+
+  it('finds the same count everywhere MILESTONES states one', () => {
+    // Every "<n> Luau" in the document, not the first: the live-status paragraph
+    // and the M41 row each carry one, and a fix applied to whichever a reader
+    // happened to open is how the two came to disagree in the first place.
+    const quoted = [...MILESTONES.matchAll(/(\d+) Luau/g)].map((match) => Number(match[1]));
+    expect(quoted.length, 'MILESTONES no longer states the plugin test count').toBeGreaterThan(0);
+    for (const stated of quoted) {
+      expect(stated, `MILESTONES says ${stated} Luau tests; plugin/tests/ has ${luauCount}`).toBe(
+        luauCount,
+      );
+    }
   });
 });
 
