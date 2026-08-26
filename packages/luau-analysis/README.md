@@ -9,12 +9,15 @@ the one thing neither of those can: the source text a model wrote.
 
 ## What it is, and what it is not
 
-It is a **linter for known mistakes**. It carries nine rules for the specific errors models make in
-Roblox code, each one chosen because it is both common and expensive, and each one written so that
-a reader can check the finding against the line it points at. A tenth id, `luau/analysis-incomplete`,
-is not a rule at all — it is how the analyser says it did not finish.
+It is a **token-based linter for known mistakes**. It carries nine rules for the specific errors
+models make in Roblox code, each one chosen because it is both common and expensive, and each one
+written so that a reader can check the finding against the line it points at. A tenth id,
+`luau/analysis-incomplete`, is not a rule at all — it is how the analyser says it did not finish.
 
-It is **not a proof of safety**, and nothing downstream should treat an `ok` from it as one:
+**Token-based** is the whole shape of it. There is a lexer and a block recogniser and nothing else:
+no grammar, no AST, no type system, no dataflow, no call graph. Every rule is a question asked of a
+token stream, and the reach of every rule is bounded by that. It is not a parser and it is not a
+proof of safety, and nothing downstream should treat an `ok` from it as either:
 
 - It does not type-check. Luau's type system is not implemented here and never will be by this
   package.
@@ -30,6 +33,65 @@ it is a smaller thing than "this script is safe". The Studio plugin sends every 
 Luau source to a human regardless of the verdict, and that ordering is deliberate
 ([ADR-012](../../docs/architecture/adr-012-approval-gated-apply.md)): this layer reduces how often
 a human has to catch something, it does not replace the human.
+
+### The one hop it follows
+
+Two rules need a name that was bound in an earlier statement, and both resolve it the same way and
+only that way: a name bound **once, in this file, directly to an expression written out in full**.
+
+```lua
+local Http = game:GetService("HttpService")   -- `Http` is the service from here on
+local heartbeat = RunService.Heartbeat        -- `heartbeat` is a per-frame signal
+```
+
+That binding is read through a type annotation (`local Http: HttpService = …`) and through
+multi-value assignment (`local retries, Http = 3, …`), because both are ordinary spellings of the
+same line and a check that missed them reported the wrong severity on every call that followed.
+
+It does not chain: `local alias = Http` binds nothing this analyser knows, because the value there
+is a name rather than the service lookup itself. And it is not scoped — a name is a service name
+for the whole file as soon as one binding to the service appears anywhere in it, including below
+the call that uses it, and a later reassignment does not take it back. That is deliberate: this
+analyser cannot prove where a binding stops holding, so it keeps the reading that produces a
+finding rather than the one that hides it.
+
+### What it cannot see
+
+Everything past that one hop. These are the classes of it, and the last column is what the analyser
+actually reports today — measured against the code in `src/`, not what it ought to do:
+
+| Out of reach | Example | Reported today |
+|---|---|---|
+| **Dataflow through a variable** — a value that reaches the call through a name | `local url = "https://evil.com"`<br>`Http:GetAsync(url)` | `warning`: "built at run time" |
+| **Values assembled at run time** — concatenation, `string.format`, interpolation | `Http:GetAsync(base .. "/x")` | `warning`: "built at run time" |
+| **A receiver it cannot resolve**, in a file that does use `HttpService` | `local m = Http`<br>`m:GetAsync(url)` | `warning`: "cannot resolve" |
+| **Indirection through a table** — the function stored, then called from the field | `local t = { fetch = Http.GetAsync }`<br>`t.fetch(Http, url)` | **nothing** |
+| **Indirection through an index** — the method named by a string | `local name = "GetAsync"`<br>`Http[name](Http, url)` | **nothing** |
+| **A method called with `.` instead of `:`** | `Http.GetAsync(Http, url)` | **nothing** |
+| **A service that arrives as a parameter** | `function fetch(service, url)`<br>`  return service:GetAsync(url)` | **nothing** |
+| **A handler that is not written inline** | `remote.OnServerEvent:Connect(onGive)` | **nothing** |
+| **An argument held in a variable** | `local id = 1234567`<br>`require(id)` | **nothing** |
+| **A loop condition held in a variable** | `local always = true`<br>`while always do … end` | **nothing** |
+| **Anything in another file** | a module that returns `loadstring`, and its caller | **nothing** |
+
+The `warning` rows are the ones where a rule recognised the call, found it could not read what it
+needed, and said so. The **nothing** rows are silent: the rule never recognised the shape as the
+thing it checks at all, and an `ok` covering one of them means only that this analyser had no
+question to ask about it. Closing them needs dataflow, dataflow needs a parse, and the parser
+question is the one below. TODO(M10 follow-up).
+
+Two consequences worth stating plainly rather than leaving a reader to infer.
+
+**This is not a defence against somebody who is trying.** Every silent row above is a one-line
+rewrite of code a rule does catch, and none of them is exotic — `Http.GetAsync(Http, url)` is just
+Luau, written the other way. What this layer defends against is a model that made a common
+mistake, which is what THREAT-MODEL T2 sizes it for. The control against a determined author is the
+human approval gate; this layer changes how often that human has to be the one who notices.
+
+**It has no name resolution.** A local that shadows a global is not tracked, so `local wait =
+task.wait` followed by `wait(1)` is reported as a use of the deprecated global — a false positive,
+and a deliberate one, because the alternative is to trust a binding this analyser cannot verify was
+never reassigned. The *declaration* is not reported; the use is.
 
 ## The one invariant
 
@@ -93,14 +155,14 @@ nothing. Both halves live in
 | `luau/no-loadstring` | error | A free reference to the `loadstring` global, including one hidden inside a string interpolation. | `settings.loadstring`, a table key named `loadstring`, the word in a comment or a string. |
 | `luau/no-getfenv-setfenv` | error | A free reference to `getfenv` or `setfenv`. | A method of that name on somebody else's table (`Compat.getfenv`). |
 | `luau/require-unreviewed-asset` | error | `require(1234567)` — a numeric catalog asset id. | `require(script.Parent.Shared)` and every other require by path. |
-| `luau/http-egress-unallowlisted` | error / warning | `HttpService:GetAsync`/`PostAsync`/`RequestAsync` to a host not on `allowedHttpHosts`. Warning when the URL is built at run time and cannot be read. | An allowed host, a subdomain of a `.example.com` entry, and service methods that never leave the machine (`JSONDecode`, `GenerateGUID`). |
-| `luau/unbounded-heartbeat` | error / warning | A `while` or `repeat` loop inside a `RunService.Heartbeat`/`Stepped`/`RenderStepped` handler. Error when the loop has no yield, `break` or `return`; warning when it can exit but nothing bounds it. | Bounded per-frame work — a numeric or generic `for` over a collection, which is what a handler is for. |
-| `luau/while-true-no-yield` | error | `while true do` or `repeat … until false` with no yield, `break` or `return` reachable on the loop's own thread. | A loop that calls `task.wait()`, waits on a signal, or can `break`. A `task.wait()` inside a nested closure does **not** count — it yields that closure, not the loop. |
+| `luau/http-egress-unallowlisted` | error / warning | `HttpService:GetAsync`/`PostAsync`/`RequestAsync` to a host not on `allowedHttpHosts`, including one written with string escapes. Warning when the URL is built at run time, or when the receiver cannot be resolved in a file that does use `HttpService`. | An allowed host, a subdomain of a `.example.com` entry, service methods that never leave the machine (`JSONDecode`, `GenerateGUID`), and `:GetAsync` on a DataStore in a file that never touches `HttpService`. |
+| `luau/unbounded-heartbeat` | error / warning | A `while` or `repeat` loop inside a `RunService.Heartbeat`/`Stepped`/`RenderStepped` handler, whether the signal is named at the `Connect` or reached through a local bound to it. Error when the loop has no yield, `break` or `return`; warning when it can exit but nothing bounds it. | Bounded per-frame work — a numeric or generic `for` over a collection, which is what a handler is for — and a local holding a signal that does not fire per frame. |
+| `luau/while-true-no-yield` | error | A loop whose condition is a literal Luau never reads as false — `while true`, `while 1`, `while "x"`, `while ((true))`, `repeat … until false`, `until nil` — with no yield, `break` or `return` that can run on the loop's own thread. | A loop with a real condition, one that calls `task.wait()`, waits on a signal, or can `break`. Three things do **not** count as an escape: a `task.wait()` inside a nested closure (it yields that closure), a `break` inside a nested closure (it belongs to no loop), and a `break` or `return` in the dead branch of a literal `if false`. A bare mention of `task.wait` is not a call and is not a yield. |
 | `luau/remote-no-validation` | warning | An `OnServerEvent` or `OnServerInvoke` handler that uses an argument past `player` without ever testing it, or that takes `...`. | The same handler with an `if typeof(x) ~= …` guard, an `assert`, or with no argument but `player`. |
 | `luau/deprecated-wait-spawn` | warning | A call to the global `wait`, `spawn` or `delay`. | `task.wait`, `task.spawn`, `task.delay`, a signal's `:Wait()`, and a local variable named `delay` that is merely read. |
 | `luau/analysis-incomplete` | error | The analysis stopped early: token budget exceeded, or a rule threw. Not a verdict on the script. | — |
 
-Two of these deserve their reasoning spelled out.
+Three of these deserve their reasoning spelled out.
 
 **`luau/remote-no-validation` is a use-without-test check, not a proof of correct validation.** It
 asks whether the script looked at the value at all before using it — a mention inside an
@@ -118,19 +180,37 @@ the shape that actually freezes Studio. A handler doing genuinely heavy bounded 
 TODO(M10 follow-up): a cost model that could see the second case needs call-graph knowledge this
 package does not have.
 
+**`luau/while-true-no-yield` decides one thing about reachability and refuses the rest.** Whether a
+loop can end is not decidable in general, so the rule asks two questions it can answer from tokens:
+is the condition a literal Luau never reads as false, and is there a `break` or `return` that could
+actually run. The second one has to discount a `break` inside a nested closure, which belongs to no
+loop, and a `break` in the `then` of an `if false`, which is valid Luau that never executes —
+either one, counted, reports a loop that hangs Studio for ever as one that can leave. Anything less
+obvious than a literal condition is treated as reachable, which keeps the rule quiet rather than
+guessing. A loop whose condition is held in a variable — `local always = true; while always do` —
+is not reported at all; that is the dataflow gap, not a reachability decision.
+
 ## How it reads Luau
 
 Two passes, and neither is a parser.
 
 **A tokenizer** (`src/tokenizer.ts`) that handles comments including levelled long comments, short
-strings with escapes, long strings, string interpolation, the Luau number forms (hex, binary,
-underscore separators, exponents), names, keywords, and the operator set including `//`, `::`, `->`
-and the compound assignments. This is why the rules see code as code and text as text: a comment
-that mentions `loadstring` is not a call, and a `loadstring` inside a `{…}` of a backtick string is.
+strings, long strings, string interpolation, the Luau number forms (hex, binary, underscore
+separators, exponents), names, keywords, and the operator set including `//`, `::`, `->` and the
+compound assignments. This is why the rules see code as code and text as text: a comment that
+mentions `loadstring` is not a call, and a `loadstring` inside a `{…}` of a backtick string is.
+
+Its string decoder is a security component rather than a convenience, because `Token.value` is what
+the egress rule compares against the allowed-host list. It resolves the escapes the Luau VM
+resolves — `\a \b \f \n \r \t \v \\ \" \' \z`, decimal `\ddd`, hex `\xNN`, and `\u{…}` as UTF-8 bytes —
+so `"\104ttps://evil.com"` is read as the `https://evil.com` it really is. For an escape it cannot
+resolve exactly it leaves `value` unset rather than guessing, and every rule that needs an exact
+value treats a missing one as unreadable, which is a `warning` rather than an `ok`.
 
 **A block and bracket recogniser** (`src/structure.ts`) that pairs `function`/`if`/`do`/`repeat`
-with `end`/`until`, pairs `(`, `[` and `{`, and records for every token which block, which function
-and which loop encloses it. That last part is what lets a rule say "this `break` belongs to the
+with `end`/`until`, pairs `(`, `[` and `{`, records for every token which block, which function and
+which loop encloses it, and marks the `then`/`else`/`elseif` tokens that belong to an if-*expression*
+rather than to an `if` block. That last part is what lets a rule say "this `break` belongs to the
 inner loop, not the outer one" and "this `task.wait()` yields the spawned closure, not the loop
 around it" — distinctions a flat text scan cannot make and that would otherwise turn a real freeze
 into a clean bill of health.
@@ -139,11 +219,15 @@ into a clean bill of health.
 
 Understood, and tested:
 
-- `if` **expressions**. `local x = if ready then 1 else 2` has no `end`. The recogniser tells an
-  if-expression from an if-statement by the token before it — an expression can only appear where a
-  value is expected — and the set of those tokens is written out in `src/structure.ts`. Counting
-  one as a block opener would report perfectly good Luau as unterminated, which is a `fail` on
-  correct code and the most likely way this package would be wrong in practice.
+- `if` **expressions**, including chained ones. `local x = if ready then 1 else 2` has no `end`.
+  The recogniser tells an if-expression from an if-statement by the token before it — an expression
+  can only appear where a value is expected — and the set of those tokens is written out in
+  `src/structure.ts`. `then` and `else` are not in that set, because they introduce a statement far
+  more often than a value; instead the recogniser tracks the if-expressions it has open, so the
+  second `if` in `if ready then if fast then "go" else "jog" else "wait"` is read as a value while
+  the second `if` in `if ready then if fast then go() end end` is read as a statement. Counting an
+  expression as a block opener would report perfectly good Luau as unterminated, which is a `fail`
+  on correct code and the most likely way this package would be wrong in practice.
 - String interpolation, including a table constructor nested inside the expression.
 - Type annotations, generics, `::` casts, `--!strict` and attribute-looking `@name` prefixes: these
   lex without error and are otherwise ignored.
@@ -156,13 +240,17 @@ Not understood, and stated so nobody assumes otherwise:
   `ok` on this one, and it will fail when Studio compiles it. This is the largest gap in the
   package and the honest name for it is: this analyser tells you it *could not read* a file, not
   that the file is *valid Luau*.
+- **No reachability, beyond one literal.** A `break` in the `then` of an `if false` is known to be
+  dead, and so is an arm after an `if true`; nothing subtler than a literal condition is decided,
+  and everything undecided is treated as reachable.
 - **No name resolution.** `local wait = task.wait; wait(1)` is not recognised as safe; a local
-  shadowing a parameter inside a remote handler is not tracked.
+  shadowing a parameter inside a remote handler is not tracked. The one hop described above is a
+  binding table built by two rules, not a scope chain.
 - **No cross-file view.** Each source is analysed alone. A module that returns `loadstring` and a
   caller that uses it are two clean files.
-- **HttpService is recognised by name.** The literal `HttpService`, and any variable assigned from
-  `…:GetService("HttpService")` in the same file. A service passed in as a parameter, or fetched
-  through an indirection, is missed.
+- **HttpService is recognised by name.** The literal `HttpService`, and any variable bound to
+  `…:GetService("HttpService")` in the same file. A service passed in as a parameter, or reached
+  through a table or an index, is missed — see the table above for what that costs.
 - **`goto`, and Lua 5.1 constructs Luau dropped**, are not special-cased in any way.
 
 ## Why there is no third-party parser here
@@ -190,14 +278,31 @@ and would be re-pointed rather than rewritten.
 
 ## Status
 
-M10. The rules and the analyser are built and tested, and **`packages/daemon` calls `analyse`
+M10, after three rounds of adversarial review. Round two closed the fail-open bypasses — a receiver
+or a call form a rule did not recognise used to produce no finding, so "I do not understand this"
+and "this is safe" were the same answer. Round three closed the layer under that: a rule that fired
+with the wrong severity because it could not resolve a binding, a rule silenced by a `break` the
+script never reaches, a guard range that ran past the end of its own construct, and a string
+decoder that read `"\104ttps://evil.com"` as something other than the URL it is. Both rounds are
+pinned by their own `describe` block in [`test/rules.test.ts`](test/rules.test.ts), and every fix
+in them is paired with the legitimate shape it is most easily confused with — a fix that turns a
+false negative into a false positive has moved the problem rather than solved it.
+
+The rules and the analyser are built and tested, and **`packages/daemon` calls `analyse`
 at submit time**, inside the trust boundary, over every source a ChangeSet carries — a
 `writeScript`, a `setProperty` writing `Source`, or a `createInstance` with `Source` in its
 property bag. The verdict it computes overwrites whatever `validation` the producer sent, and
 `POST /v1/changesets/:id/approve` refuses a `fail`, so a set reaching for `loadstring` cannot be
 applied at all. `packages/daemon/test/server.test.ts` pins that end to end.
 
-Two things are still open, and they are what keeps M10 marked `PART`:
+Three things are still open, and they are what keeps M10 marked `PART`:
+
+- **Its reach ends one hop from the call.** The **nothing** rows in [What it cannot
+  see](#what-it-cannot-see) are shapes no rule recognises at all, and each is a one-line rewrite of
+  code a rule does catch. Closing them means dataflow, which means a parse, which is the
+  third-party-parser decision below — a decision for a human with the release pipeline in front of
+  them. Until then this layer's honest claim is bounded by that table, and the human approval gate
+  is what the threat model actually rests on. TODO(M10 follow-up).
 
 - **`packages/core` has no adapter for this.** Its `SandboxPort` is the out-of-process seam — a
   parser run over hostile input in its own budget — and with none configured the core still

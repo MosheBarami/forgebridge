@@ -11,11 +11,12 @@
 import type { Finding } from '@forgebridge/protocol';
 import type { Token } from '../tokenizer.js';
 import {
+  bindingOf,
   findingAt,
   isName,
   isOp,
-  memberChain,
   splitArguments,
+  startOfPrefixExpression,
   type RuleContext,
 } from '../query.js';
 import type { Rule } from './index.js';
@@ -236,7 +237,9 @@ export const httpEgressUnallowlisted: Rule = {
  *
  * Without the second half the rule would miss the shape almost every real
  * script uses, and a rule that misses the common case is a rule that reports
- * `ok` on the thing it was written to catch.
+ * `ok` on the thing it was written to catch. Which name a call is bound to is
+ * `bindingOf`'s job — it reads type annotations and multi-value assignment,
+ * both of which the walk-back that used to live here got wrong.
  */
 function httpServiceBindings(context: RuleContext): Set<string> {
   const { tokens, structure } = context;
@@ -252,13 +255,12 @@ function httpServiceBindings(context: RuleContext): Set<string> {
     const argument = tokens[first.start];
     if (argument === undefined || argument.kind !== 'string' || argument.value !== 'HttpService') continue;
 
-    // Walk back over `local X =` / `X =` to the name being bound.
-    const chainStart = i - 2 - (memberChain(tokens, i - 2).length - 1) * 2;
-    const equals = chainStart - 1;
-    if (!isOp(tokens, equals, '=')) continue;
-    const bound = tokens[equals - 1];
-    if (bound === undefined || bound.kind !== 'name') continue;
-    names.add(bound.text);
+    // The value is the whole call, from the start of the receiver chain to the
+    // `)` that closes the argument list.
+    const close = structure.bracket.get(i + 1);
+    if (close === undefined) continue;
+    const binding = bindingOf(context, startOfPrefixExpression(context, i - 2), close);
+    if (binding !== null) names.add(binding.name);
   }
 
   return names;

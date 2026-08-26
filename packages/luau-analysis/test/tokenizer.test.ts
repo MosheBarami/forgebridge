@@ -52,6 +52,49 @@ describe('tokenize', () => {
     expect(kinds('local a = 0xFF + 0b1010 + 1_000 + 1.5e-3 + .5')).toContain('number:1.5e-3');
   });
 
+  it('decodes the escapes the Luau VM would, because a rule compares that value', () => {
+    // `Token.value` is what the HTTP egress rule matches against the allowed-host
+    // list, so this decoder is a security component: `"\\104ttps://evil.com"` has
+    // real value `https://evil.com`, and the version that dropped the backslash
+    // and kept the `1` read it as `104ttps://evil.com` — not an absolute URL, so
+    // never checked against anything.
+    const value = (source: string): string | undefined =>
+      tokenize(source).tokens.find((token) => token.kind === 'string')?.value;
+    expect(value('local u = "\\104ttps://evil.com"')).toBe('https://evil.com');
+    expect(value('local u = "\\x68ttps://evil.com"')).toBe('https://evil.com');
+    expect(value('local s = "\\u{48}i"')).toBe('Hi');
+    expect(value('local s = "tab\\9end"')).toBe('tab\tend');
+    expect(value('local s = "\\a\\b\\f\\v"')).toBe('\u0007\b\f\u000b');
+  });
+
+  it('leaves the value unset rather than inventing text for an escape it cannot resolve', () => {
+    // The control on the decoder, and the fail-closed half of it. None of these
+    // is Luau, and a caller that needs the exact string must be told it cannot
+    // have one — a guess here is a host compared against the wrong allowlist.
+    const value = (source: string): string | undefined =>
+      tokenize(source).tokens.find((token) => token.kind === 'string')?.value;
+    expect(value('local s = "\\q"')).toBeUndefined();
+    expect(value('local s = "\\xZZ"')).toBeUndefined();
+    expect(value('local s = "\\300"')).toBeUndefined();
+    expect(value('local s = "\\u{110000}"')).toBeUndefined();
+    // And an ordinary literal still carries its value.
+    expect(value('local s = "https://api.example.com/v1"')).toBe('https://api.example.com/v1');
+  });
+
+  it('lets `\\z` skip the whitespace after it, line breaks included', () => {
+    // A wrapped URL. The scanner rejected the newline before it read the `\\z`
+    // that legalises it, so a source Luau accepts was reported as a syntax error.
+    const result = tokenize('local url = "https://api.example.com/\\z\n            v1/items"\n');
+    expect(result.error).toBeUndefined();
+    expect(result.tokens.find((token) => token.kind === 'string')?.value).toBe('https://api.example.com/v1/items');
+  });
+
+  it('still refuses a bare newline inside a quoted string', () => {
+    // The control for `\\z`: without one, a newline inside quotes is the
+    // unterminated-string case this lexer must keep catching.
+    expect(tokenize('local s = "oops\nmore"\n').error?.message).toContain('unterminated string');
+  });
+
   it('reports an unterminated string with its position rather than guessing', () => {
     const result = tokenize('local a = 1\nlocal b = "oops\n');
     expect(result.error?.message).toContain('unterminated string');

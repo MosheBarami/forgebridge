@@ -19,9 +19,12 @@ export interface Token {
   /** Source text of the token. For a string literal, the raw text with delimiters. */
   text: string;
   /**
-   * Decoded contents of a string literal. Present only on `string` tokens, and
-   * only for the escapes listed in `decodeShortString` — a rule that needs an
-   * exact value (the HTTP egress rule reading a URL) must tolerate `undefined`.
+   * Decoded contents of a string literal — the text the Luau VM would build,
+   * with every escape `decodeShortString` resolves already applied. Present
+   * only on `string` tokens, and absent when the literal contains an escape
+   * that cannot be resolved exactly, so a rule that needs an exact value (the
+   * HTTP egress rule reading a URL) must tolerate `undefined` and treat it as
+   * "unreadable" rather than as "empty".
    */
   value?: string;
   /** 1-based, to match `Finding.line`. */
@@ -76,31 +79,129 @@ function isNamePart(ch: string): boolean {
   return isNameStart(ch) || isDigit(ch);
 }
 
+/** Whitespace `\z` skips, which includes line breaks — see `decodeShortString`. */
+function isSpace(ch: string | undefined): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v';
+}
+
+/** The UTF-8 bytes of a code point, one character per byte, matching how Lua stores `\u{…}`. */
+function utf8Bytes(code: number): string {
+  if (code < 0x80) return String.fromCharCode(code);
+  if (code < 0x800) {
+    return String.fromCharCode(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+  }
+  if (code < 0x10000) {
+    return String.fromCharCode(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+  }
+  return String.fromCharCode(
+    0xf0 | (code >> 18),
+    0x80 | ((code >> 12) & 0x3f),
+    0x80 | ((code >> 6) & 0x3f),
+    0x80 | (code & 0x3f),
+  );
+}
+
+/** Single-character escapes, mapped to the byte Luau produces for each. */
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  a: '\u0007', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\u000b',
+  // Self-escapes. The last three are the ones an interpolated string needs.
+  '\\': '\\', '"': '"', "'": "'", '`': '`', '{': '{', '}': '}',
+};
+
 /**
- * Resolves the escapes whose meaning a rule could plausibly depend on. Anything
- * else is left as written rather than guessed at: a URL rule that silently
- * mis-decodes `\u{...}` would compare the wrong host against the allowlist.
+ * Resolves a short string's escapes to the text the Luau VM would build.
+ *
+ * This decoder is a security component, not a convenience. `Token.value` is
+ * what the egress rule compares against the allowed-host list, so a decoder
+ * that guesses compares the wrong host. `H:GetAsync("\104ttps://evil.com")`
+ * really reaches `https://evil.com`; the version of this function that dropped
+ * the backslash and kept the escape's first character read it as
+ * `104ttps://evil.com`, which is not an absolute URL, so the rule reported that
+ * it could not read the destination instead of that the destination was evil.com.
+ *
+ * Returns undefined for an escape it cannot resolve exactly — a `\x` without two
+ * hex digits, a `\ddd` past 255, a `\u{…}` past the Unicode range, an escape
+ * letter Luau does not define. Every caller that needs an exact value already
+ * treats a missing one as "unreadable", which is the fail-closed answer.
+ * Inventing text here would be the fail-open one, and such a source does not
+ * compile in Studio anyway.
  */
-function decodeShortString(raw: string): string {
+function decodeShortString(raw: string): string | undefined {
   let out = '';
   for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
+    const ch = raw[i] as string;
     if (ch !== '\\') {
       out += ch;
       continue;
     }
+
     const next = raw[i + 1];
-    i += 1;
-    switch (next) {
-      case 'n': out += '\n'; break;
-      case 't': out += '\t'; break;
-      case 'r': out += '\r'; break;
-      case '\\': out += '\\'; break;
-      case '"': out += '"'; break;
-      case "'": out += "'"; break;
-      case '\n': out += '\n'; break;
-      default: out += next ?? '';
+    if (next === undefined) return undefined;
+
+    const simple = SIMPLE_ESCAPES[next];
+    if (simple !== undefined) {
+      out += simple;
+      i += 1;
+      continue;
     }
+
+    // A backslash before a real line break is a line continuation, and the
+    // value carries the newline. `\r\n` is one break, not two.
+    if (next === '\n' || next === '\r') {
+      out += '\n';
+      i += 1;
+      if (next === '\r' && raw[i + 1] === '\n') i += 1;
+      continue;
+    }
+
+    // `\z` eats the whitespace that follows, line breaks included. It is how a
+    // long URL is wrapped across source lines without entering the string.
+    if (next === 'z') {
+      i += 1;
+      while (isSpace(raw[i + 1])) i += 1;
+      continue;
+    }
+
+    // `\xNN` — exactly two hex digits, no more and no fewer.
+    if (next === 'x') {
+      const digits = raw.slice(i + 2, i + 4);
+      if (digits.length !== 2 || !/^[0-9a-fA-F]{2}$/.test(digits)) return undefined;
+      out += String.fromCharCode(parseInt(digits, 16));
+      i += 3;
+      continue;
+    }
+
+    // `\u{XXX}` — hex, braced, anywhere in the Unicode range.
+    if (next === 'u') {
+      if (raw[i + 2] !== '{') return undefined;
+      const close = raw.indexOf('}', i + 3);
+      if (close === -1) return undefined;
+      const digits = raw.slice(i + 3, close);
+      if (digits.length === 0 || !/^[0-9a-fA-F]+$/.test(digits)) return undefined;
+      const code = parseInt(digits, 16);
+      if (code > 0x10ffff) return undefined;
+      out += utf8Bytes(code);
+      i = close;
+      continue;
+    }
+
+    // `\ddd` — one to three decimal digits, naming a byte.
+    if (next >= '0' && next <= '9') {
+      let digits = '';
+      while (digits.length < 3) {
+        const digit = raw[i + 1 + digits.length];
+        if (digit === undefined || !isDigit(digit)) break;
+        digits += digit;
+      }
+      const code = Number(digits);
+      if (code > 255) return undefined;
+      out += String.fromCharCode(code);
+      i += digits.length;
+      continue;
+    }
+
+    // Anything else is not an escape Luau defines.
+    return undefined;
   }
   return out;
 }
@@ -222,6 +323,15 @@ export function tokenize(source: string): TokenizeResult {
         if (p >= length) return fail('unterminated string', start);
         const c = source[p];
         if (c === '\\') {
+          // `\z` skips the whitespace after it, and that whitespace may include
+          // line breaks: a wrapped URL is written `"https://host/\z\n  path"`.
+          // Scanning it as a one-character escape left the scanner on the
+          // newline and rejected a string Luau accepts.
+          if (source[p + 1] === 'z') {
+            p += 2;
+            while (p < length && isSpace(source[p])) p += 1;
+            continue;
+          }
           // A backslash-newline is a line continuation; any other escape is one
           // character wide as far as finding the closing quote is concerned.
           p += 2;

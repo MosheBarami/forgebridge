@@ -49,16 +49,65 @@ export function isMemberAccess(tokens: readonly Token[], index: number): boolean
   return isOp(tokens, index - 1, '.') || isOp(tokens, index - 1, ':');
 }
 
+/** Tokens that may appear between the names of a declaration list: the separators and the type annotations. */
+const DECLARATION_LIST_OPS: ReadonlySet<string> = new Set([',', ':', '.', '?', '|', '&', '->', '::', '<', '>']);
+
+/**
+ * True when the name at `index` is one a `local` statement or a parameter list
+ * is *introducing*, at any position in the list.
+ *
+ * Checking only the token immediately before — `local` or `function` — saw the
+ * first name and no other, so `local ok, loadstring = pcall(f)` and
+ * `function handler(player, spawn)` reported a declaration as a use of the
+ * global. A rule that fires on the line that shadows the global is a rule
+ * people learn to click past.
+ */
+export function isDeclaredName(tokens: readonly Token[], index: number): boolean {
+  if (isKeyword(tokens, index - 1, 'local') || isKeyword(tokens, index - 1, 'function')) return true;
+
+  let i = index - 1;
+  while (i >= 0) {
+    const token = tokens[i];
+    if (token === undefined) return false;
+
+    if (isKeyword(tokens, i, 'local')) return true;
+
+    // A parameter list: `function f(a, spawn)`, `local function f(a, spawn)`,
+    // `function(a, spawn)`. The `(` is this list's only left edge.
+    if (isOp(tokens, i, '(')) {
+      let j = i - 1;
+      while (j >= 0) {
+        const before = tokens[j];
+        if (before === undefined) break;
+        if (before.kind === 'name' || (before.kind === 'op' && DECLARATION_LIST_OPS.has(before.text))) {
+          j -= 1;
+          continue;
+        }
+        break;
+      }
+      return isKeyword(tokens, j, 'function');
+    }
+
+    if (token.kind === 'name' || (token.kind === 'op' && DECLARATION_LIST_OPS.has(token.text))) {
+      i -= 1;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 /**
  * True when `tokens[index]` is a free reference to the global `name` — not a
- * member, not the name being declared, and not a table key being defined.
+ * member, not a name being declared, and not a table key being defined.
  */
 export function isGlobalReference(tokens: readonly Token[], index: number, name: string): boolean {
   const token = tokens[index];
   if (token === undefined || token.kind !== 'name' || token.text !== name) return false;
   if (isMemberAccess(tokens, index)) return false;
-  // `local wait = …` and `function wait() … end` introduce a different binding.
-  if (isKeyword(tokens, index - 1, 'local') || isKeyword(tokens, index - 1, 'function')) return false;
+  // `local wait = …`, `local ok, wait = …` and `function wait() … end` all
+  // introduce a different binding.
+  if (isDeclaredName(tokens, index)) return false;
   // `{ loadstring = 1 }` and `t.loadstring = 1` define a key, they do not call one.
   if (isOp(tokens, index + 1, '=')) return false;
   return true;
@@ -67,6 +116,16 @@ export function isGlobalReference(tokens: readonly Token[], index: number, name:
 /** Index of the `(` opening this name's call argument list, or null when it is not called directly. */
 export function callParen(tokens: readonly Token[], index: number): number | null {
   return isOp(tokens, index + 1, '(') ? index + 1 : null;
+}
+
+/**
+ * True when the name at `index` is being called. Luau spells a single-argument
+ * call three ways — `f(x)`, `f"str"` and `f{tbl}` — and all three are calls.
+ */
+export function isCalled(tokens: readonly Token[], index: number): boolean {
+  if (isOp(tokens, index + 1, '(') || isOp(tokens, index + 1, '{')) return true;
+  const next = tokens[index + 1];
+  return next !== undefined && next.kind === 'string';
 }
 
 /**
@@ -130,6 +189,10 @@ export function memberChain(tokens: readonly Token[], index: number): string[] {
 export function isYieldCall(tokens: readonly Token[], index: number): boolean {
   const token = tokens[index];
   if (token === undefined || token.kind !== 'name') return false;
+  // A mention is not a yield. `local resume = task.wait` inside a spin loop
+  // names the function and never calls it, and reading that as a yield reports
+  // a loop that hangs Studio as safe.
+  if (!isCalled(tokens, index)) return false;
   if (token.text === 'wait') {
     if (isMemberAccess(tokens, index)) return isName(tokens, index - 2, 'task');
     return true;
@@ -219,28 +282,322 @@ export function parameterList(context: RuleContext, functionIndex: number): Para
   return { parameters, vararg, varargIndex, bodyStart: (structure.bracket.get(paren) ?? paren) + 1 };
 }
 
+const PREFIX_OPERATOR_OPS: ReadonlySet<string> = new Set(['-', '#']);
+const BINARY_OPERATOR_OPS: ReadonlySet<string> = new Set([
+  '+', '-', '*', '/', '//', '%', '^', '..', '==', '~=', '<', '>', '<=', '>=', '::',
+]);
+const LITERAL_KEYWORDS: ReadonlySet<string> = new Set(['nil', 'true', 'false']);
+
+/** True when the token at `index` is a unary operator: the `-` of `-x`, the `#` of `#t`, `not`. */
+function isPrefixOperator(tokens: readonly Token[], index: number): boolean {
+  const token = tokens[index];
+  if (token === undefined) return false;
+  if (token.kind === 'op') return PREFIX_OPERATOR_OPS.has(token.text);
+  return token.kind === 'keyword' && token.text === 'not';
+}
+
+/** True when the token at `index` is a binary operator, `and` and `or` included. */
+function isBinaryOperator(tokens: readonly Token[], index: number): boolean {
+  const token = tokens[index];
+  if (token === undefined) return false;
+  if (token.kind === 'op') return BINARY_OPERATOR_OPS.has(token.text);
+  return token.kind === 'keyword' && (token.text === 'and' || token.text === 'or');
+}
+
+/** True when the token at `index` closes an operand — a value sits immediately to its left. */
+function endsOperand(tokens: readonly Token[], index: number): boolean {
+  const token = tokens[index];
+  if (token === undefined) return false;
+  if (token.kind === 'name' || token.kind === 'string' || token.kind === 'number') return true;
+  if (token.kind === 'keyword') return LITERAL_KEYWORDS.has(token.text) || token.text === 'end';
+  return token.kind === 'op' && (token.text === ')' || token.text === ']' || token.text === '}' || token.text === '...');
+}
+
+/** True when the token at `index` opens an operand — a value starts here. */
+function startsOperand(tokens: readonly Token[], index: number): boolean {
+  const token = tokens[index];
+  if (token === undefined) return false;
+  if (token.kind === 'name' || token.kind === 'string' || token.kind === 'number') return true;
+  if (token.kind === 'keyword') return LITERAL_KEYWORDS.has(token.text) || token.text === 'function';
+  return token.kind === 'op' && (token.text === '(' || token.text === '{' || token.text === '...');
+}
+
 /**
- * End of the expression starting at `from`, scanning over bracketed groups and
- * stopping at the first token that can only begin a new statement. An
- * approximation, used where a rule needs a rough span rather than a parse.
+ * End of the expression starting at `from`, exclusive.
+ *
+ * This walks the expression rather than sweeping to the next stop keyword,
+ * because a sweep does not know where a construct ends. The `until` of a
+ * `repeat` is followed by its condition and then by the next statement, with no
+ * terminator between them, so the old sweep read
+ *
+ *   repeat step() until done
+ *   use(amount)
+ *
+ * as one range covering `use(amount)` — and `remote-validation`, which treats an
+ * `until` condition as a place a value is *tested*, counted `amount` as checked
+ * when nothing had checked it. Two operands cannot sit side by side inside one
+ * expression, so `done` followed by `use` is where this stops.
+ *
+ * Still not a parser: anything it does not recognise ends the expression, which
+ * makes the range shorter. For every caller a shorter guard range means fewer
+ * things treated as validated, which is the direction a security rule should
+ * round in.
  */
 export function endOfExpression(context: RuleContext, from: number): number {
   const { tokens, structure } = context;
-  const STOP = new Set(['end', 'until', 'else', 'elseif', 'then', 'do', 'local', 'return', 'while', 'repeat', 'for', 'if']);
   let i = from;
+  let wantOperand = true;
+
   while (i < tokens.length) {
     const token = tokens[i];
     if (token === undefined || token.kind === 'eof') break;
+    const jump = structure.bracket.get(i);
+    const opensGroup = jump !== undefined && jump > i;
+
+    if (wantOperand) {
+      // A prefix operator does not satisfy the operand; the next token still must.
+      if (isPrefixOperator(tokens, i)) { i += 1; continue; }
+      if (opensGroup) { i = (jump as number) + 1; wantOperand = false; continue; }
+      if (isKeyword(tokens, i, 'function')) {
+        const block = blockAt(structure, i);
+        if (block === null || block.open !== i || block.close < 0) break;
+        i = block.close + 1;
+        wantOperand = false;
+        continue;
+      }
+      if (!startsOperand(tokens, i)) break;
+      i += 1;
+      wantOperand = false;
+      continue;
+    }
+
+    // An operand is in hand: only a suffix or a binary operator continues it.
+    if (opensGroup) { i = (jump as number) + 1; continue; }   // `f(x)`, `t[k]`, `f{…}`
+    if (token.kind === 'string') { i += 1; continue; }        // `f"str"`
+    if (token.kind === 'op' && (token.text === '.' || token.text === ':')) { i += 1; wantOperand = true; continue; }
+    if (isBinaryOperator(tokens, i)) { i += 1; wantOperand = true; continue; }
+    break;
+  }
+  return i;
+}
+
+/**
+ * First token of the prefix expression that ends at `index`: the `game` of
+ * `game:GetService(…)`, the `Remotes` of `Remotes.Buy.OnServerEvent`, the `(`
+ * of `(handle).Value`.
+ */
+export function startOfPrefixExpression(context: RuleContext, index: number): number {
+  const { tokens, structure } = context;
+  let i = index;
+  for (;;) {
+    if (i <= 0) return Math.max(i, 0);
+    const opener = structure.bracket.get(i);
+    if (opener !== undefined && opener < i) {
+      // A group is a call or index *suffix* when a value sits before it, and
+      // the start of the expression when nothing does.
+      if (!endsOperand(tokens, opener - 1)) return opener;
+      i = opener - 1;
+      continue;
+    }
+    const token = tokens[i];
+    if (token === undefined) return i;
+    if ((token.kind === 'name' || token.kind === 'string') && isMemberAccess(tokens, i)) {
+      i -= 2;
+      continue;
+    }
+    return i;
+  }
+}
+
+/** First token of the complete value expression that ends at `end`, operators and all. */
+function startOfValue(context: RuleContext, end: number): number {
+  const { tokens, structure } = context;
+  let start = end + 1;
+  let i = end;
+
+  for (;;) {
+    if (i < 0) break;
+    const token = tokens[i];
+    if (token === undefined) break;
+
+    // One operand, right to left.
+    if (isKeyword(tokens, i, 'end')) {
+      const block = blockAt(structure, i);
+      if (block === null || block.close !== i) break;
+      start = block.open;
+      i = block.open - 1;
+    } else if (endsOperand(tokens, i)) {
+      start = startOfPrefixExpression(context, i);
+      i = start - 1;
+    } else {
+      break;
+    }
+
+    // Prefix operators belong to the operand just read.
+    while (i >= 0 && isPrefixOperator(tokens, i)) {
+      start = i;
+      i -= 1;
+    }
+
+    // A binary operator means another operand precedes it.
+    if (!isBinaryOperator(tokens, i)) break;
+    i -= 1;
+  }
+
+  return start;
+}
+
+/** Tokens that may sit inside an assignment's target list: the names, the separators, and the type annotations. */
+const TARGET_LIST_OPS: ReadonlySet<string> = new Set([',', ':', '.', '?', '|', '&', '->', '::', '<', '>']);
+
+/**
+ * First token of the target list of the assignment whose `=` is at `equals`.
+ *
+ * Walks back over `local H: HttpService`, `a, b`, `Services.Http`. It stops at
+ * a statement boundary, which in Luau is where two operands would otherwise sit
+ * side by side: in
+ *
+ *   print(1)
+ *   Services.Http = game:GetService("HttpService")
+ *
+ * the `)` ends an operand and `Services` starts one, and nothing joins them.
+ */
+function startOfTargetList(context: RuleContext, equals: number): number {
+  const { tokens, structure } = context;
+  let start = equals;
+  for (;;) {
+    const i = start - 1;
+    if (i < 0) break;
+    const token = tokens[i];
+    if (token === undefined) break;
+
+    const opener = structure.bracket.get(i);
+    const acceptable =
+      (opener !== undefined && opener < i) ||
+      token.kind === 'name' ||
+      token.kind === 'string' ||
+      token.kind === 'number' ||
+      (token.kind === 'keyword' && LITERAL_KEYWORDS.has(token.text)) ||
+      (token.kind === 'op' && TARGET_LIST_OPS.has(token.text));
+    if (!acceptable) break;
+    if (endsOperand(tokens, i) && startsOperand(tokens, start)) break;
+
+    start = opener !== undefined && opener < i ? opener : i;
+  }
+  return start;
+}
+
+/**
+ * The plain name a target names — `H` in `local H: HttpService`, `Http` in
+ * `Services.Http` — or null for a target this analyser cannot follow, such as
+ * `t[key]`.
+ */
+function targetName(context: RuleContext, start: number, end: number): { name: string; index: number } | null {
+  const { tokens } = context;
+  const first = tokens[start];
+  if (first === undefined || first.kind !== 'name') return null;
+
+  let last = start;
+  let i = start + 1;
+  while (i < end) {
+    if (!isOp(tokens, i, '.')) break;   // `:` starts a type annotation; anything else ends the target
+    const field = tokens[i + 1];
+    if (field === undefined || field.kind !== 'name') return null;
+    last = i + 1;
+    i += 2;
+  }
+  const token = tokens[last];
+  return token === undefined ? null : { name: token.text, index: last };
+}
+
+/**
+ * True when the token at `index` carries the expression before it further —
+ * a suffix, or a binary operator.
+ */
+function continuesValue(context: RuleContext, index: number): boolean {
+  const { tokens, structure } = context;
+  const token = tokens[index];
+  if (token === undefined) return false;
+  const jump = structure.bracket.get(index);
+  if (jump !== undefined && jump > index) return true;
+  if (token.kind === 'string') return true;
+  if (isBinaryOperator(tokens, index)) return true;
+  return token.kind === 'op' && (token.text === '.' || token.text === ':');
+}
+
+export interface Binding {
+  /** The plain name the value is bound to. */
+  name: string;
+  /** Token index of that name, for positioning a finding. */
+  index: number;
+}
+
+/**
+ * The name bound to the value expression spanning `[start, end]`, or null when
+ * it is not the whole right-hand side of one slot of an assignment.
+ *
+ * The version this replaces assumed the token before the `=` was the bound
+ * name, which is wrong in both of the shapes real code uses:
+ *
+ *   local H: HttpService = game:GetService("HttpService")   -- bound the TYPE name
+ *   local a, H = 1, game:GetService("HttpService")          -- found a comma
+ *
+ * so `H` was not in the service-name set, and every `H:GetAsync(url)` after it
+ * fell through to the unresolved-receiver branch — a warning, where an error
+ * naming the host belongs. The binding set is read by more than one rule, so a
+ * miss here is a miss everywhere it is used.
+ */
+export function bindingOf(context: RuleContext, start: number, end: number): Binding | null {
+  const { tokens } = context;
+
+  // The value must end where the caller says it does. In
+  // `local x = game:GetService("HttpService").Parent` what is bound is the
+  // parent, not the service.
+  if (continuesValue(context, end + 1)) return null;
+
+  // Walk back to the `=`, counting the values in front of this one. The token
+  // before a value in an assignment is the `=` itself or the comma after the
+  // previous value; anything else means this expression is not a right-hand
+  // side at all, and walking on would find the `=` of the statement before it.
+  let i = start - 1;
+  let slot = 0;
+  let equals = -1;
+  for (;;) {
+    if (isOp(tokens, i, '=')) { equals = i; break; }
+    if (!isOp(tokens, i, ',')) return null;
+    slot += 1;
+    const previous = startOfValue(context, i - 1);
+    if (previous > i - 1) return null;   // nothing readable before the comma
+    i = previous - 1;
+  }
+
+  const listStart = startOfTargetList(context, equals);
+  const targets = splitTargets(context, listStart, equals);
+  const target = targets[slot];
+  if (target === undefined) return null;
+  return targetName(context, target.start, target.end);
+}
+
+/** Splits `[start, end)` into one range per depth-zero comma-separated target. */
+function splitTargets(context: RuleContext, start: number, end: number): { start: number; end: number }[] {
+  const { tokens, structure } = context;
+  const parts: { start: number; end: number }[] = [];
+  let from = start;
+  let i = start;
+  while (i < end) {
     const jump = structure.bracket.get(i);
     if (jump !== undefined && jump > i) {
       i = jump + 1;
       continue;
     }
-    if (token.kind === 'keyword' && STOP.has(token.text)) break;
-    if (token.kind === 'op' && token.text === ';') break;
+    if (isOp(tokens, i, ',')) {
+      parts.push({ start: from, end: i });
+      from = i + 1;
+    }
     i += 1;
   }
-  return i;
+  if (from < end) parts.push({ start: from, end });
+  return parts;
 }
 
 /** Index of the first `keyword` token at bracket depth zero after `from`, or -1. */

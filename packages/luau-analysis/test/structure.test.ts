@@ -56,6 +56,43 @@ describe('analyseStructure', () => {
     }
   });
 
+  it('reads a chained if-expression, where the second `if` follows `then` or `else`', () => {
+    // Regression: `then` and `else` were read as statement positions without
+    // exception, so the second `if` in each of these opened a block that needed
+    // an `end` it never gets — a `fail` on correct Luau, which is the most
+    // expensive way this package can be wrong.
+    const sources = [
+      'local label = if ready then "go" else if fast then "run" else "wait"\nprint(label)\n',
+      'local label = if ready then if fast then "go" else "jog" else "wait"\nprint(label)\n',
+      'local n = if a then 1 elseif b then 2 else if c then 3 else 4\nprint(n)\n',
+    ];
+    for (const source of sources) {
+      const { structure } = structureOf(source);
+      expect(structure.error, source).toBeUndefined();
+      expect(structure.blocks, source).toHaveLength(0);
+    }
+  });
+
+  it('still reads an `if` statement written directly after `then` or `else`', () => {
+    // The control, and the shape that made the naive fix unavailable: `then`
+    // and `else` introduce a statement far more often than they introduce a
+    // value, and reading these as expressions would unbalance every block above.
+    const source = 'if ready then\n  if fast then go() end\nelse\n  if slow then hold() end\nend\n';
+    const { structure } = structureOf(source);
+    expect(structure.error).toBeUndefined();
+    expect(structure.blocks.map((block) => block.kind)).toEqual(['if', 'if', 'if']);
+  });
+
+  it('does not let an if-expression inside a branch claim the branch keywords around it', () => {
+    const source = 'if ready then\n  local x = if fast then 1 else 2\n  print(x)\nelse\n  print(0)\nend\n';
+    const { structure } = structureOf(source);
+    expect(structure.error).toBeUndefined();
+    expect(structure.blocks.map((block) => block.kind)).toEqual(['if']);
+    // And the if-expression's own `then`/`else` are marked as such, so a rule
+    // splitting the `if` block into arms does not read them as another arm.
+    expect(structure.expressionBranches.size).toBe(2);
+  });
+
   it('refuses an unbalanced block instead of guessing where it ends', () => {
     expect(structureOf('if a then\n  print(1)\n').structure.error?.message).toContain('never closed');
     expect(structureOf('print(1)\nend\n').structure.error?.message).toContain('unexpected "end"');

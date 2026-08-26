@@ -40,6 +40,13 @@ export interface Structure {
   bracket: Map<number, number>;
   /** Token index -> innermost enclosing block index, or -1. */
   innermost: Int32Array;
+  /**
+   * Indices of `then`, `elseif` and `else` tokens belonging to an if-*expression*
+   * rather than to an `if` block. A rule splitting an `if` block into its
+   * branches must skip these, or an if-expression written inside one branch
+   * reads as the start of another.
+   */
+  expressionBranches: ReadonlySet<number>;
   error?: StructureError;
 }
 
@@ -77,12 +84,42 @@ const EXPRESSION_POSITION_KEYWORDS: ReadonlySet<string> = new Set([
   'return', 'and', 'or', 'not', 'in',
 ]);
 
+/**
+ * `then`, `else` and `elseif` are deliberately not in that set either, and for
+ * a different reason from the type suffixes: each of them introduces a
+ * *statement* in an ordinary `if`, and an `if` right after one is the commonest
+ * shape in Roblox code —
+ *
+ *   if ready then if fast then go() end end
+ *
+ * — while the same three keywords introduce an *expression* when the construct
+ * they belong to is itself an if-expression:
+ *
+ *   local label = if ready then if fast then "go" else "wait" else "off"
+ *
+ * Which one it is cannot be read off the previous token, so it is not a
+ * question `isIfExpression` can answer. `analyseStructure` tracks the
+ * if-expressions it has open as it scans and marks their branch keywords; the
+ * `if` case consults those marks alongside this function. Before that tracking
+ * existed the second `if` above opened a block, and a perfectly good line was
+ * reported as an unterminated block — a `fail` on correct code, which is the
+ * most expensive way this package can be wrong.
+ */
+
 export function isIfExpression(tokens: readonly Token[], index: number): boolean {
   const previous = tokens[index - 1];
   if (previous === undefined) return false;
   if (previous.kind === 'op') return EXPRESSION_POSITION_OPS.has(previous.text);
   if (previous.kind === 'keyword') return EXPRESSION_POSITION_KEYWORDS.has(previous.text);
   return false;
+}
+
+interface OpenIfExpression {
+  /** Which branch keyword this if-expression is waiting for next. */
+  wants: 'then' | 'else';
+  /** Block and bracket depth at the `if`, so a nested construct's branches are not read as this one's. */
+  blockDepth: number;
+  bracketDepth: number;
 }
 
 export function analyseStructure(tokens: readonly Token[]): Structure {
@@ -95,6 +132,10 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
   const bracketStack: { index: number; expected: string }[] = [];
   /** Index of the most recent `while`/`for` whose `do` has not been seen yet. */
   let pendingLoop: number | null = null;
+  /** If-expressions whose `else` has not been reached, innermost last. */
+  const ifExpressions: OpenIfExpression[] = [];
+  /** Indices of `then`/`else`/`elseif` tokens that belong to an if-expression rather than to an `if` block. */
+  const expressionBranch = new Set<number>();
 
   const top = (): number => (blockStack.length === 0 ? -1 : (blockStack[blockStack.length - 1] as number));
 
@@ -110,12 +151,22 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
     blocks,
     bracket,
     innermost,
+    expressionBranches: expressionBranch,
     error: { message, line: token?.line ?? 1, column: token?.column ?? 1 },
   });
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i] as Token;
     innermost[i] = top();
+
+    // An if-expression cannot outlive the block or the bracket group it opened
+    // in. Dropping it here keeps a stale entry from claiming the `else` of some
+    // later construct as its own.
+    while (ifExpressions.length > 0) {
+      const pending = ifExpressions[ifExpressions.length - 1] as OpenIfExpression;
+      if (pending.blockDepth <= blockStack.length && pending.bracketDepth <= bracketStack.length) break;
+      ifExpressions.pop();
+    }
 
     if (token.kind === 'op') {
       const closer = OPENING_BRACKETS[token.text];
@@ -150,9 +201,41 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
 
       case 'if':
         // An `if` expression has no `end`; treating it as a block opener would
-        // unbalance every block above it and report good code as broken.
-        if (!isIfExpression(tokens, i)) open('if', i);
+        // unbalance every block above it and report good code as broken. It is
+        // one either because the token before it demands a value, or because it
+        // sits in the branch of an if-expression already open.
+        if (isIfExpression(tokens, i) || expressionBranch.has(i - 1)) {
+          ifExpressions.push({
+            wants: 'then',
+            blockDepth: blockStack.length,
+            bracketDepth: bracketStack.length,
+          });
+        } else {
+          open('if', i);
+        }
         break;
+
+      case 'then':
+      case 'elseif':
+      case 'else': {
+        // A branch keyword belongs to the innermost if-expression only when it
+        // is the one that expression is waiting for, at the depth it opened at.
+        // Anything else is an `if` block's own branch and is left alone.
+        const pending = ifExpressions[ifExpressions.length - 1];
+        const wanted = token.text === 'then' ? 'then' : 'else';
+        if (
+          pending !== undefined &&
+          pending.wants === wanted &&
+          pending.blockDepth === blockStack.length &&
+          pending.bracketDepth === bracketStack.length
+        ) {
+          expressionBranch.add(i);
+          if (token.text === 'then') pending.wants = 'else';
+          else if (token.text === 'elseif') pending.wants = 'then';
+          else ifExpressions.pop();
+        }
+        break;
+      }
 
       case 'function':
         open('function', i);
@@ -207,7 +290,7 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
     innermost[block.close] = block.self;
   }
 
-  return { blocks, bracket, innermost };
+  return { blocks, bracket, innermost, expressionBranches: expressionBranch };
 }
 
 /** The innermost block containing `index`, or null at the top level. */
