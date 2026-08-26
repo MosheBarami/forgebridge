@@ -1,11 +1,14 @@
 # Contributor Covenant Code of Conduct
 
-> **TODO(M03) — the maintainer must fill this in before the repository goes public.**
-> Every "reporting" instruction below points at `<CONDUCT-CONTACT>`. Replace that placeholder
-> with a real, monitored address that a reporter can reach privately — ideally one that is not
-> the public issue tracker and not a personal inbox that only works while one person is
-> available. A code of conduct with no working contact address is a document, not a process.
-> This file deliberately contains no invented address.
+> **Reporting goes to a personal inbox, and you should know that before you write.**
+> ForgeBridge is maintained by one person, so conduct reports reach
+> `moshe.barami111@gmail.com` — a real address that is read, but not a staffed alias with
+> cover when that person is away. Stated plainly rather than hidden behind a role address
+> that would imply a team. When the project has more than one maintainer this becomes a
+> shared alias, tracked as **TODO(M50)**.
+>
+> Security vulnerabilities do **not** go here — see [SECURITY.md](SECURITY.md), which uses
+> GitHub's private advisories.
 
 ## Our Pledge
 
@@ -58,7 +61,7 @@ account, or acting as an appointed representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the
-community leaders responsible for enforcement at `<CONDUCT-CONTACT>`.
+community leaders responsible for enforcement at `moshe.barami111@gmail.com`.
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any

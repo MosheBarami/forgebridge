@@ -5,30 +5,28 @@ for every model call; the Studio plugin executes inside a Roblox Studio session,
 user's account, against months of their work. We take reports about those two seriously and
 we would rather hear about a problem early and awkwardly than late and publicly.
 
-> **TODO(M03) — the maintainer must fill this in before the repository goes public.**
-> Replace `<SECURITY-CONTACT>` below with a real, monitored address. It must be different from
-> the public issue tracker and it must be one somebody actually reads. Also enable **private
-> vulnerability reporting** on the repository (Settings → Code security → Private vulnerability
-> reporting) so reporters have a channel that does not depend on email at all. And confirm the
-> response times in "What happens next" are ones a solo maintainer can genuinely hold — a
-> missed security SLA damages trust more than a modest one.
-> This file deliberately contains no invented address.
+ForgeBridge is maintained by one person. The response times below are set to what a solo
+maintainer can genuinely hold, not to what sounds impressive — a missed security SLA costs more
+trust than a modest one kept.
 
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security problem.** Use either:
 
-1. **GitHub private vulnerability reporting** — on this repository, *Security → Report a
-   vulnerability*. This is preferred: it is private, it threads, and it produces a CVE-ready
-   advisory at the end.
-2. **Email `<SECURITY-CONTACT>`.**
+1. **GitHub private vulnerability reporting** — on this repository,
+   [*Security → Report a vulnerability*](https://github.com/MPROGAMING/forgebridge/security/advisories/new).
+   This is the channel to use. It is private, it threads, it produces a CVE-ready advisory at
+   the end, and it depends on no email address staying alive.
+2. If you cannot use GitHub for any reason, open a public issue containing **only** the words
+   "security report, need a private channel" and nothing else — no details, no component, no
+   version. A maintainer will open a private advisory and invite you into it.
 
 Useful things to include, none of them required: what you did, what happened, what you expected,
 the affected component and version or commit, and whether you think it is remotely reachable. A
 short report you send today beats a polished one you send next month.
 
-If you want to encrypt the report and the contact address has no published key, say so in a
-first message with no details and we will arrange a channel.
+There is no published PGP key. GitHub's private advisories are encrypted in transit and visible
+only to you and the maintainers, which is the property a key would have bought.
 
 ## What happens next
 
