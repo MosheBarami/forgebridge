@@ -139,11 +139,11 @@ human on the strength of someone else's word for it.
 
 That is why anything writing Luau source needs approval. Static analysis is the one part of
 the verdict this plugin cannot recompute: there is no Luau parser in here to replace it
-with. And today nothing else has recomputed it either — the analyser package the core will
-call, `packages/luau-analysis`, **does not exist yet (M10)**, so a core or daemon verdict on
-a ChangeSet carrying source comes back as `warn` with a finding saying it was not analysed,
-never as a pass. Either way, source arriving with a clean verdict is source that only the
-sender has vouched for. That includes source
+with. The daemon does recompute it — `packages/luau-analysis` runs over every source a
+ChangeSet carries and a `fail` is refused before it could be delivered — but this plugin
+cannot distinguish a verdict that was computed from one a sender simply wrote, and the
+analyser itself reads what a script says rather than what it computes. Source arriving with
+a clean verdict is still source a human should look at. That includes source
 smuggled in as a property: a `createInstance` carrying `Source` in its property bag, or a
 `setProperty` writing `Source`, counts exactly as much as a `writeScript`.
 
@@ -232,6 +232,7 @@ that reaches for its neighbours can only ever be loaded inside Studio.
 `plugin/` shares no code with the TypeScript packages (REPO-LAYOUT boundary rule 4). The
 protocol constants in `Config.luau`, `Path.luau` and `Value.luau` are a hand-kept mirror of
 `packages/protocol`, and a conformance test that pins them against the committed JSON
-Schema is still owed — TODO(M41). It takes two milestones: **M08** generates and commits
-the JSON Schema projection, which does not exist today, and **M41** writes the test.
+Schema is still owed — TODO(M41). **M08** has landed the first half: the JSON Schema
+projection is generated and committed under `packages/protocol/schema/`, one
+self-contained file per top-level type. **M41** writes the test that reads it.
 `docs/REPO-LAYOUT.md` rule 4 and `src/Config.luau` say the same; the three move together.

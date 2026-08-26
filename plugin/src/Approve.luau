@@ -97,11 +97,12 @@ end
 
 	Static analysis of that source is the one part of a validation verdict this
 	plugin cannot recompute: there is no Luau parser in this plugin to replace it
-	with. Nor has anything else recomputed it yet — the analyser the core will
-	call, `packages/luau-analysis`, is not built (M10), so a verdict on source
-	arrives as `warn` with a "not analysed" finding rather than a pass. Either
-	way, an operation carrying source is an operation whose safety rests entirely
-	on a verdict this plugin did not witness, and that goes to a human.
+	with. `packages/luau-analysis` does recompute it now, on the daemon, and a
+	`fail` from it never reaches here — but that analyser reads what a script
+	says rather than what it computes, and this plugin cannot tell a verdict it
+	witnessed from one a sender wrote. So an operation carrying source is an
+	operation whose safety rests on a check this plugin did not perform, and that
+	goes to a human regardless of how clean the verdict looks.
 
 	Detected by content rather than by op: `createInstance` of a script class with
 	a `Source` in its property bag, and a `setProperty` writing `Source`, put code

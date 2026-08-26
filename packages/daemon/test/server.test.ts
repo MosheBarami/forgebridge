@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { DENY_ALL_POLICY } from '@forgebridge/core';
-import { PROTOCOL_VERSION, ProtocolError, STRUCTURAL_PROPERTIES } from '@forgebridge/protocol';
+import { LIMITS, PROTOCOL_VERSION, ProtocolError, STRUCTURAL_PROPERTIES, Validation } from '@forgebridge/protocol';
 import { LOOPBACK_HOST, MAX_ERROR_MESSAGE_CHARS } from '../src/http.js';
 import { InMemoryDaemonStore } from '../src/store.js';
 import { DAEMON_VERSION, type ForgeBridgeDaemon } from '../src/server.js';
@@ -672,14 +672,52 @@ describe('validation', () => {
     expect(stored?.validation?.policy.violations.join(' ')).toContain('Lighting.Secret');
   });
 
-  it('reports Luau as unanalysed rather than inheriting an "ok" it did not compute', async () => {
+  it('refuses a loadstring rather than inheriting the "ok" the producer claimed', async () => {
+    // `makeChangeSet` sends `validation: { luau: ok }` — a model marking its own
+    // source clean. The daemon runs `@forgebridge/luau-analysis` itself and
+    // stores that instead, which is the whole of THREAT-MODEL T2 layer 2.
     const daemon = await daemonFor();
-    const changeSet = makeChangeSet();
+    const changeSet = makeChangeSet({
+      operations: [
+        {
+          op: 'writeScript',
+          path: 'ServerScriptService.Shop',
+          scriptType: 'Script',
+          source: 'local run = loadstring(payload)\nrun()\n',
+        },
+      ],
+    });
+    const response = await submit(daemon, changeSet);
+
+    expect(response.status).toBe(201);
+    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
+    expect(validation?.luau.status).toBe('fail');
+    expect(validation?.luau.findings.map((finding) => finding.rule)).toContain('luau/no-loadstring');
+    // The instance path rides on the message, because a reviewer reading the
+    // diff needs to know which script the finding is about.
+    expect(validation?.luau.findings[0]?.message).toContain('ServerScriptService.Shop');
+    expect(validation?.luau.findings[0]?.operationIndex).toBe(0);
+  });
+
+  it('will not approve a ChangeSet whose Luau failed', async () => {
+    // The verdict is not advisory. `#approve` refuses a `fail`, so the analyser
+    // is a gate on the apply path and not a note in the diff.
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        {
+          op: 'writeScript',
+          path: 'ServerScriptService.Shop',
+          scriptType: 'Script',
+          source: 'local run = loadstring(payload)\nrun()\n',
+        },
+      ],
+    });
     await submit(daemon, changeSet);
 
-    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
-    expect(validation?.luau.status).toBe('warn');
-    expect(validation?.luau.findings[0]?.rule).toBe('luau/not-analysed');
+    const response = await approve(daemon, changeSet.id);
+    expect(response.status).toBe(403);
+    expect(response.json<{ code: string }>().code).toBe('policy_violation');
   });
 
   it('treats Source written as a property as Luau source too', async () => {
@@ -698,7 +736,87 @@ describe('validation', () => {
     });
     await submit(daemon, changeSet);
 
-    expect((await daemon.store.getChangeSet(changeSet.id))?.validation?.luau.status).toBe('warn');
+    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
+    expect(validation?.luau.status).toBe('fail');
+    expect(validation?.luau.findings.map((finding) => finding.rule)).toContain('luau/while-true-no-yield');
+  });
+
+  it('refuses a Source it cannot read as Luau rather than passing it', async () => {
+    // A non-string on `Source` leaves nothing to analyse. Reporting `ok` for
+    // source that was never read is the one answer this layer must never give.
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        { op: 'setProperty', path: 'ServerScriptService.Shop', property: 'Source', value: { t: 'Nil' } },
+      ],
+    });
+    await submit(daemon, changeSet);
+
+    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
+    expect(validation?.luau.status).toBe('fail');
+    expect(validation?.luau.findings[0]?.rule).toBe('luau/source-not-readable');
+  });
+
+  it('reports Luau as ok for a script that passes every rule', async () => {
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet();
+    await submit(daemon, changeSet);
+
+    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
+    expect(validation?.luau).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('keeps the verdict inside the bounds the protocol puts on Validation', async () => {
+    // Both bounds are literals in `packages/protocol`, and both are reachable
+    // from ordinary input: a path near the depth limit prefixed onto a finding
+    // message can pass 2000 characters, and a few hundred bad scripts can pass
+    // 1000 findings. A verdict that broke either would make the ChangeSet
+    // unreadable on the next parse — the analyser finding too much wrong with a
+    // set would be what destroyed it.
+    const deep = ['ServerScriptService', ...Array.from({ length: 30 }, (_, i) => `Folder${'x'.repeat(90)}${i}`)]
+      .join('.')
+      .slice(0, 2000);
+    const path = deep.slice(0, deep.lastIndexOf('.'));
+    const source = `${'local x = loadstring("a")\n'.repeat(40)}`;
+
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: Array.from({ length: 40 }, () => ({
+        op: 'writeScript' as const,
+        path,
+        scriptType: 'Script' as const,
+        source,
+      })),
+    });
+    await submit(daemon, changeSet);
+
+    const validation = (await daemon.store.getChangeSet(changeSet.id))?.validation;
+    expect(validation?.luau.status).toBe('fail');
+    expect(validation?.luau.findings.length).toBeLessThanOrEqual(1000);
+    expect(validation?.luau.findings.at(-1)?.rule).toBe('luau/findings-truncated');
+    // The real schema is the assertion. If the contract's bounds move, this
+    // fails here rather than the daemon storing something it cannot read back.
+    expect(() => Validation.parse(validation)).not.toThrow();
+    expect(changeSet.operations.length).toBeLessThanOrEqual(LIMITS.MAX_OPERATIONS);
+  });
+
+  it('reads the HttpService allowlist it was configured with', async () => {
+    // Empty means none, so this proves the option is threaded through rather
+    // than that the rule works — `packages/luau-analysis` owns the rule itself.
+    const source = 'local http = game:GetService("HttpService")\nhttp:GetAsync("https://api.example.com/v1")\n';
+    const operations = [{ op: 'writeScript', path: 'ServerScriptService.Shop', scriptType: 'Script', source }];
+
+    const closed = await daemonFor();
+    const refused = makeChangeSet({ operations });
+    await submit(closed, refused);
+    expect((await closed.store.getChangeSet(refused.id))?.validation?.luau.status).not.toBe('ok');
+
+    // Passed as a URL on purpose: the daemon normalises, so this is the same
+    // allowlist entry as `api.example.com` rather than one matching nothing.
+    const open = await daemonFor({ allowedHttpHosts: ['https://API.Example.com/v1'] });
+    const allowed = makeChangeSet({ operations });
+    await submit(open, allowed);
+    expect((await open.store.getChangeSet(allowed.id))?.validation?.luau.status).toBe('ok');
   });
 
   it('reports Luau as ok when the set carries no source at all', async () => {

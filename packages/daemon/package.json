@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@forgebridge/core": "*",
+    "@forgebridge/luau-analysis": "*",
     "@forgebridge/protocol": "*",
     "zod": "^3.24.1"
   },

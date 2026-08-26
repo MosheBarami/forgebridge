@@ -24,6 +24,7 @@ import {
   type Operation,
 } from '@forgebridge/protocol';
 import { DENY_ALL_POLICY, checkPolicy, type ProjectPolicy } from '@forgebridge/core';
+import { analyse, normaliseHost } from '@forgebridge/luau-analysis';
 import type { Finding, Validation } from '@forgebridge/protocol';
 import { PRODUCER_TOKEN_HEADER, assertProducerToken, mintProducerToken } from './auth.js';
 import { NONCE_ORIGIN, openEnvelope, sealEnvelope, verifyRequestMac } from './envelope.js';
@@ -124,6 +125,20 @@ export interface DaemonOptions {
    * operator's explicit decision, never a convenience default.
    */
   allowedOrigins?: readonly string[];
+  /**
+   * Hosts a generated script may reach through `HttpService`. Empty by default,
+   * and empty means none: every outbound call is then a finding. Fail-closed,
+   * for the same reason `policy` defaults to `DENY_ALL_POLICY`. Entries are
+   * normalised on the way in, so `https://API.Example.com/v1` and
+   * `api.example.com` are one entry; `*.example.com` matches subdomains.
+   *
+   * TODO(M38): this belongs on the project's own policy, beside
+   * `allowedPathPrefixes`, so two projects on one daemon can differ. It is a
+   * process-wide option here because `ProjectPolicy` has no field for it yet,
+   * and inventing one in the daemon would put a policy decision outside
+   * `@forgebridge/core`.
+   */
+  allowedHttpHosts?: readonly string[];
   logger?: DaemonLogger;
   pollTimeoutMs?: number;
   now?: () => number;
@@ -162,6 +177,7 @@ export class ForgeBridgeDaemon {
   readonly #pairing: PairingService;
   readonly #models: ModelsPort;
   readonly #allowedOrigins: readonly string[];
+  readonly #allowedHttpHosts: readonly string[];
   readonly #logger: DaemonLogger;
   readonly #pollTimeoutMs: number;
   readonly #now: () => number;
@@ -183,6 +199,11 @@ export class ForgeBridgeDaemon {
     this.defaultProjectId = options.projectId ?? randomUUID();
     this.#models = options.models ?? unconfiguredModels;
     this.#allowedOrigins = options.allowedOrigins ?? [];
+    // Normalised on the way in, so a caller that passed a URL, a port or an
+    // uppercase name gets the allowlist it meant rather than one matching
+    // nothing — which from the outside is indistinguishable from a working
+    // allowlist. The analyser's own function, so the two cannot drift.
+    this.#allowedHttpHosts = (options.allowedHttpHosts ?? []).map(normaliseHost).filter((host) => host.length > 0);
     this.#logger = options.logger ?? silentLogger;
     this.#pollTimeoutMs = options.pollTimeoutMs ?? POLL_TIMEOUT_MS;
     this.#now = options.now ?? Date.now;
@@ -589,16 +610,17 @@ export class ForgeBridgeDaemon {
   /**
    * Compute the verdict this daemon is willing to stand behind.
    *
-   * Policy is real: `checkPolicy` from `@forgebridge/core` runs here, inside the
-   * trust boundary, against the project's stored allowlist. Luau analysis is
-   * not — `packages/luau-analysis` does not exist yet — so the verdict says so
-   * out loud instead of inheriting the producer's opinion of its own source.
+   * Both halves are real and both run here, inside the trust boundary:
+   * `checkPolicy` from `@forgebridge/core` against the project's stored
+   * allowlist, and `analyse` from `@forgebridge/luau-analysis` over every source
+   * the set carries. Neither inherits anything from the `validation` the
+   * producer sent, which is overwritten by what this computed.
    */
   async #validate(changeSet: ChangeSet): Promise<Validation> {
     const policy = (await this.store.getProjectPolicy(changeSet.projectId)) ?? this.#defaultPolicy;
     const decision = checkPolicy(changeSet, policy);
     return {
-      luau: luauVerdict(changeSet),
+      luau: luauVerdict(changeSet, this.#allowedHttpHosts),
       policy: decision.policy,
       computedAt: new Date(this.#now()).toISOString(),
       computedBy: `forgebridge-daemon@${DAEMON_VERSION}`,
@@ -1025,36 +1047,136 @@ function carriesLuauSource(operation: Operation): boolean {
 }
 
 /**
- * The Luau verdict this daemon can honestly give.
+ * One Luau source a ChangeSet carries, and the operation that carries it.
  *
- * There is no analyser yet, so a set carrying source is reported as `warn` with
- * a finding that says exactly that. Not `ok`: that is the producer's claim and
- * the one thing this must not repeat. Not `fail` either — `#approve` refuses a
- * `fail`, so that would mean no ChangeSet containing a script can ever be
- * applied, and a gate that blocks the product's whole purpose is a gate someone
- * removes. `warn` keeps the honest state visible in the diff while the layers
- * that do exist — policy, human approval, journal — carry the weight.
- *
- * TODO(M10): replace this with `packages/luau-analysis` (parse failure,
- * unbounded Heartbeat loops, `require` of unreviewed asset ids, `HttpService`
- * to non-allowlisted hosts, `loadstring`, obfuscated payloads — THREAT-MODEL
- * T2 layer 2) and let a real verdict return `ok` and `fail`. Owner: the
- * analyser author; until it lands, nothing here may report a set as analysed.
+ * `writeScript` is the obvious route. `Source` set as an ordinary property is
+ * the same act by another name, so both are read here — see `carriesLuauSource`.
  */
-function luauVerdict(set: ChangeSet): Validation['luau'] {
-  const carrying = set.operations.filter(carriesLuauSource).length;
+interface LuauSource {
+  operationIndex: number;
+  path: string;
+  source: string;
+}
+
+/** The string a `PropertyValue` holds, or null when it does not hold one. */
+function sourceTextOf(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const property = value as { t?: unknown; v?: unknown };
+  return property.t === 'String' && typeof property.v === 'string' ? property.v : null;
+}
+
+function luauSourcesOf(set: ChangeSet): { sources: LuauSource[]; unreadable: number[] } {
+  const sources: LuauSource[] = [];
+  // An operation that writes `Source` with something other than a string is
+  // still an operation that writes `Source`. There is no text to analyse, so it
+  // is counted here rather than dropped: reporting `ok` for source this daemon
+  // could not read is the one thing the analyser layer must never do.
+  const unreadable: number[] = [];
+
+  set.operations.forEach((operation, operationIndex) => {
+    if (!carriesLuauSource(operation)) return;
+    const path = operation.path as string;
+    if (operation.op === 'writeScript') {
+      sources.push({ operationIndex, path, source: operation.source });
+      return;
+    }
+    const raw =
+      operation.op === 'setProperty'
+        ? sourceTextOf(operation.value)
+        : operation.op === 'createInstance'
+          ? sourceTextOf(operation.properties.Source)
+          : null;
+    if (raw === null) unreadable.push(operationIndex);
+    else sources.push({ operationIndex, path, source: raw });
+  });
+
+  return { sources, unreadable };
+}
+
+/**
+ * The Luau verdict, computed here, inside the trust boundary.
+ *
+ * `@forgebridge/luau-analysis` reads every source the set carries — layer 2 of
+ * THREAT-MODEL T2. The producer's own opinion of its source never reaches this
+ * function: `#validate` overwrites whatever `validation` arrived with what this
+ * returns, because a model that can mark its own Luau clean has defeated the
+ * layer (ADR-012, PROTOCOL invariant 4).
+ *
+ * The analyser's own invariant carries through unchanged: a source it could not
+ * read comes back `fail`, never `ok`. `#approve` refuses a `fail`, so a
+ * ChangeSet whose Luau does not parse — or which reaches for `loadstring` —
+ * cannot be approved at all.
+ */
+/**
+ * The protocol's own bounds on `Validation.luau`, restated because they are
+ * literals in `packages/protocol/src/changeset.ts` rather than entries in
+ * `LIMITS`, and this file may not edit that package. A verdict that broke either
+ * one would be refused by `ChangeSet` on the next parse — which is to say the
+ * ChangeSet would become unreadable *because* the analyser found too much wrong
+ * with it. `packages/daemon/test/server.test.ts` pins both against the real
+ * schema so a change to the contract fails here rather than in production.
+ */
+const MAX_FINDING_MESSAGE = 2000;
+const MAX_FINDINGS = 1000;
+
+function clipMessage(message: string): string {
+  return message.length <= MAX_FINDING_MESSAGE ? message : `${message.slice(0, MAX_FINDING_MESSAGE - 1)}…`;
+}
+
+function luauVerdict(set: ChangeSet, allowedHttpHosts: readonly string[]): Validation['luau'] {
+  const { sources, unreadable } = luauSourcesOf(set);
+
   // Nothing to analyse is not the same as unanalysed: a set of property writes
   // and moves passes every Luau rule there could be, vacuously.
-  if (carrying === 0) return { status: 'ok', findings: [] };
+  if (sources.length === 0 && unreadable.length === 0) return { status: 'ok', findings: [] };
 
-  const finding: Finding = {
-    severity: 'warning',
-    rule: 'luau/not-analysed',
-    message:
-      `${carrying} operation(s) carry Luau source and no analyser is wired into this daemon, ` +
-      'so the source has not been read. Review the diff before approving.',
+  const findings: Finding[] = [];
+  let status: Validation['luau']['status'] = 'ok';
+  const worsen = (next: Validation['luau']['status']): void => {
+    if (next === 'fail' || (next === 'warn' && status === 'ok')) status = next;
   };
-  return { status: 'warn', findings: [finding] };
+
+  for (const { operationIndex, path, source } of sources) {
+    const result = analyse(source, { allowedHttpHosts, operationIndex });
+    // The analyser attributes a finding to an operation index; the instance path
+    // is what a human reads in the diff, so it is prefixed onto the message here
+    // rather than pushed into the protocol's `Finding` as a field it does not have.
+    findings.push(
+      ...result.findings.map((finding) => ({ ...finding, message: clipMessage(`${path}: ${finding.message}`) })),
+    );
+    worsen(result.status);
+  }
+
+  for (const operationIndex of unreadable) {
+    findings.push({
+      severity: 'error',
+      rule: 'luau/source-not-readable',
+      message:
+        'This operation writes the Source property with a value that is not a string, so there was no Luau ' +
+        'to analyse and this ChangeSet has not been statically checked. Write scripts with a writeScript ' +
+        'operation, or set Source to a String value.',
+      operationIndex,
+    });
+    worsen('fail');
+  }
+
+  if (findings.length > MAX_FINDINGS) {
+    // Dropping the overflow silently would make a very bad ChangeSet look like
+    // a slightly bad one. The status is already `fail` or `warn` and does not
+    // move; what is lost is detail, and the last slot says so.
+    const kept = findings.slice(0, MAX_FINDINGS - 1);
+    kept.push({
+      severity: 'warning',
+      rule: 'luau/findings-truncated',
+      message:
+        `This ChangeSet produced ${findings.length} findings, past the ${MAX_FINDINGS} the protocol carries. ` +
+        `The first ${MAX_FINDINGS - 1} are above; the rest were dropped. The verdict is unchanged — propose ` +
+        'something smaller and read the whole list.',
+    });
+    return { status, findings: kept };
+  }
+
+  return { status, findings };
 }
 
 function countOps(operations: readonly Operation[], kind: Operation['op']): number {
