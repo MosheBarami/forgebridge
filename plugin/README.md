@@ -4,11 +4,11 @@ The consumer end of the bridge. It polls a ForgeBridge daemon (or relay) for Cha
 shows you what each one would do, waits for your approval, applies the operations one by
 one, and reports back exactly how far it got.
 
-It calls three endpoints and nothing else: `GET /v1/link/poll`,
-`POST /v1/changesets/:id/apply-result`, and `POST /v1/output`. That surface is small on
-purpose — a Studio plugin is the hardest piece of this system to update once it is in
-the field, so it should have as little in it as possible. Pairing, diffing for the web
-UI, approval records and rollback all live on the other side of the link.
+It calls four endpoints and nothing else: `POST /v1/link/pair` once, then
+`GET /v1/link/poll`, `POST /v1/changesets/:id/apply-result`, and `POST /v1/output`. That
+surface is small on purpose — a Studio plugin is the hardest piece of this system to
+update once it is in the field, so it should have as little in it as possible. Diffing
+for the web UI, approval records and rollback all live on the other side of the link.
 
 ## Installing it
 
@@ -52,9 +52,24 @@ connect. Pointing it at a different address makes Roblox ask again for that one.
 
 ## Pointing it at a daemon
 
-1. Start a daemon on your machine (`packages/daemon`).
+1. Start a daemon on your machine (`packages/daemon`). It prints a **pairing code** on
+   startup.
 2. Click **ForgeBridge** in the Studio toolbar to open the panel.
-3. Check the base URL and click **Connect**.
+3. Check the base URL, type the pairing code, and click **Connect**.
+
+The code is eight characters, good for ten minutes, five attempts, and single use. It
+carries no `I`, `L`, `O`, `U`, `0` or `1`, so there is no character in it that a
+look-alike could be mistaken for; the panel checks that before spending one of your five
+attempts on it, and hyphens or spaces you type while reading it aloud are ignored.
+
+Redeeming the code derives a session key that both ends compute independently — nothing
+secret crosses the wire — and every request after it carries a MAC under that key. The
+panel shows the key's public id, never the key. The link is remembered per install, so
+reopening Studio does not mean retyping a code.
+
+Re-pair when the daemon restarts. Session keys are held in memory only and deliberately do
+not survive a daemon restart, so the first poll afterwards is refused and the panel asks
+for a fresh code.
 
 It starts at `http://127.0.0.1:7317` — the port `packages/daemon` listens on
 (`DEFAULT_DAEMON_PORT` in `src/server.ts`, mirrored as `DEFAULT_BASE_URL` in
@@ -93,12 +108,21 @@ end-to-end encryption ships (M19), and until then the plugin will never claim it
 
 ## What this build will not do yet
 
-**Relay links are refused.** Luau has no crypto standard library, so the HMAC-SHA256 that
-authenticates a delivery does not exist in this build yet (TODO(M18) in
-`src/Transport.luau`). Without it, accepting a relay delivery would mean applying
-whatever arrived, unauthenticated, into your place. Shipping an unreviewed hand-rolled
-crypto primitive inside a Studio plugin would be worse than shipping the feature late, so
-the plugin stays on loopback and tells you so instead.
+**Relay links are refused.** Not for want of crypto any more — `src/Crypto.luau` is a
+pure-Luau SHA-256, HMAC-SHA256 and HKDF-SHA256, and every delivery is authenticated under
+the pairing-derived key. What is missing is the other end: pairing is written against a
+daemon's `POST /v1/link/pair`, and there is no relay in this repository to pair with or to
+test that handshake against (TODO(M17) in `src/Transport.luau`). Pointing the plugin at an
+unbuilt relay would mean guessing at its half of the protocol, so it refuses and says so.
+
+**Payloads are authenticated, not encrypted.** ADR-014 chose an HMAC for v1 deliberately:
+a hash and a MAC are the two primitives a careful reader can check line by line against
+published vectors, which `tests/CryptoSpec.luau` does (NIST for SHA-256, RFC 4231 for
+HMAC, RFC 5869 for HKDF — none of those vectors were produced by running this code). On a
+loopback link authenticity is the property that matters, because any process on the
+machine can open a socket to `127.0.0.1` and the MAC is what separates the daemon you
+paired with from everything else that found the port. X25519 and an AEAD are M19, behind
+an external review.
 
 **Rollback is session-scoped.** The plugin captures the inverse of every operation before
 it runs, but `ApplyResult` has nowhere to put those inverses (TODO(M11) in
@@ -208,12 +232,47 @@ after the reparent landed (with and without a successful restore), a Studio that
 open an undo waypoint, a ChangeSet handler that throws mid-apply, and a passing validation
 verdict that must still not unlock an auto-apply.
 
+The crypto is tested against published vectors rather than against itself — NIST for
+SHA-256, RFC 4231 for HMAC-SHA256, RFC 5869 for HKDF — because a test whose expectations
+were produced by running the implementation proves only that it is deterministic.
+
+### The live pairing check
+
+Vectors prove this plugin matches the standards. They cannot prove it matches *the
+daemon*, and that is the failure M18 actually had: both ends passed their own suites while
+the seam between them did not exist. So pairing has one check that is not a unit test.
+
+```
+node tests/live-pair.mjs <pairing-code> <producer-token>
+```
+
+Both values are printed by the daemon on startup, and the code is single use — a second
+run needs a fresh daemon. It pairs for real against `127.0.0.1:7317` and asserts four
+things, each with a negative control beside it:
+
+- the session key id this plugin derives equals the one the daemon issued;
+- the daemon accepts a poll MAC built by `src/Transport.luau` (and answers `401` to the
+  same MAC with one byte flipped);
+- `Transport.verifyMac` accepts a delivery envelope the daemon actually sealed (and
+  refuses it after one byte of the payload changes).
+
+The split between `tests/live.luau` and `tests/live-pair.mjs` is not a preference: the
+standalone `luau` CLI has no `io` and no `os.execute`, so it cannot open a socket. Node
+does the transport and the asserting; every byte of crypto under test is this plugin's own
+shipping Luau, because a driver that computed the expected key itself would agree with a
+plugin that was wrong.
+
+It is deliberately not in `run.luau`'s suite list. That suite is offline and hermetic, and
+a test that fails whenever no daemon happens to be running is one people learn to skip.
+
 ## Layout
 
 ```
 src/
   init.server.luau   toolbar, widget, settings, and the poll → diff → approve → apply loop
   Transport.luau     long-poll with backoff; 204 / 409 / 426 handling; replay refusal
+  Pairing.luau       redeeming a code for a link and a session key
+  Crypto.luau        SHA-256, HMAC-SHA256, HKDF-SHA256 and base64, in pure Luau
   Journal.luau       inverse capture, before anything is applied
   Apply.luau         ordered application, per-operation outcomes, stale-base refusal
   Diff.luau          before/after rendering, including a real line delta for scripts
@@ -222,6 +281,8 @@ src/
   Path.luau          InstancePath validation and defensive resolution
   Config.luau        protocol constants and setting keys
 tests/               unit tests, no Studio required
+  live.luau          the live pairing check — needs a running daemon, not in run.luau
+  live-pair.mjs      its driver: the sockets the luau CLI cannot open
 ```
 
 Only `init.server.luau` calls `require`. Every other module is a leaf that touches no

@@ -10,8 +10,8 @@
 	(path resolution, value decoding, inverse capture, the approval policy) would
 	have no tests at all. Composition lives here so those stay testable.
 
-	The loop is: poll → diff → approve → apply → report. The plugin calls exactly
-	three endpoints, and nothing else (PROTOCOL.md).
+	The loop is: pair → poll → diff → approve → apply → report. The plugin calls
+	exactly four endpoints, and nothing else (PROTOCOL.md).
 ]]
 
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
@@ -22,8 +22,10 @@ local LogService = game:GetService("LogService")
 local Approve = require(script.Approve)
 local Apply = require(script.Apply)
 local Config = require(script.Config)
+local Crypto = require(script.Crypto)
 local Diff = require(script.Diff)
 local Journal = require(script.Journal)
+local Pairing = require(script.Pairing)
 local Path = require(script.Path)
 local Transport = require(script.Transport)
 local Value = require(script.Value)
@@ -46,13 +48,46 @@ local function writeSetting(key: string, value: any)
 	end)
 end
 
+local function readNumberSetting(key: string, fallback: number): number
+	local value = readSetting(key, fallback)
+	return if type(value) == "number" then value else fallback
+end
+
+--[[
+	The session key comes back from settings base64-encoded (Config.SETTING).
+	Decoding is pcall'd because a truncated or hand-edited setting must present as
+	"not paired", asking for a code — not as an error thrown while the plugin is
+	still loading, which would leave Studio with no widget at all.
+]]
+local function readSessionKey(): string?
+	local encoded = readSetting(Config.SETTING.SESSION_KEY, nil)
+	if type(encoded) ~= "string" or encoded == "" then
+		return nil
+	end
+	local ok, raw = pcall(Crypto.fromBase64, encoded)
+	if not ok or type(raw) ~= "string" or raw == "" then
+		return nil
+	end
+	return raw
+end
+
 local state = {
 	baseUrl = readSetting(Config.SETTING.BASE_URL, Config.DEFAULT_BASE_URL),
 	linkId = readSetting(Config.SETTING.LINK_ID, nil),
+	sessionKey = readSessionKey(),
+	sessionKeyId = readSetting(Config.SETTING.SESSION_KEY_ID, nil),
+	projectId = readSetting(Config.SETTING.PROJECT_ID, nil),
+	cursor = readNumberSetting(Config.SETTING.LINK_CURSOR, 0),
+	outboundNonce = readNumberSetting(Config.SETTING.LINK_NONCE, 0),
 	autoApply = readSetting(Config.SETTING.AUTO_APPLY, Config.DEFAULTS.AUTO_APPLY) == true,
 	scope = readSetting(Config.SETTING.AUTO_APPLY_SCOPE, Config.DEFAULTS.AUTO_APPLY_SCOPE),
 	mirrorOutput = readSetting(Config.SETTING.MIRROR_OUTPUT, Config.DEFAULTS.MIRROR_OUTPUT) == true,
 }
+
+--- A link is only usable when both halves survived: the id names it, the key proves it.
+local function isPaired(): boolean
+	return type(state.linkId) == "string" and state.linkId ~= "" and type(state.sessionKey) == "string"
+end
 
 -- ── composition ───────────────────────────────────────────────────────────────
 
@@ -122,11 +157,32 @@ do
 	studioTheme = if ok then theme else nil
 end
 
+--[[
+	Both are optional on `PairRequest` and both are for the daemon's link record —
+	so a user with two Studio windows open can tell which link is which. Read
+	through pcall for the same reason the theme is: a plugin that fails to load
+	because one identifying string was unavailable helps nobody.
+]]
+local studioVersion: string? = nil
+local placeId: number? = nil
+do
+	local ok, value = pcall(function()
+		return version()
+	end)
+	studioVersion = if ok and type(value) == "string" then value else nil
+
+	local placeOk, place = pcall(function()
+		return game.PlaceId
+	end)
+	placeId = if placeOk and type(place) == "number" then place else nil
+end
+
 local transport: any = nil
 local queue: { any } = {}
 local pending: any = nil
 local widget: any
 local connect: () -> ()
+local pairAndConnect: (string?) -> ()
 
 local function log(message: string)
 	print(string.format("[ForgeBridge] %s", message))
@@ -241,11 +297,12 @@ widget = Approve.mount({
 		writeSetting(Config.SETTING.AUTO_APPLY_SCOPE, state.scope)
 		writeSetting(Config.SETTING.MIRROR_OUTPUT, state.mirrorOutput)
 	end,
-	onConnect = function(url)
+	onConnect = function(url, pairingCode)
 		state.baseUrl = url
 		writeSetting(Config.SETTING.BASE_URL, url)
-		connect()
+		pairAndConnect(pairingCode)
 	end,
+	normalisePairingCode = Crypto.normalisePairingCode,
 })
 
 widget:setSettings({
@@ -254,6 +311,7 @@ widget:setSettings({
 	mirrorOutput = state.mirrorOutput,
 	baseUrl = state.baseUrl,
 })
+widget:setPaired(isPaired(), state.sessionKeyId)
 
 -- ── connection ────────────────────────────────────────────────────────────────
 
@@ -270,6 +328,125 @@ local STATE_TEXT = {
 	idle = "Not connected",
 }
 
+--[[
+	Said before Roblox says anything, and before the first request rather than
+	after it.
+
+	A plugin may call HttpService without the place's "Allow HTTP Requests"
+	setting, but the first call to a web address raises a Roblox permission prompt
+	scoped to that address, which the user can deny. A prompt nobody explained gets
+	denied, and a denied prompt looks exactly like a broken plugin — so the address
+	is named in the panel and in the Output window first. Pairing is now what makes
+	that first call, which is why this is announced here and not only in `connect`.
+]]
+local function announceAddress(): string
+	local invitation = string.format(
+		"Studio may ask permission to reach %s — allow it or this link cannot connect",
+		tostring(state.baseUrl)
+	)
+	log(invitation)
+	return invitation
+end
+
+local function postureText(): string
+	local parts = Transport.parseBaseUrl(state.baseUrl)
+	if not parts then
+		return "No daemon configured"
+	end
+	local kind = Transport.transportKind(parts)
+	return Config.PRIVACY_POSTURE[kind] or kind
+end
+
+--- Persist a link so the next Studio session does not need a code that no longer exists.
+local function storeLink(link: any)
+	state.linkId = link.linkId
+	state.sessionKey = link.sessionKey
+	state.sessionKeyId = link.sessionKeyId
+	state.projectId = link.projectId
+	state.cursor = link.since
+	-- A fresh pairing is a fresh key, and the daemon's watermark for it starts at
+	-- the origin. Carrying the old counter over would only skip nonces; resetting
+	-- keeps the two ends' idea of "first envelope" the same.
+	state.outboundNonce = 0
+
+	writeSetting(Config.SETTING.LINK_ID, state.linkId)
+	writeSetting(Config.SETTING.SESSION_KEY, Crypto.toBase64(link.sessionKey))
+	writeSetting(Config.SETTING.SESSION_KEY_ID, state.sessionKeyId)
+	writeSetting(Config.SETTING.PROJECT_ID, state.projectId)
+	writeSetting(Config.SETTING.LINK_CURSOR, state.cursor)
+	writeSetting(Config.SETTING.LINK_NONCE, state.outboundNonce)
+end
+
+--[[
+	Redeem a code if one was typed, then connect.
+
+	An empty box is not an error: after a restart the link is already in settings
+	and Connect means "resume". It is only an error when there is nothing stored to
+	resume, and then the widget says which of the two things is missing rather than
+	starting a poll loop that can only ever be refused.
+]]
+pairAndConnect = function(pairingCode: string?)
+	local code = Crypto.normalisePairingCode(pairingCode or "")
+	if code == "" then
+		if not isPaired() then
+			local reason = "no pairing code, and no link stored — run the daemon and type the code it prints"
+			log(reason)
+			widget:setLink(STATE_TEXT.unpaired, postureText(), reason)
+			return
+		end
+		connect()
+		return
+	end
+
+	if transport then
+		transport:stop()
+		transport = nil
+	end
+
+	widget:setLink(STATE_TEXT.connecting, postureText(), announceAddress())
+
+	local link, reason = Pairing.pair(state.baseUrl, code, {
+		http = HttpService,
+		encodeJson = function(payload)
+			return HttpService:JSONEncode(payload)
+		end,
+		decodeJson = function(text)
+			return HttpService:JSONDecode(text)
+		end,
+		crypto = Crypto,
+		vetUrl = Transport.parseBaseUrl,
+		pluginVersion = Config.PLUGIN_VERSION,
+		protocolVersion = Config.PROTOCOL_VERSION,
+		protocolMajor = Config.PROTOCOL_MAJOR,
+		pluginVersionHeader = Config.PLUGIN_VERSION_HEADER,
+		protocolVersionHeader = Config.PROTOCOL_VERSION_HEADER,
+		--[[
+			No `projectId`. `PairRequest` allows one and the daemon falls back to its
+			own default without it — and the default is the right answer here, because
+			the only project id this plugin has ever seen is one an earlier pairing
+			handed it. Sending that back would bind the new link to a project the
+			daemon may no longer route to, and `findPairedLink` would then look for a
+			Studio session under the default project and find none: deliveries would
+			stop with both ends believing they were paired.
+		]]
+		studioVersion = studioVersion,
+		placeId = placeId,
+	})
+	if not link then
+		-- Every pairing failure has a different next action, so the daemon's own
+		-- words go through to the panel unedited.
+		log(string.format("pairing failed: %s", tostring(reason)))
+		widget:setLink(STATE_TEXT.unpaired, postureText(), reason)
+		widget:setPaired(false)
+		return
+	end
+
+	storeLink(link)
+	widget:setPaired(true, link.sessionKeyId)
+	log(Pairing.describe(link))
+	connect()
+end
+
 connect = function()
 	if transport then
 		transport:stop()
@@ -277,6 +454,11 @@ connect = function()
 	end
 	if not state.baseUrl or state.baseUrl == "" then
 		widget:setLink("Not connected", "No daemon configured", nil)
+		return
+	end
+	if not isPaired() then
+		local reason = "this link has no session key — enter the daemon's pairing code and connect"
+		widget:setLink(STATE_TEXT.unpaired, postureText(), reason)
 		return
 	end
 
@@ -296,6 +478,10 @@ connect = function()
 		pluginVersionHeader = Config.PLUGIN_VERSION_HEADER,
 		protocolVersionHeader = Config.PROTOCOL_VERSION_HEADER,
 		linkId = state.linkId,
+		sessionKey = state.sessionKey,
+		crypto = Crypto,
+		cursor = state.cursor,
+		outboundNonce = state.outboundNonce,
 	})
 	if not created then
 		widget:setLink("Not connected", "That base URL was refused", err)
@@ -304,6 +490,21 @@ connect = function()
 	end
 
 	transport = created
+	--[[
+		Both counters are link bookkeeping the transport moves and this file owns:
+		written through on every change so a Studio restart resumes at the delivery
+		it stopped at, and sends its next envelope above the watermark the daemon is
+		already holding. A missed write costs a replayed delivery or a refused
+		envelope, so neither is batched.
+	]]
+	transport.onCursor = function(cursor)
+		state.cursor = cursor
+		writeSetting(Config.SETTING.LINK_CURSOR, cursor)
+	end
+	transport.onNonce = function(nonce)
+		state.outboundNonce = nonce
+		writeSetting(Config.SETTING.LINK_NONCE, nonce)
+	end
 	transport.onState = function(linkState, reason)
 		widget:setLink(
 			STATE_TEXT[linkState] or linkState,
@@ -330,17 +531,11 @@ connect = function()
 		presentNext()
 	end
 
-	--[[
-		Said before Roblox says anything. A plugin may call HttpService without the
-		place's "Allow HTTP Requests" setting, but the first call to a web address
-		raises a Roblox permission prompt scoped to that address, which the user can
-		deny. A prompt nobody explained gets denied, and a denied prompt looks
-		exactly like a broken plugin — so the address is named here, in the panel and
-		in the Output window, before the dialog can appear.
-	]]
-	local invitation = string.format("Studio may ask permission to reach %s — allow it or this link cannot connect", state.baseUrl)
-	log(invitation)
-	widget:setLink("Connecting…", Config.PRIVACY_POSTURE[transport.kind] or transport.kind, invitation)
+	widget:setLink(
+		STATE_TEXT.connecting,
+		Config.PRIVACY_POSTURE[transport.kind] or transport.kind,
+		announceAddress()
+	)
 	transport:start()
 end
 

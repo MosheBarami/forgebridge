@@ -312,7 +312,19 @@ export type MountOptions = {
 	onApprove: () -> (),
 	onReject: () -> (),
 	onSettingsChanged: (any) -> (),
-	onConnect: (string) -> (),
+	--[[
+		(baseUrl, pairingCode). The code is whatever the user typed, normalised; an
+		empty string means "connect with the link already stored", which is the
+		ordinary case after a Studio restart.
+	]]
+	onConnect: (string, string) -> (),
+	--[[
+		`Crypto.normalisePairingCode`, passed in because this widget is a leaf and
+		requires nothing. Used only to show the user the form of the code that will
+		be sent — the normalisation that matters happens again inside `Pairing.pair`,
+		where it is not optional and where the key is derived from its result.
+	]]
+	normalisePairingCode: ((string) -> string)?,
 }
 
 --[[
@@ -366,7 +378,7 @@ function Approve.mount(options: MountOptions): any
 	postureLabel.Parent = root
 
 	local urlBox = create("TextBox", {
-		Size = UDim2.new(1, -76, 0, 26),
+		Size = UDim2.new(1, -178, 0, 26),
 		PlaceholderText = "http://127.0.0.1:<daemon port>",
 		Text = "",
 		ClearTextOnFocus = false,
@@ -378,6 +390,33 @@ function Approve.mount(options: MountOptions): any
 		TextXAlignment = Enum.TextXAlignment.Left,
 	})
 	create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }).Parent = urlBox
+
+	--[[
+		The pairing code, beside the address it pairs with.
+
+		The daemon prints an eight-character code in its terminal and the user carries
+		it here by hand; without it the daemon has no key for this link and refuses
+		every poll. It sits next to the URL because the two are one action — an
+		address alone was a Connect button that could never finish connecting.
+
+		`ClearTextOnFocus` is off for the same reason it is off on the URL: a user
+		correcting one character of a transcribed code should not lose the other
+		seven.
+	]]
+	local codeBox = create("TextBox", {
+		Size = UDim2.new(0, 96, 0, 26),
+		Position = UDim2.new(1, -172, 0, 0),
+		PlaceholderText = "pairing code",
+		Text = "",
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Code,
+		TextSize = 13,
+		TextColor3 = colour(theme, "MainText"),
+		BackgroundColor3 = colour(theme, "InputFieldBackground"),
+		BorderColor3 = colour(theme, "Border"),
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	create("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }).Parent = codeBox
 
 	local connectButton = create("TextButton", {
 		Size = UDim2.new(0, 70, 0, 26),
@@ -394,7 +433,7 @@ function Approve.mount(options: MountOptions): any
 		LayoutOrder = 3,
 		Size = UDim2.new(1, 0, 0, 26),
 		BackgroundTransparency = 1,
-	}, { urlBox, connectButton })
+	}, { urlBox, codeBox, connectButton })
 	urlRow.Parent = root
 
 	local autoApplyToggle = create("TextButton", {
@@ -509,6 +548,8 @@ function Approve.mount(options: MountOptions): any
 		stateLabel = stateLabel,
 		postureLabel = postureLabel,
 		urlBox = urlBox,
+		codeBox = codeBox,
+		normalisePairingCode = options.normalisePairingCode,
 		scopeBox = scopeBox,
 		autoApplyToggle = autoApplyToggle,
 		mirrorToggle = mirrorToggle,
@@ -522,8 +563,17 @@ function Approve.mount(options: MountOptions): any
 		_pending = false,
 	}, Widget)
 
+	--[[
+		People transcribe a code with the spacing and case they heard it in, and a
+		lowercase or hyphenated code is not the code the daemon minted — it would
+		spend one of five attempts to say so. Normalised as soon as the field is left,
+		so what the box shows is what will be sent.
+	]]
+	codeBox.FocusLost:Connect(function()
+		codeBox.Text = self:_normalisedCode()
+	end)
 	connectButton.Activated:Connect(function()
-		options.onConnect(urlBox.Text)
+		options.onConnect(urlBox.Text, self:_normalisedCode())
 	end)
 	autoApplyToggle.Activated:Connect(function()
 		self._settings.autoApply = not self._settings.autoApply
@@ -555,6 +605,33 @@ function Approve.mount(options: MountOptions): any
 	end)
 
 	return self
+end
+
+function Widget:_normalisedCode(): string
+	local typed = self.codeBox.Text
+	if type(self.normalisePairingCode) == "function" then
+		return self.normalisePairingCode(typed)
+	end
+	return typed
+end
+
+--[[
+	Say whether this link already holds a session key, and stop offering a code as
+	if it were still needed.
+
+	The box is cleared once pairing succeeds: a redeemed code is spent — single
+	use, on the daemon's side — and leaving it on screen reads as something that
+	could be used again.
+]]
+function Widget:setPaired(paired: boolean, sessionKeyId: string?)
+	if paired then
+		self.codeBox.Text = ""
+		self.codeBox.PlaceholderText = if sessionKeyId
+			then string.format("paired · %s", sessionKeyId)
+			else "paired"
+	else
+		self.codeBox.PlaceholderText = "pairing code"
+	end
 end
 
 function Widget:_renderSettings()

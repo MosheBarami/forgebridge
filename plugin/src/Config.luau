@@ -72,11 +72,42 @@ Config.OUTPUT = table.freeze({
 	MAX_BATCH = 200,
 })
 
--- Keys for plugin:GetSetting / plugin:SetSetting. Namespaced because Studio
--- shares one settings store per plugin, not per script.
+--[[
+	The link headers, from `packages/daemon/src/server.ts`.
+
+	They live there rather than in `packages/protocol`, which is why they are
+	mirrored from the daemon and not from the protocol package like everything else
+	above. The M41 conformance test owes them the same pinning.
+]]
+Config.LINK_HEADER = "X-ForgeBridge-Link"
+Config.MAC_HEADER = "X-ForgeBridge-Mac"
+
+--[[
+	Keys for plugin:GetSetting / plugin:SetSetting. Namespaced because Studio
+	shares one settings store per plugin, not per script.
+
+	The six link keys are one record split across five keys: without all of them a
+	Studio restart cannot resume, and the user is asked for a pairing code they no
+	longer have (codes live ten minutes and are single-use). `SESSION_KEY` holds
+	the pairing-derived key itself, base64-encoded because Studio's settings store
+	round-trips through JSON and raw key bytes would not survive it.
+
+	The key is a secret at rest in Studio's settings, which is the same place the
+	base URL lives and is readable by anything that can read the user's Studio
+	profile. That is the cost of not asking for a fresh code every restart; the
+	daemon holds its half in memory only, so a daemon restart invalidates this copy
+	and the user re-pairs anyway.
+]]
 Config.SETTING = table.freeze({
 	BASE_URL = "forgebridge.baseUrl",
 	LINK_ID = "forgebridge.linkId",
+	SESSION_KEY = "forgebridge.sessionKey",
+	SESSION_KEY_ID = "forgebridge.sessionKeyId",
+	PROJECT_ID = "forgebridge.projectId",
+	--- The last delivery nonce accepted: where a resumed poll starts from.
+	LINK_CURSOR = "forgebridge.linkCursor",
+	--- The last envelope nonce sent. Monotonic per link, never reused.
+	LINK_NONCE = "forgebridge.linkNonce",
 	AUTO_APPLY = "forgebridge.autoApply",
 	AUTO_APPLY_SCOPE = "forgebridge.autoApplyScope",
 	MIRROR_OUTPUT = "forgebridge.mirrorOutput",

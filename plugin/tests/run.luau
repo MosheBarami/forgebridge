@@ -79,6 +79,8 @@ local suites = {
 	require("./ApplySpec"),
 	require("./ApproveSpec"),
 	require("./TransportSpec"),
+	require("./PairingSpec"),
+	require("./CryptoSpec"),
 }
 
 for _, suite in suites do

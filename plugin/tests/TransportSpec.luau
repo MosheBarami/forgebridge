@@ -90,17 +90,35 @@ return function(t)
 		t.equal(parts.base, "http://127.0.0.1:9000")
 	end)
 
-	t.test("refuses deliveries from a relay until authenticated delivery exists", function()
+	t.test("refuses deliveries from a relay it has no way to pair with", function()
+		-- Authenticating a delivery is no longer the obstacle (M18 landed the MAC);
+		-- there is simply no relay in this repository to pair against yet.
 		local allowed, reason = Transport.deliveryGate((Transport.parseBaseUrl("https://relay.example.org")))
 		t.falsy(allowed)
-		t.contains(reason, "M18")
+		t.contains(reason, "M17")
 		t.truthy(Transport.deliveryGate((Transport.parseBaseUrl("http://127.0.0.1:9000"))))
 	end)
 
-	t.test("MAC verification is honestly unimplemented", function()
-		local verified, reason = Transport.verifyMac({ mac = "whatever" }, "key")
-		t.falsy(verified)
-		t.contains(reason, "M18")
+	t.test("MAC verification refuses what it cannot check rather than passing it", function()
+		-- The three ways verification is unavailable, none of which is a pass. The
+		-- MACs that do verify are exercised in PairingSpec, against a stand-in whose
+		-- signed bytes can be asserted.
+		local noKey, noKeyReason = Transport.verifyMac({ mac = "whatever" }, nil, {})
+		t.falsy(noKey)
+		t.contains(noKeyReason, "no session key")
+
+		local noCrypto, noCryptoReason = Transport.verifyMac({ mac = "whatever" }, "key", nil)
+		t.falsy(noCrypto)
+		t.contains(noCryptoReason, "no HMAC implementation")
+
+		local crypto = { hmacSha256 = function(_key, message) return message end, toBase64 = function(raw) return raw end }
+		local wrong, wrongReason = Transport.verifyMac(
+			{ linkId = "l", nonce = 1, payload = "{}", mac = "not-the-mac" },
+			"key",
+			crypto
+		)
+		t.falsy(wrong)
+		t.contains(wrongReason, "did not verify")
 	end)
 
 	t.suite("Transport — response classification")
