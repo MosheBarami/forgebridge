@@ -11,12 +11,12 @@
 
 **Live status, 27 Aug 2026** — nine packages, all green: `protocol`, `core`, `daemon`,
 `model-registry`, `luau-analysis`, `mcp`, `a2a` and `cli` under Vitest, `sdk-python` under pytest
-and ruff, plus the gate self-tests under `scripts/` and 180 Luau plugin tests run by hand.
+and ruff, plus the gate self-tests under `scripts/` and 187 Luau plugin tests run by hand.
 Per-suite counts are deliberately not rolled up here. This line read "311 gate self-tests" when
 the suite had 313, and the `M10` row read 64 when `luau-analysis` had 71 — which is what a number
 nothing decides does. So the rule is the one the rest of this repository already applies to its
 claims: a count stays in a hand-maintained document only where a gate can decide it against the
-tree. Two can — the `protocol` suite's, and the plugin's 180 Luau tests — and
+tree. Two can — the `protocol` suite's, and the plugin's 187 Luau tests — and
 `scripts/__tests__/docs-claims.test.ts` counts both from the source and fails when this file
 disagrees. The TypeScript suites cannot be counted that way: they lean on `it.each`, so a static
 count of `it(` under `scripts/` misses about a third of what runs, and a gate that is
@@ -128,7 +128,7 @@ that needs evidence like any other.
 | # | Milestone | Status | Definition of done |
 |---|---|---|---|
 | M40 | Persistence: SQLite adapter reaching parity with Supabase | NEW | Same test suite runs green against both adapters |
-| M41 | Test strategy: Vitest units + Playwright E2E + Luau plugin tests | PART | Plugin tests exist: 180 Luau tests in `plugin/tests/`, run by hand with `luau tests/run.luau`. Still to add: those tests in CI (needs a pinned Luau toolchain — see the TODO in `.github/workflows/ci.yml`) and E2E of the full apply/rollback loop |
+| M41 | Test strategy: Vitest units + Playwright E2E + Luau plugin tests | PART | Plugin tests exist: 187 Luau tests in `plugin/tests/`, run by hand with `luau tests/run.luau`. Still to add: those tests in CI (needs a pinned Luau toolchain — see the TODO in `.github/workflows/ci.yml`) and E2E of the full apply/rollback loop |
 | M42 | Security: RLS suite, Semgrep/CodeQL, secret scanning, SBOM | PART | RLS suite passes live today. Working-tree secret scanning now exists and runs in CI: `scripts/verify-no-secrets.ts` (`npm run verify:no-secrets`), which is the check ADR-013's mitigation names. Still to add: SAST, a **history** scan (`gitleaks`, blocked on a pinned action version a human must choose), SBOM publishing |
 | M43 | Threat model + prompt-injection defences documented and tested | PART | `THREAT-MODEL.md` claims are each backed by a test. T1's key-custody claim now is: `scripts/verify-no-key-storage.ts` (`npm run verify:no-key-storage`) enforces "there is no column for them". T2–T6 are still prose |
 | M44 | Observability: OpenTelemetry core + optional Sentry adapter | NEW | Traces span producer → core → transport → plugin; self-hosters need no vendor |
