@@ -15,9 +15,10 @@
 	    therefore goes to a human, because static analysis is the part of the
 	    verdict this plugin has no way to recompute;
 	  * `Approve.mount` is the widget. It shows the privacy posture in words rather
-	    than a padlock, the summary, whose verdict it is showing, the destructive
-	    operations first, and then the diff. Approval is meant to be a glance, not
-	    an audit.
+	    than a padlock, the summary, whose verdict it is showing, every reason the
+	    set was held for a human, the destructive operations first, and then the
+	    diff. Approval is meant to be a glance, not an audit — but a glance at
+	    "approve or reject" with no "why" is not approval, it is assent.
 
 	`evaluate` is pure and has tests. The widget is deliberately dumb: it renders
 	what it is handed and calls back.
@@ -122,6 +123,51 @@ local function carriesSource(operation: any): boolean
 end
 
 --[[
+	Does this operation take the brake off code that is ALREADY in the place?
+
+	`carriesSource` catches an operation that INSTALLS code. This is the other
+	half of the same risk: an operation that installs nothing and merely starts a
+	script already sitting inside the auto-apply scope. No Luau rides along in the
+	ChangeSet, so there is no source for any verdict to be about and nothing for
+	this plugin to weigh — the diff reads as a one-line property write, and the
+	consequence is a script running. ADR-012 makes approval the safety mechanism
+	and auto-apply a narrow, scoped exception; starting dormant code is as
+	consequential as installing it, so it belongs to the human either way.
+
+	Returns the property responsible, so the blocker can name it.
+
+	  * `Disabled` is waved through only when the value reads, right here, as one
+	    that stops code: a literal `Bool true` disables the script whatever state
+	    it was in, so it can never start anything. `Bool false` starts it, and any
+	    other shape — a String "false", a Nil, a missing value — is one this
+	    function cannot read as either. An unreadable value is the dangerous one.
+	  * `RunContext` blocks whatever it is set to. `Server` or `Client` makes a
+	    Script run where it sits, including in a container that has never run one.
+	    `evaluate` holds the ChangeSet and nothing else — no DataModel, so no way
+	    to read what the instance's RunContext is now — which leaves no way to
+	    tell a write that stops a script from the one that starts it.
+
+	Deliberately not `moveInstance`: a move carries no class, so this could not
+	tell a Script being reparented from a Part being tidied, and a rule that fires
+	on every ordinary reparent is one people learn to click through. A move stays
+	a warning, and it is rendered in the diff.
+]]
+local function startsDormantCode(operation: any): string?
+	if operation.op ~= "setProperty" then
+		return nil
+	end
+	if operation.property == "RunContext" then
+		return "RunContext"
+	end
+	if operation.property == "Disabled" then
+		local value = operation.value
+		local stopsCode = type(value) == "table" and value.t == "Bool" and value.v == true
+		return if stopsCode then nil else "Disabled"
+	end
+	return nil
+end
+
+--[[
 	Decide whether this ChangeSet may skip the human.
 
 	Every reason it may not is collected rather than short-circuited: a user who
@@ -143,6 +189,12 @@ function Approve.evaluate(changeSet: any, policy: Policy, isWithin: (string, str
 	local deletions = 0
 	local moves = 0
 	local sourceWrites = 0
+	local codeStarts = 0
+	-- The properties responsible, in the order they first appear and without
+	-- repeats: the blocker names them, and "(Disabled, Disabled, Disabled)" tells
+	-- a reader nothing the count did not already say.
+	local startProperties: { string } = {}
+	local seenStartProperty: { [string]: boolean } = {}
 	for _, operation in changeSet.operations or {} do
 		if operation.op == "deleteInstance" then
 			deletions += 1
@@ -151,6 +203,14 @@ function Approve.evaluate(changeSet: any, policy: Policy, isWithin: (string, str
 		end
 		if carriesSource(operation) then
 			sourceWrites += 1
+		end
+		local startProperty = startsDormantCode(operation)
+		if startProperty then
+			codeStarts += 1
+			if not seenStartProperty[startProperty] then
+				seenStartProperty[startProperty] = true
+				table.insert(startProperties, startProperty)
+			end
 		end
 	end
 
@@ -176,6 +236,19 @@ function Approve.evaluate(changeSet: any, policy: Policy, isWithin: (string, str
 			string.format(
 				"%d operation(s) write Luau source, and only a validation verdict this plugin did not compute vouches for it",
 				sourceWrites
+			)
+		)
+	end
+
+	if codeStarts > 0 then
+		-- The source that would run is not in this ChangeSet, so no verdict — not
+		-- even one this plugin had computed itself — could be about it.
+		table.insert(
+			blockers,
+			string.format(
+				"%d operation(s) can start code that is already in the place (%s) — that code is in no ChangeSet, so nothing has vouched for it at all",
+				codeStarts,
+				table.concat(startProperties, ", ")
 			)
 		)
 	end
@@ -258,6 +331,50 @@ function Approve.describeValidation(view: ValidationView?): string
 		tostring(view.luau),
 		tostring(view.policy)
 	)
+end
+
+--[[
+	The note block above the diff: why this ChangeSet stopped here, and then what
+	is merely worth knowing.
+
+	This is the WHOLE of that block — `Widget:present` assigns the string this
+	returns and adds nothing of its own — so a test on this function is a test on
+	the text a person reads. That matters here specifically: `evaluate` was
+	computing `blockers` and the panel rendered only `warnings`, so a person was
+	shown Approve and Reject with every carefully worded reason dropped on the
+	floor. Blockers lead, because "why am I being asked?" is the question a
+	reviewer is actually holding.
+
+	Pure, and it has to stay that way. The unit tests run in a plain Luau where the
+	Roblox globals do not exist and the global table is readonly, so the widget
+	itself cannot be driven there — a function that returns the exact words is the
+	only place the panel's text can be asserted against.
+]]
+function Approve.describeNotes(decision: Decision?, instancesDestroyed: number?): string
+	local lines: { string } = {}
+
+	local blockers = if type(decision) == "table" and type((decision :: any).blockers) == "table"
+		then (decision :: any).blockers
+		else {}
+	if #blockers > 0 then
+		table.insert(lines, string.format("Approval required — %d reason(s):", #blockers))
+		for _, blocker in blockers do
+			table.insert(lines, "  · " .. tostring(blocker))
+		end
+	end
+
+	local warnings = if type(decision) == "table" and type((decision :: any).warnings) == "table"
+		then (decision :: any).warnings
+		else {}
+	for _, warning in warnings do
+		table.insert(lines, "! " .. tostring(warning))
+	end
+
+	if instancesDestroyed and instancesDestroyed > 0 then
+		table.insert(lines, string.format("! %d instances would be destroyed", instancesDestroyed))
+	end
+
+	return table.concat(lines, "\n")
 end
 
 -- ── widget ────────────────────────────────────────────────────────────────────
@@ -706,15 +823,11 @@ function Widget:present(rendered: any, decision: Decision, needsApproval: boolea
 	self.validationLabel.Text = Approve.describeValidation(decision.validation)
 	self.validationLabel.Visible = true
 
-	local notes = {}
-	for _, warning in decision.warnings do
-		table.insert(notes, "! " .. warning)
-	end
-	if summary.instancesDestroyed and summary.instancesDestroyed > 0 then
-		table.insert(notes, string.format("! %d instances would be destroyed", summary.instancesDestroyed))
-	end
-	self.warningLabel.Text = table.concat(notes, "\n")
-	self.warningLabel.Visible = #notes > 0
+	-- Every word of this comes from `Approve.describeNotes`, blockers included.
+	-- Anything composed here instead would be text no test can reach.
+	local notes = Approve.describeNotes(decision, summary.instancesDestroyed)
+	self.warningLabel.Text = notes
+	self.warningLabel.Visible = notes ~= ""
 
 	local order = 0
 	-- Destructive first: it is the part of the diff a tired reviewer must not miss.

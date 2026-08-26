@@ -51,6 +51,17 @@ export function hostMatches(host: string, entry: string): boolean {
  * `https://evil.com/@api.example.com` as host `api.example.com` — so a URL that
  * really reaches evil.com passes an allowlist containing api.example.com. That
  * exact string was confirmed to return zero findings before this was fixed.
+ *
+ * A BACKSLASH ends the authority too. The WHATWG URL parser treats `\` as `/`
+ * for the special schemes — http, https, ws, wss, ftp, file — which is every
+ * scheme `HttpService` can request, so `https://evil.com\@api.example.com/x`
+ * has host evil.com and reaches evil.com. Reading the backslash as an ordinary
+ * authority character left `@api.example.com` in the string, the userinfo strip
+ * then cut at the `@`, and the URL matched an allowlist containing
+ * api.example.com: the same ordering bug wearing a different separator, and it
+ * too returned zero findings before this was fixed. Ending the authority early
+ * can only ever make the host shorter, which is the direction that produces
+ * more findings rather than fewer.
  */
 export function normaliseHost(value: string): string {
   let host = value.trim().toLowerCase();
@@ -58,6 +69,7 @@ export function normaliseHost(value: string): string {
   if (scheme !== -1) host = host.slice(scheme + 3);
   // Authority ends here. Everything after is path/query/fragment.
   host = host.split('/')[0] ?? host;
+  host = host.split('\\')[0] ?? host;
   host = host.split('?')[0] ?? host;
   host = host.split('#')[0] ?? host;
   const at = host.lastIndexOf('@');

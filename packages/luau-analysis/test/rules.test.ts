@@ -306,6 +306,27 @@ describe('fail-closed regressions', () => {
     expect(result.status).not.toBe('ok');
   });
 
+  it('ends the authority at a backslash, which the URL parser reads as a slash', () => {
+    // The same ordering bug wearing a different separator. WHATWG treats `\` as
+    // `/` for http and https, so this URL reaches evil.com — but normaliseHost
+    // ended the authority at `/`, `?` and `#` only, left `@api.example.com` in
+    // the string, and the userinfo strip then handed back api.example.com,
+    // which is on the allowlist. Zero findings before this was fixed.
+    const result = analyse('HttpService:GetAsync("https://evil.com\\\\@api.example.com/x")\n', ALLOW);
+    expect(result.status).not.toBe('ok');
+    expect(result.findings[0]?.message).toContain('evil.com');
+  });
+
+  it('still passes an allowed host, backslash in the path and all', () => {
+    // The control. A backslash *after* the authority is path, and cutting the
+    // host short there would report the project's own endpoint as unreviewed.
+    const head = 'local H = game:GetService("HttpService")\n';
+    expect(analyse(`${head}print(H:GetAsync("https://api.example.com/a\\\\b"))\n`, ALLOW)).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+  });
+
   it('sees a call chained straight off GetService', () => {
     // The receiver of `:GetAsync` here is `)`, not a name, so the receiver
     // guard skipped it. This is the most ordinary one-liner in Roblox code.
@@ -627,5 +648,154 @@ describe('fail-closed regressions, round two', () => {
     // fail-closed does not become fail-noisy.
     const source = 'local ds = game:GetService("DataStoreService"):GetDataStore("s")\nlocal v = ds:GetAsync("k")\n';
     expect(analyse(source, ALLOW)).toEqual({ status: 'ok', findings: [] });
+  });
+});
+
+/**
+ * Round four. Same root cause as every block above it: a rule looks for the one
+ * token shape it recognises, does not find it, and returns nothing — so "I do
+ * not understand this" and "this is safe" come out of the analyser as the same
+ * answer. Each source below was run against the BUILT analyser first and
+ * returned `status: 'ok'` with zero findings, and each is paired with the
+ * legitimate shape it is most easily confused with. A rule that fires on
+ * ordinary code gets switched off, which is the same outcome as no rule.
+ */
+describe('fail-closed regressions, round three', () => {
+  it('does not count a yield inside a loop that is never entered', () => {
+    // `inDeadBranch` considered enclosing `if` blocks and skipped everything
+    // else, so a `task.wait` the engine never reaches counted as this loop's
+    // escape and a source that hangs Studio came back `ok`.
+    only('while true do\n  while false do task.wait(1) end\n  step()\nend\n', 'luau/while-true-no-yield');
+    only('while true do\n  while nil do return end\n  step()\nend\n', 'luau/while-true-no-yield');
+  });
+
+  it('still counts one in a nested loop that can run', () => {
+    // The control, and it is three separate statements about reachability: a
+    // condition this check cannot read is treated as reachable; a `repeat` body
+    // runs once before its `until` is evaluated, so it yields even when the
+    // condition ends it; and a numeric `for` is bounds arithmetic nobody here
+    // evaluates. Firing on any of these would be firing on working code.
+    const sources = [
+      'while true do\n  while ready do task.wait(1) end\n  step()\nend\n',
+      'while true do\n  repeat task.wait(1) until true\n  step()\nend\n',
+      'while true do\n  for i = 1, 3 do task.wait(1) end\n  step()\nend\n',
+    ];
+    for (const source of sources) {
+      expect(analyse(source), source).toEqual({ status: 'ok', findings: [] });
+    }
+  });
+
+  it('reads a per-frame signal reached by a bracket index', () => {
+    // `RunService["Heartbeat"]` is the same signal as `RunService.Heartbeat`,
+    // and the rule resolved the receiver only through `.Name` — so one pair of
+    // brackets, inline or through a local, turned it off entirely.
+    const head = 'local RunService = game:GetService("RunService")\n';
+    const inline = `${head}RunService["Heartbeat"]:Connect(function()\n  while queue.count > 0 do\n    process(queue)\n  end\nend)\n`;
+    expect(rules(inline)).toEqual(['luau/unbounded-heartbeat']);
+
+    const viaLocal = [
+      head.trimEnd(),
+      'local hb = RunService["Heartbeat"]',
+      'hb:Connect(function()',
+      '  while queue.count > 0 do',
+      '    process(queue)',
+      '  end',
+      'end)',
+      '',
+    ].join('\n');
+    expect(rules(viaLocal)).toEqual(['luau/unbounded-heartbeat']);
+  });
+
+  it('does not read every bracket index as a per-frame signal', () => {
+    // Two controls. `part["Touched"]` is not a per-frame signal however it is
+    // spelled, and an index this check cannot read — `RunService[name]` —
+    // resolves to nothing rather than to a guess: every finding this rule emits
+    // names the signal in its message, and here there is no name to put there.
+    const touched = 'part["Touched"]:Connect(function()\n  while queue.count > 0 do\n    process(queue)\n  end\nend)\n';
+    expect(analyse(touched)).toEqual({ status: 'ok', findings: [] });
+
+    const computed =
+      'local RunService = game:GetService("RunService")\nRunService[name]:Connect(function()\n  while queue.count > 0 do\n    process(queue)\n  end\nend)\n';
+    expect(analyse(computed)).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('sees a remote handler whose signal reached a local first', () => {
+    // The rule required the literal run `OnServerEvent` `:` `Connect`, so
+    // binding the signal to a local — or indexing it with a string — silenced
+    // it even though the handler is written inline underneath. This is the
+    // commonest real Roblox exploit vector: `amount` is whatever the client
+    // sent, and it lands in a balance.
+    const head = 'local Remotes = game:GetService("ReplicatedStorage").Remotes\n';
+
+    const viaLocal = [
+      head.trimEnd(),
+      'local ev = Remotes.GiveCash.OnServerEvent',
+      'ev:Connect(function(player, amount)',
+      '  player.leaderstats.Cash.Value += amount',
+      'end)',
+      '',
+    ].join('\n');
+    const local = analyse(viaLocal);
+    expect(local.findings.map((finding) => finding.rule)).toEqual(['luau/remote-no-validation']);
+    expect(local.findings[0]?.message).toContain('amount');
+
+    const viaBracket = `${head}Remotes.GiveCash["OnServerEvent"]:Connect(function(player, amount)\n  player.leaderstats.Cash.Value += amount\nend)\n`;
+    expect(rules(viaBracket)).toEqual(['luau/remote-no-validation']);
+
+    const invoke = `${head}Remotes.Buy["OnServerInvoke"] = function(player, itemId)\n  return grant(player, itemId)\nend\n`;
+    expect(rules(invoke)).toEqual(['luau/remote-no-validation']);
+  });
+
+  it('does not treat every local signal as a remote, and still clears a checked one', () => {
+    // Two controls. `part.Touched` gives its handler nothing the client chose,
+    // so accusing its arguments of coming from the client is a finding a reader
+    // can check and find wrong. And the handler that does validate has to keep
+    // passing when it is connected through a local, or the fix has simply moved
+    // the false negative into a false positive.
+    const touched = [
+      'local hit = part.Touched',
+      'hit:Connect(function(other, amount)',
+      '  use(other, amount)',
+      'end)',
+      '',
+    ].join('\n');
+    expect(analyse(touched)).toEqual({ status: 'ok', findings: [] });
+
+    const validated = [
+      'local Remotes = game:GetService("ReplicatedStorage").Remotes',
+      'local ev = Remotes.GiveCash.OnServerEvent',
+      'ev:Connect(function(player, amount)',
+      '  if typeof(amount) ~= "number" then return end',
+      '  if amount <= 0 or amount > 100 then return end',
+      '  player.leaderstats.Cash.Value += math.floor(amount)',
+      'end)',
+      '',
+    ].join('\n');
+    expect(analyse(validated)).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('reports a require whose target is computed by a call', () => {
+    // The rule skipped any argument holding neither a number nor an arithmetic
+    // operator, so `require(getModuleId())` walked past — contradicting the
+    // comment on its own next branch, which says a computed target is exactly
+    // what a reviewer needs to see.
+    const computed = analyse('local Lib = require(getModuleId())\nprint(Lib)\n');
+    expect(computed.findings.map((finding) => finding.rule)).toEqual(['luau/require-unreviewed-asset']);
+    expect(computed.findings[0]?.message).toContain('cannot tell what');
+    expect(rules('local Lib = require(Loader.load(id))\nprint(Lib)\n')).toEqual(['luau/require-unreviewed-asset']);
+  });
+
+  it('still treats an instance lookup as a path, not as a computed target', () => {
+    // The control, and the reason the check asks about `:` rather than about
+    // parentheses: navigating the tree is spelled with a method call, and all
+    // three of these are ordinary correct Roblox code.
+    const source = [
+      'local Shop = require(game:GetService("ReplicatedStorage").Modules.Shop)',
+      'local Maybe = require(script:FindFirstChild("Optional"))',
+      'local Shared = require(script.Parent:WaitForChild("Shared"))',
+      'print(Shop, Maybe, Shared)',
+      '',
+    ].join('\n');
+    expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
   });
 });

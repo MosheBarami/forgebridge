@@ -110,14 +110,40 @@ never reassigned. The *declaration* is not reported; the use is.
 
 **A source this analyser could not read is never reported as a pass.**
 
-A lexer error, a block that does not close, a token budget that ran out, an exception thrown by a
-rule — every one of those returns `fail`, with a finding naming what happened. The alternative is
-the failure this package exists to avoid: a rule that silently did not fire, and an `ok` that means
-"we did not look". The layers after this one are calibrated on its answer, so an unearned `ok` is
-worse than no analyser at all.
+Five things return `fail`, each with a finding naming what happened:
 
-That invariant is exercised in [`packages/luau-analysis/test/analyse.test.ts`](test/analyse.test.ts),
-including the case where a rule throws.
+- the lexer could not read a token;
+- a block or a bracket never closes, or closes with the wrong keyword;
+- an **`if` could not be classified**: the recogniser read it as an if-expression and then the
+  `else` that every if-expression has never arrived;
+- the token budget ran out;
+- a rule threw.
+
+The alternative to all five is the failure this package exists to avoid: a rule that silently did
+not fire, and an `ok` that means "we did not look". The layers after this one are calibrated on this
+one's answer, so an unearned `ok` is worse than no analyser at all.
+
+The third entry is the newest and the reason the list is worth writing out. Telling an `if`
+statement from an if-expression is a decision made from the token in front of the `if`, and a wrong
+decision is not quiet: reading a statement as a value leaves the block stack one opener short and
+reading a value as a statement leaves it one opener long, and either way the `end`s stop matching.
+But **two wrong decisions in opposite directions in one file cancel** — the stack balances, no error
+is reported, and every block range around them is wrong while the verdict says the source was read.
+Round four found a file that did exactly that and came back `{"status":"ok","findings":[]}`, and it
+is now a test in [`test/structure.test.ts`](test/structure.test.ts) alongside the two causes it
+combined. The unfinished-if-expression refusal above is the backstop under both: an if-expression
+that goes out of scope still waiting for a branch keyword is proof the `if` was misread, and that is
+reported rather than recovered from.
+
+What the invariant does **not** say is that the file is valid Luau. It is a statement about what
+this analyser noticed it could not read. There is no grammar here, so a statement that is malformed
+but balanced — `local = 1` — is read cleanly and reported by the other rules; see "Not understood"
+below.
+
+The invariant is exercised in [`test/analyse.test.ts`](test/analyse.test.ts), including the case
+where a rule throws, and in the `an unreadable source is never a pass` block of
+[`test/structure.test.ts`](test/structure.test.ts), which walks every shape the recogniser refuses
+and asserts each one reaches the caller as `fail` carrying exactly one finding.
 
 ## Using it
 
@@ -164,16 +190,27 @@ nothing. Both halves live in
 
 | Rule | Severity | Fires on | Deliberately does not fire on |
 |---|---|---|---|
-| `luau/syntax-error` | error | Source that does not tokenize, or whose blocks or brackets do not balance. Reported alone — no other rule runs. | Modern Luau: if-expressions, string interpolation, type annotations and generics, `::` casts, compound assignment, levelled long strings. |
+| `luau/syntax-error` | error | Source that does not tokenize, whose blocks or brackets do not balance, or that contains an `if` the recogniser cannot classify. Reported alone — no other rule runs. | Modern Luau: if-expressions including chained ones, string interpolation, type annotations, generics, `::` casts, compound assignment, levelled long strings. A generic followed by an `if` statement — `local q: Array<Job>` on one line, `if q then … end` on the next, and the same for a generic return type — is a source in [`test/structure.test.ts`](test/structure.test.ts); the one place a generic can still be misread is under [what the recogniser understands](#what-the-recogniser-understands-and-what-it-does-not). |
 | `luau/no-loadstring` | error | A free reference to the `loadstring` global, including one hidden inside a string interpolation. | `settings.loadstring`, a table key named `loadstring`, the word in a comment or a string. |
 | `luau/no-getfenv-setfenv` | error | A free reference to `getfenv` or `setfenv`. | A method of that name on somebody else's table (`Compat.getfenv`). |
 | `luau/require-unreviewed-asset` | error | `require(1234567)` — a numeric catalog asset id. | `require(script.Parent.Shared)` and every other require by path. |
-| `luau/http-egress-unallowlisted` | error / warning | `HttpService:GetAsync`/`PostAsync`/`RequestAsync` to a host not on `allowedHttpHosts`, including one written with string escapes. Warning when the URL is built at run time, or when the receiver cannot be resolved in a file that does use `HttpService`. | An allowed host, a subdomain of a `.example.com` entry, service methods that never leave the machine (`JSONDecode`, `GenerateGUID`), and `:GetAsync` on a DataStore in a file that never touches `HttpService`. |
+| `luau/http-egress-unallowlisted` | error / warning | `HttpService:GetAsync`/`PostAsync`/`RequestAsync` to a host not on `allowedHttpHosts`, including one written with string escapes. Warning when the URL is built at run time, or when the receiver cannot be resolved in a file that does use `HttpService`. | An allowed host, a subdomain of a `.example.com` entry, service methods that never leave the machine (`JSONDecode`, `GenerateGUID`), and `:GetAsync` on a DataStore **held in a name** in a file that never touches `HttpService`. It *does* warn on the one-line spelling — `game:GetService("DataStoreService"):GetDataStore("s"):GetAsync(k)` — because the receiver there is a `)` and the rule reads a chained receiver as one it has resolved. See the note under the table. |
 | `luau/unbounded-heartbeat` | error / warning | A `while` or `repeat` loop inside a `RunService.Heartbeat`/`Stepped`/`RenderStepped` handler, whether the signal is named at the `Connect` or reached through a local bound to it. Error when the loop has no yield, `break` or `return`; warning when it can exit but nothing bounds it. | Bounded per-frame work — a numeric or generic `for` over a collection, which is what a handler is for — and a local holding a signal that does not fire per frame. |
-| `luau/while-true-no-yield` | error | A loop whose condition is a literal Luau never reads as false — `while true`, `while 1`, `while "x"`, `while ((true))`, `repeat … until false`, `until nil` — with no yield, `break` or `return` that can run on the loop's own thread. | A loop with a real condition, one that calls `task.wait()`, waits on a signal, or can `break`. Three things do **not** count as an escape: a `task.wait()` inside a nested closure (it yields that closure), a `break` inside a nested closure (it belongs to no loop), and a `break` or `return` in the dead branch of a literal `if false`. A bare mention of `task.wait` is not a call and is not a yield. |
+| `luau/while-true-no-yield` | error | A loop whose condition is a literal Luau never reads as false — `while true`, `while 1`, `while "x"`, `while ((true))`, `repeat … until false`, `until nil` — with no yield, `break` or `return` that can run on the loop's own thread. | A loop with a real condition, one that calls `task.wait()`, waits on a signal, or can `break`. A signal's `:Wait()` counts as a yield unless the file defines a `Wait` of its own that this analyser cannot see yielding, and then no `:Wait()` in that file counts — `function o:Wait() end` followed by `while true do o:Wait() end` spins for ever. Three things do **not** count as an escape: a `task.wait()` inside a nested closure (it yields that closure), a `break` inside a nested closure (it belongs to no loop), and a `break` or `return` in the dead branch of a literal `if false`. A bare mention of `task.wait` is not a call and is not a yield. |
 | `luau/remote-no-validation` | warning | An `OnServerEvent` or `OnServerInvoke` handler that uses an argument past `player` without ever testing it, or that takes `...`. | The same handler with an `if typeof(x) ~= …` guard, an `assert`, or with no argument but `player`. |
 | `luau/deprecated-wait-spawn` | warning | A call to the global `wait`, `spawn` or `delay`. | `task.wait`, `task.spawn`, `task.delay`, a signal's `:Wait()`, and a local variable named `delay` that is merely read. |
 | `luau/analysis-incomplete` | error | The analysis stopped early: token budget exceeded, or a rule threw. Not a verdict on the script. | — |
+
+**The DataStore note, stated rather than left in the table.** `:GetAsync` belongs to `DataStore` as
+well as to `HttpService`, and telling them apart needs to know what the receiver is. The rule reads
+two receivers as `HttpService`: a name bound to `GetService("HttpService")`, and *any* chained call
+— `something(…):GetAsync(k)` — because the most ordinary spelling of a real egress call is
+`game:GetService("HttpService"):GetAsync(url)` and requiring a name for the receiver used to skip
+it entirely. The cost is on the other side of the same coin: a DataStore reached the same way is
+warned about, once, as a URL that cannot be read. The two-line spelling, which is what most code
+does, is silent and is tested that way. TODO(M10 follow-up): reading the head of the chain is what
+separates them, and that is the dataflow gap in the table above rather than a spelling this rule
+can pattern-match its way out of.
 
 Three of these deserve their reasoning spelled out.
 
@@ -202,6 +239,24 @@ either one, counted, reports a loop that hangs Studio for ever as one that can l
 obvious than a literal condition is treated as reachable, which keeps the rule quiet rather than
 guessing. A loop whose condition is held in a variable — `local always = true; while always do` —
 is not reported at all; that is the dataflow gap, not a reachability decision.
+
+The yield side of the same rule has one decision worth naming. `:Wait()` is credited as a yield
+because on an `RBXScriptSignal` it is one, and nothing in a token stream says the receiver is a
+signal — so a script that writes its own
+
+```lua
+local o = {}
+function o:Wait() end
+while true do o:Wait() step() end
+```
+
+cleared the rule while spinning for ever. The credit is now withdrawn for every `:Wait()` in a file
+that defines a `Wait` of its own with no yield this analyser recognises inside it. The check is the
+definition, not the call: a custom signal class whose `Wait` really does yield keeps the credit,
+because writing one is ordinary Roblox code and a rule that fired on it is a rule people learn to
+click past. Both halves are in [`test/query.test.ts`](test/query.test.ts). What this does not reach
+is a `Wait` defined in another module, which is the cross-file gap and not something a token
+recogniser can close.
 
 ## How it reads Luau
 
@@ -235,15 +290,27 @@ Understood, and tested:
 - `if` **expressions**, including chained ones. `local x = if ready then 1 else 2` has no `end`.
   The recogniser tells an if-expression from an if-statement by the token before it — an expression
   can only appear where a value is expected — and the set of those tokens is written out in
-  `src/structure.ts`. `then` and `else` are not in that set, because they introduce a statement far
-  more often than a value; instead the recogniser tracks the if-expressions it has open, so the
-  second `if` in `if ready then if fast then "go" else "jog" else "wait"` is read as a value while
-  the second `if` in `if ready then if fast then go() end end` is read as a statement. Counting an
-  expression as a block opener would report perfectly good Luau as unterminated, which is a `fail`
-  on correct code and the most likely way this package would be wrong in practice.
+  `src/structure.ts`. It includes the keywords that can only be followed by a value: `return`,
+  `and`, `or`, `not`, `in`, and — added in round four, after `repeat step() until if done then …`
+  was read as a block opener and reported as unterminated — `until`, `while`, `elseif` and `if`.
+  `then` and `else` are deliberately *not* in it, because they introduce a statement far more often
+  than a value; instead the recogniser tracks the if-expressions it has open, so the second `if` in
+  `if ready then if fast then "go" else "jog" else "wait"` is read as a value while the second `if`
+  in `if ready then if fast then go() end end` is read as a statement. Counting an expression as a
+  block opener would report perfectly good Luau as unterminated, which is a `fail` on correct code
+  and the most likely way this package would be wrong in practice.
+- **An if-expression must reach its `else`.** Every if-expression in Luau has one, so one that goes
+  out of scope still waiting for a branch keyword means the `if` was misread, and the recogniser
+  refuses the file instead of carrying on with ranges it cannot trust.
 - String interpolation, including a table constructor nested inside the expression.
 - Type annotations, generics, `::` casts, `--!strict` and attribute-looking `@name` prefixes: these
-  lex without error and are otherwise ignored.
+  lex without error and are otherwise ignored — with one exception that is not ignorable, because
+  `>` is two different tokens. It closes a generic type-argument list *and* it is the comparison
+  operator, and what may follow it differs: after `local queue: Array<Job>` an `if` is a statement,
+  after `budget >` an `if` is a value. The recogniser walks back from the `>` over the tokens a type
+  may contain, looking for the matching `<`; finding one makes it a generic close. Both spellings
+  are tested. Reading `>` as an expression position unconditionally — which is what it did until
+  round four — reported `local queue: Array<Job>` followed by an ordinary `if` as unbalanced.
 
 Not understood, and stated so nobody assumes otherwise:
 
@@ -264,6 +331,18 @@ Not understood, and stated so nobody assumes otherwise:
 - **HttpService is recognised by name.** The literal `HttpService`, and any variable bound to
   `…:GetService("HttpService")` in the same file. A service passed in as a parameter, or reached
   through a table or an index, is missed — see the table above for what that costs.
+- **The `<` of a generic is not tracked forward**, only found by walking back from a `>` that has an
+  `if` after it, and that walk is bounded and reads types loosely rather than exactly. Two
+  unparenthesised comparisons arranged so that a stray `<` sits between the walk's start and its
+  stopping point can be read the wrong way. A wrong reading is loud — the block counts stop matching
+  and the file is refused — unless the same file contains a second wrong reading in the opposite
+  direction, which is the cancellation the invariant section describes.
+- **Whether a `:Wait()` yields depends on what the receiver is**, and a token stream does not say.
+  It is credited as a yield, which is right for an `RBXScriptSignal`, and the credit is withdrawn
+  for the whole file when the file defines a `Wait` of its own that this analyser cannot see
+  yielding. A `Wait` defined in *another* module and called here is neither seen nor withdrawn: that
+  is the cross-file gap above, and it is one way left to clear `luau/while-true-no-yield` on a loop
+  that spins.
 - **`goto`, and Lua 5.1 constructs Luau dropped**, are not special-cased in any way.
 
 ## Why there is no third-party parser here
@@ -300,6 +379,15 @@ decoder that read `"\104ttps://evil.com"` as something other than the URL it is.
 pinned by their own `describe` block in [`test/rules.test.ts`](test/rules.test.ts), and every fix
 in them is paired with the legitimate shape it is most easily confused with — a fix that turns a
 false negative into a false positive has moved the problem rather than solved it.
+
+Round four went under the rules, to the two passes they are all built on. The block recogniser
+classified an `if` after `>` and an `if` after `until` wrongly and in opposite directions, so a file
+containing one of each balanced and returned `ok` over block ranges that were nonsense; and
+`isYieldCall` credited any `receiver:Wait()` as a yield, so two lines defining a `Wait` that does
+nothing cleared `luau/while-true-no-yield` on a loop that hangs Studio. Both were reproduced against
+the built analyser first, and both are pinned in [`test/structure.test.ts`](test/structure.test.ts)
+and [`test/query.test.ts`](test/query.test.ts) with the legitimate shape beside them — a comparison
+against an if-expression, and a custom signal whose `Wait` really does yield.
 
 The rules and the analyser are built and tested, and **`packages/daemon` calls `analyse`
 at submit time**, inside the trust boundary, over every source a ChangeSet carries — a

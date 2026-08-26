@@ -292,4 +292,179 @@ return function(t)
 		)
 		t.truthy(#decision.blockers >= 3, "a user who turned auto-apply on deserves all of why it still asked")
 	end)
+
+	t.suite("Approve — fail-closed regressions")
+
+	t.test("un-disabling a script already inside the scope is not an auto-apply", function()
+		-- The ChangeSet carries no Luau, so nothing analysed anything and nothing
+		-- could have: the operation is one property write, and what it does is
+		-- start a Script that was sitting in the scope switched off. `carriesSource`
+		-- looked for a Source, found none, and said nothing — which made "I see no
+		-- code in this operation" and "this operation runs no code" the same answer.
+		local decision = Approve.evaluate(
+			set({
+				{
+					op = "setProperty",
+					path = "ServerScriptService.Shop.Handler",
+					property = "Disabled",
+					value = { t = "Bool", v = false },
+				},
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.falsy(decision.auto, "ADR-012: starting dormant code is as consequential as installing it")
+		t.truthy(blockedBy(decision, "start code that is already in the place"))
+		t.truthy(blockedBy(decision, "Disabled"), "the blocker names the property responsible")
+	end)
+
+	t.test("disabling one still auto-applies, and so does an ordinary property", function()
+		-- The control, and the sharpest one available: the same property, the
+		-- opposite consequence. Whatever the script was doing, after `Disabled =
+		-- true` it is not running, so it cannot be the operation the rule above is
+		-- for. A rule that fires here — or on a Transparency — is one people learn
+		-- to click through, and then the narrow exception stops being useful, which
+		-- is the same outcome as having no rule.
+		local stopped = Approve.evaluate(
+			set({
+				{
+					op = "setProperty",
+					path = "ServerScriptService.Shop.Handler",
+					property = "Disabled",
+					value = { t = "Bool", v = true },
+				},
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(stopped.auto, "turning a script off can never start code")
+
+		local ordinary = Approve.evaluate(
+			set({
+				{
+					op = "setProperty",
+					path = "ServerScriptService.Shop.Sign",
+					property = "Transparency",
+					value = { t = "Number", v = 0.5 },
+				},
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(ordinary.auto, "the auto-apply exception has to still cover ordinary property writes")
+	end)
+
+	t.test("a RunContext write is a human's call whatever it is set to", function()
+		-- Server or Client makes a Script run where it sits, including somewhere
+		-- that has never run one. Legacy is not a safe opposite: `evaluate` holds
+		-- the ChangeSet and no DataModel, so it cannot read what the RunContext is
+		-- now, and cannot tell the write that stops a script from the one that
+		-- starts it.
+		for _, value in { "Server", "Client", "Legacy" } do
+			local decision = Approve.evaluate(
+				set({
+					{
+						op = "setProperty",
+						path = "ServerScriptService.Shop.Handler",
+						property = "RunContext",
+						value = { t = "Enum", enum = "RunContext", value = value },
+					},
+				}),
+				permissive,
+				Path.isWithin
+			)
+			t.falsy(decision.auto, string.format("RunContext = %s must not auto-apply", value))
+			t.truthy(blockedBy(decision, "RunContext"))
+		end
+
+		-- Control: an Enum write that decides nothing about whether code runs.
+		local font = Approve.evaluate(
+			set({
+				{
+					op = "setProperty",
+					path = "ServerScriptService.Shop.Sign",
+					property = "Font",
+					value = { t = "Enum", enum = "Font", value = "Code" },
+				},
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(font.auto)
+	end)
+
+	t.test("a Disabled value this plugin cannot read blocks rather than passes", function()
+		-- Only a literal Bool true is demonstrably a stop. A string that spells a
+		-- boolean, a Nil, a number, a value that never arrived: each is a shape this
+		-- rule cannot resolve, and an unresolvable value is treated as the dangerous
+		-- one rather than waved through for not matching the shape it looks for.
+		local unreadable = {
+			{ t = "String", v = "true" },
+			{ t = "Nil" },
+			{ t = "Int", v = 1 },
+		}
+		for _, value in unreadable do
+			local decision = Approve.evaluate(
+				set({
+					{ op = "setProperty", path = "ServerScriptService.Shop.Handler", property = "Disabled", value = value },
+				}),
+				permissive,
+				Path.isWithin
+			)
+			t.falsy(decision.auto, string.format("a Disabled of tag %s is not a readable stop", tostring(value.t)))
+		end
+
+		local missing = Approve.evaluate(
+			set({ { op = "setProperty", path = "ServerScriptService.Shop.Handler", property = "Disabled" } }),
+			permissive,
+			Path.isWithin
+		)
+		t.falsy(missing.auto, "an absent value is the least readable of all")
+	end)
+
+	t.test("the panel names every reason the set was held", function()
+		-- Asserted against the text a person reads, not against the decision object:
+		-- `evaluate` computed these reasons and `Widget:present` rendered only the
+		-- warnings, so the panel offered Approve and Reject and never said why it
+		-- was asking. `Approve.describeNotes` is the whole of that block on screen.
+		local decision = Approve.evaluate(
+			set({
+				{ op = "writeScript", path = "ServerScriptService.Shop.New", scriptType = "Script", source = "print(1)" },
+				{ op = "setProperty", path = "ServerScriptService.Admin.Console", property = "X", value = { t = "Nil" } },
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(#decision.blockers >= 2)
+
+		local notes = Approve.describeNotes(decision, 0)
+		t.contains(notes, "Approval required")
+		for _, blocker in decision.blockers do
+			t.contains(notes, blocker, "a reason the code computed and the panel dropped on the floor")
+		end
+	end)
+
+	t.test("the note block still carries the warnings and the destruction count", function()
+		-- Control for the same change: blockers were added to that block, and
+		-- nothing already in it may have been pushed out.
+		local decision = Approve.evaluate(
+			set({ { op = "setProperty", path = "ServerScriptService.Shop.A", property = "X", value = { t = "Nil" } } }),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(decision.auto, "nothing here needs a human")
+
+		local notes = Approve.describeNotes(decision, 4)
+		t.falsy(string.find(notes, "Approval required", 1, true), "a set that auto-applies has no reasons to list")
+		t.contains(notes, "! the validation verdict was computed by")
+		t.contains(notes, "! 4 instances would be destroyed")
+	end)
+
+	t.test("a note block with nothing to say is empty, so the panel can hide it", function()
+		local nothing = Approve.describeNotes(
+			{ auto = true, blockers = {}, warnings = {}, validation = { present = false } },
+			0
+		)
+		t.equal(nothing, "")
+	end)
 end

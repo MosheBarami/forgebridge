@@ -20,6 +20,7 @@
  */
 import type { Finding } from '@forgebridge/protocol';
 import {
+  bindingOf,
   callParen,
   endOfExpression,
   findingAt,
@@ -29,6 +30,7 @@ import {
   isMemberAccess,
   isOp,
   parameterList,
+  startOfPrefixExpression,
   type RuleContext,
 } from '../query.js';
 import type { Block } from '../structure.js';
@@ -40,6 +42,9 @@ import type { Rule } from './index.js';
  * trusting it, which is the question this rule asks.
  */
 const GUARD_CALLS: ReadonlySet<string> = new Set(['assert', 'typeof', 'type', 'tonumber']);
+
+/** The ways a script subscribes to a signal. `Once` fires the handler too. */
+const CONNECT_METHODS: ReadonlySet<string> = new Set(['Connect', 'ConnectParallel', 'Once']);
 
 interface Handler {
   /** Token to attribute the handler to in a message. */
@@ -117,30 +122,122 @@ export const remoteNoValidation: Rule = {
 function remoteHandlers(context: RuleContext): Handler[] {
   const { tokens, structure } = context;
   const handlers: Handler[] = [];
+  const bound = serverEventNames(context);
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    if (token === undefined || token.kind !== 'name') continue;
+    if (token === undefined) continue;
 
-    if (token.text === 'OnServerEvent' && isOp(tokens, i - 1, '.') && isOp(tokens, i + 1, ':')) {
-      const method = tokens[i + 2];
-      if (method === undefined || method.kind !== 'name') continue;
-      if (method.text !== 'Connect' && method.text !== 'ConnectParallel' && method.text !== 'Once') continue;
-      const body = inlineHandlerBlock(context, i + 2);
+    // `<signal>:Connect(function(player, …) … end)`, keyed on the method rather
+    // than on the property name so the receiver can be resolved separately.
+    if (token.kind === 'name' && CONNECT_METHODS.has(token.text) && isOp(tokens, i - 1, ':')) {
+      if (!isServerEvent(context, bound, i)) continue;
+      const body = inlineHandlerBlock(context, i);
       if (body === null) continue;
       handlers.push({ signal: 'OnServerEvent', body, functionIndex: body.open });
       continue;
     }
 
-    if (token.text === 'OnServerInvoke' && isOp(tokens, i - 1, '.') && isOp(tokens, i + 1, '=')) {
-      if (!isKeyword(tokens, i + 2, 'function')) continue;
-      const block = structure.blocks.find((candidate) => candidate.open === i + 2 && candidate.kind === 'function');
-      if (block === undefined) continue;
-      handlers.push({ signal: 'OnServerInvoke', body: block, functionIndex: block.open });
-    }
+    // `remote.OnServerInvoke = function(player, …)`, and the bracket spelling of
+    // the same assignment. A RemoteFunction handler is a property rather than a
+    // signal, so there is no `Connect` here to key on — and no local-binding
+    // case either, because assigning a function to a local sets no property.
+    const invokeEquals =
+      token.kind === 'name' && token.text === 'OnServerInvoke' && isOp(tokens, i - 1, '.')
+        ? i + 1
+        : token.kind === 'string' &&
+            token.value === 'OnServerInvoke' &&
+            isOp(tokens, i - 1, '[') &&
+            isOp(tokens, i + 1, ']')
+          ? i + 2
+          : -1;
+    if (invokeEquals === -1 || !isOp(tokens, invokeEquals, '=')) continue;
+    if (!isKeyword(tokens, invokeEquals + 1, 'function')) continue;
+    const block = structure.blocks.find(
+      (candidate) => candidate.open === invokeEquals + 1 && candidate.kind === 'function',
+    );
+    if (block === undefined) continue;
+    handlers.push({ signal: 'OnServerInvoke', body: block, functionIndex: block.open });
   }
 
   return handlers;
+}
+
+/**
+ * True when the `:Connect` whose method name sits at `method` is subscribing to
+ * a `RemoteEvent`'s `OnServerEvent`.
+ *
+ * Three spellings reach the same signal and all three are ordinary code:
+ * `Remotes.Buy.OnServerEvent:Connect(…)`, `Remotes.Buy["OnServerEvent"]:Connect(…)`,
+ * and either of those bound to a local first —
+ *
+ *   local ev = Remotes.GiveCash.OnServerEvent
+ *   ev:Connect(function(player, amount) … end)
+ *
+ * The rule used to require the literal token run `OnServerEvent` `:` `Connect`,
+ * so both of the others turned it off even with the handler written inline
+ * underneath. Both were confirmed against the built analyser: `status: 'ok'`,
+ * zero findings, on a handler that adds a client-supplied number to a balance.
+ * This is the vector that costs a real place its economy, so a spelling missed
+ * here is the expensive kind of miss.
+ *
+ * A receiver this check cannot read — `signals[name]:Connect(…)` — is not
+ * treated as a remote. Every finding here names a parameter of a handler and
+ * says the client controls it; saying that about a handler for some other
+ * signal is a false accusation a reader can check, and one of those teaches
+ * them to stop reading the rest.
+ */
+function isServerEvent(context: RuleContext, bound: ReadonlySet<string>, method: number): boolean {
+  const { tokens, structure } = context;
+  // The `:` is at `method - 1`, so the receiver ends at `method - 2`.
+  const end = method - 2;
+  const receiver = tokens[end];
+  if (receiver === undefined) return false;
+
+  if (isOp(tokens, end, ']')) {
+    const open = structure.bracket.get(end);
+    // Exactly one token between the brackets, and a string this analyser could
+    // decode: `remote[k]` and `remote["OnServer" .. "Event"]` name nothing.
+    if (open === undefined || open !== end - 2) return false;
+    const key = tokens[open + 1];
+    return key !== undefined && key.kind === 'string' && key.value === 'OnServerEvent';
+  }
+
+  if (receiver.kind !== 'name') return false;
+  if (receiver.text === 'OnServerEvent' && isOp(tokens, end - 1, '.')) return true;
+  // `thing.ev:Connect(…)` is a field of somebody else's table, not the local.
+  if (isMemberAccess(tokens, end)) return false;
+  return bound.has(receiver.text);
+}
+
+/** Local names bound to an `OnServerEvent` — `local ev = Remotes.GiveCash.OnServerEvent`. */
+function serverEventNames(context: RuleContext): Set<string> {
+  const { tokens } = context;
+  const names = new Set<string>();
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === undefined) continue;
+
+    // `… .OnServerEvent` — the value ends at the name.
+    if (token.kind === 'name' && token.text === 'OnServerEvent' && isOp(tokens, i - 1, '.')) {
+      bindSignal(context, names, i);
+      continue;
+    }
+
+    // `… ["OnServerEvent"]` — it ends at the `]`.
+    if (token.kind === 'string' && token.value === 'OnServerEvent') {
+      if (isOp(tokens, i - 1, '[') && isOp(tokens, i + 1, ']')) bindSignal(context, names, i + 1);
+    }
+  }
+
+  return names;
+}
+
+/** Records the local `valueEnd`'s expression is assigned to, when it is assigned to one. */
+function bindSignal(context: RuleContext, names: Set<string>, valueEnd: number): void {
+  const binding = bindingOf(context, startOfPrefixExpression(context, valueEnd), valueEnd);
+  if (binding !== null) names.add(binding.name);
 }
 
 /**

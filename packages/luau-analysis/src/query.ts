@@ -7,7 +7,7 @@
  * to click past.
  */
 import type { Finding } from '@forgebridge/protocol';
-import { blockAt, type Block, type Structure } from './structure.js';
+import { analyseStructure, blockAt, type Block, type Structure } from './structure.js';
 import type { Token } from './tokenizer.js';
 
 export interface RuleContext {
@@ -200,7 +200,8 @@ export function memberChain(tokens: readonly Token[], index: number): string[] {
 }
 
 /**
- * True when `tokens[index]` begins a call that yields the running thread.
+ * True when `tokens[index]` begins a call this analyser recognises as yielding
+ * the running thread, judged on the call alone.
  *
  * The set is the one that matters for a frozen Studio: `task.wait`, the
  * deprecated global `wait`, `coroutine.yield`, and `:Wait()` on a signal. A
@@ -208,7 +209,7 @@ export function memberChain(tokens: readonly Token[], index: number): string[] {
  * library object — is not recognised, which is why the loop rules say what they
  * checked rather than claiming the loop never yields.
  */
-export function isYieldCall(tokens: readonly Token[], index: number): boolean {
+function isRecognisedYieldCall(tokens: readonly Token[], index: number): boolean {
   const token = tokens[index];
   if (token === undefined || token.kind !== 'name') return false;
   // A mention is not a yield. `local resume = task.wait` inside a spin loop
@@ -222,6 +223,133 @@ export function isYieldCall(tokens: readonly Token[], index: number): boolean {
   if (token.text === 'Wait') return isOp(tokens, index - 1, ':');
   if (token.text === 'yield') return isOp(tokens, index - 1, '.') && isName(tokens, index - 2, 'coroutine');
   return false;
+}
+
+/**
+ * Per token array: does this source define a `Wait` that this analyser cannot
+ * see yielding? Computed once, because the answer is a property of the file and
+ * `isYieldCall` is asked it once per token of every loop body.
+ */
+const UNYIELDING_WAIT = new WeakMap<readonly Token[], boolean>();
+
+/**
+ * The structure of a token array, for the question above.
+ *
+ * `analyseStructure` has already run over these tokens by the time a rule calls
+ * in, but `isYieldCall` is a token predicate and is not handed the result. A
+ * second pass, memoised per file and only paid when the file defines a `Wait`
+ * at all, is cheaper than widening a signature every rule calls.
+ */
+const STRUCTURE = new WeakMap<readonly Token[], Structure>();
+
+function structureFor(tokens: readonly Token[]): Structure {
+  let structure = STRUCTURE.get(tokens);
+  if (structure === undefined) {
+    structure = analyseStructure(tokens);
+    STRUCTURE.set(tokens, structure);
+  }
+  return structure;
+}
+
+/** Token index of the `function` keyword of a `Wait` this file defines, for each definition it can see. */
+function waitDefinitions(tokens: readonly Token[]): number[] {
+  const definitions: number[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === undefined || token.kind !== 'name' || token.text !== 'Wait') continue;
+
+    // `function Signal:Wait(…)`, `function Signal.Wait(…)`, `function Wait(…)`:
+    // walk back over the name path to the keyword that opened it.
+    if (isMemberAccess(tokens, i) || isKeyword(tokens, i - 1, 'function')) {
+      let j = i;
+      while (j > 0 && (isOp(tokens, j - 1, '.') || isOp(tokens, j - 1, ':'))) j -= 2;
+      if (isKeyword(tokens, j - 1, 'function')) {
+        definitions.push(j - 1);
+        continue;
+      }
+    }
+
+    // `Wait = function(…)` — the field or local spelling of the same thing.
+    if (isOp(tokens, i + 1, '=') && isKeyword(tokens, i + 2, 'function')) definitions.push(i + 2);
+  }
+
+  return definitions;
+}
+
+/** First token of a function block's body: past the name path and past the parameter list. */
+function bodyStart(tokens: readonly Token[], structure: Structure, block: Block): number {
+  for (let i = block.open + 1; i < block.close; i += 1) {
+    if (!isOp(tokens, i, '(')) continue;
+    return (structure.bracket.get(i) ?? i) + 1;
+  }
+  return block.open + 1;
+}
+
+/**
+ * True when this source defines a `Wait` of its own that this analyser cannot
+ * see yielding.
+ *
+ * `:Wait()` is credited as a yield because on an `RBXScriptSignal` it is one.
+ * Nothing in a token stream says the receiver is a signal, so a script that
+ * writes its own
+ *
+ *   local o = {}
+ *   function o:Wait() end
+ *   while true do o:Wait() step() end
+ *
+ * cleared `luau/while-true-no-yield` while spinning for ever — reproduced
+ * against the built analyser as `ok` with zero findings.
+ *
+ * The check is the definition, not the call site: a custom signal class whose
+ * `Wait` really does yield — `function Signal:Wait() … coroutine.yield() … end`
+ * — keeps the credit, because that is ordinary Roblox code and a rule that
+ * fires on it is one people learn to click past. Only a `Wait` defined here
+ * with no yield this analyser recognises inside it withdraws the credit, and it
+ * withdraws it for every `:Wait()` in the file, because which definition a
+ * given call reaches is the name resolution this package does not have.
+ */
+function definesUnyieldingWait(tokens: readonly Token[]): boolean {
+  const cached = UNYIELDING_WAIT.get(tokens);
+  if (cached !== undefined) return cached;
+
+  let answer = false;
+  const definitions = waitDefinitions(tokens);
+  if (definitions.length > 0) {
+    const structure = structureFor(tokens);
+    for (const at of definitions) {
+      const block = structure.error === undefined ? blockAt(structure, at) : null;
+      if (block === null || block.kind !== 'function' || block.open !== at || block.close < 0) {
+        // A definition whose body cannot be delimited is one we cannot see
+        // yield, which is the same answer as a body that does not.
+        answer = true;
+        break;
+      }
+      // From after the parameter list, not from the `function` keyword: the
+      // definition's own header spells `o:Wait(`, which `isRecognisedYieldCall`
+      // reads as a `:Wait()` call, so every definition looked like it yielded
+      // into itself and the check answered `false` for all of them.
+      const body = bodyStart(tokens, structure, block);
+      if (!anyToken(body, block.close, (i) => isRecognisedYieldCall(tokens, i))) {
+        answer = true;
+        break;
+      }
+    }
+  }
+
+  UNYIELDING_WAIT.set(tokens, answer);
+  return answer;
+}
+
+/**
+ * True when `tokens[index]` begins a call that yields the running thread.
+ *
+ * Everything `isRecognisedYieldCall` accepts, minus the one member of that set
+ * a script can define for itself: see `definesUnyieldingWait`.
+ */
+export function isYieldCall(tokens: readonly Token[], index: number): boolean {
+  if (!isRecognisedYieldCall(tokens, index)) return false;
+  return tokens[index]?.text !== 'Wait' || !definesUnyieldingWait(tokens);
 }
 
 /** True when any token in [start, end) satisfies `predicate`. */

@@ -139,20 +139,49 @@ function isUnconditional(context: RuleContext, facts: LoopFacts): boolean {
 }
 
 /**
- * True when `index` sits in a branch of an `if` inside `loop` that can never
- * run: the `then` of an `if` whose condition is a literal false, or the arms
- * after an `if` whose condition is a literal true.
+ * True when this block is a `while` loop whose own condition is a literal that
+ * is never true, so nothing written inside it ever runs.
+ *
+ * A `repeat` is deliberately not here: its body runs once before the `until` is
+ * evaluated, so `repeat task.wait(1) until true` really does yield. Nor is a
+ * `for`, whose bounds are arithmetic this analyser does not evaluate.
+ */
+function isNeverEnteredLoop(context: RuleContext, block: Block): boolean {
+  if (block.kind !== 'do' || block.loopKeyword === undefined) return false;
+  if (!isKeyword(context.tokens, block.loopKeyword, 'while')) return false;
+  // `block.open` is the `do`, so the condition is everything between.
+  return staticTruthiness(context, block.loopKeyword + 1, block.open) === false;
+}
+
+/**
+ * True when `index` sits somewhere inside `loop` that can never run: a branch of
+ * an `if` — the `then` of a literal-false condition, or the arms after a
+ * literal-true one — or the body of a nested loop that is never entered.
  *
  * Deliberately narrow. General reachability is not a question a token stream
  * can answer, but `if false then break end` is, and it is valid Luau: before
  * this check that `break` counted, so a loop that hangs Studio for ever was
  * reported as one that can leave. Anything less obvious than a literal is
  * treated as reachable, which keeps the rule firing rather than guessing.
+ *
+ * The nested-loop case is the same mistake one level out. This walk considered
+ * `if` blocks and skipped everything else, so
+ *
+ *   while true do
+ *     while false do task.wait(1) end
+ *     step()
+ *   end
+ *
+ * counted a `task.wait` that the engine never reaches as this loop's escape and
+ * reported a source that hangs Studio as `ok` — confirmed against the built
+ * analyser, zero findings. A dead `if` and a loop with a dead condition are the
+ * same statement about reachability, and both have to be read the same way.
  */
 function inDeadBranch(context: RuleContext, index: number, loop: Block): boolean {
   const { structure } = context;
   for (const block of enclosingBlocks(structure, index)) {
     if (block.self === loop.self) break;
+    if (isNeverEnteredLoop(context, block)) return true;
     if (block.kind !== 'if') continue;
     for (const arm of ifArms(context, block)) {
       if (index < arm.start || index >= arm.end) continue;
@@ -301,16 +330,7 @@ export const unboundedHeartbeat: Rule = {
       if (method === undefined || method.kind !== 'name' || !CONNECT_METHODS.has(method.text)) continue;
       if (!isOp(tokens, i - 1, ':')) continue;
 
-      const receiver = tokens[i - 2];
-      if (receiver === undefined || receiver.kind !== 'name') continue;
-      // Either the signal is named right here — `RunService.Heartbeat:Connect` —
-      // or it reached a local first, which is ordinary code and not evasion.
-      const signalName =
-        PER_FRAME_SIGNALS.has(receiver.text) && isOp(tokens, i - 3, '.')
-          ? receiver.text
-          : isMemberAccess(tokens, i - 2)
-            ? undefined
-            : bound.get(receiver.text);
+      const signalName = perFrameSignalBefore(context, bound, i);
       if (signalName === undefined) continue;
 
       const handler = inlineHandlerBlock(context, i);
@@ -354,7 +374,55 @@ export const unboundedHeartbeat: Rule = {
 };
 
 /**
- * Local names bound to a per-frame signal — `local heartbeat = RunService.Heartbeat`.
+ * The per-frame signal the `:Connect` whose method name sits at `method` is
+ * connected to, or undefined when this check cannot name one.
+ *
+ * Three spellings reach the same signal, and all three are ordinary code:
+ * `RunService.Heartbeat:Connect(…)`, `RunService["Heartbeat"]:Connect(…)`, and
+ * either of those bound to a local first. Reading only the dotted one meant a
+ * pair of brackets turned the rule off — `RunService["Heartbeat"]:Connect` with
+ * an unbounded `while` in the handler returned zero findings against the built
+ * analyser.
+ *
+ * An index this check cannot read as one string literal — `RunService[k]` —
+ * resolves to nothing rather than to a guess. Every finding this rule emits
+ * names the signal in its message, and there would be no name to put there; a
+ * finding a reader cannot check is how a rule earns its place in a project's
+ * ignore list. What that leaves uncovered is a `Connect` whose signal nobody
+ * can name from the source either.
+ */
+function perFrameSignalBefore(
+  context: RuleContext,
+  bound: ReadonlyMap<string, string>,
+  method: number,
+): string | undefined {
+  const { tokens, structure } = context;
+  // The `:` is at `method - 1`, so the receiver ends at `method - 2`.
+  const end = method - 2;
+  const receiver = tokens[end];
+  if (receiver === undefined) return undefined;
+
+  if (isOp(tokens, end, ']')) {
+    const open = structure.bracket.get(end);
+    // Exactly one token between the brackets, and it has to be a string this
+    // analyser could decode: `t[k]` and `t["Heart" .. "beat"]` name nothing.
+    if (open === undefined || open !== end - 2) return undefined;
+    const key = tokens[open + 1];
+    if (key === undefined || key.kind !== 'string' || key.value === undefined) return undefined;
+    return PER_FRAME_SIGNALS.has(key.value) ? key.value : undefined;
+  }
+
+  if (receiver.kind !== 'name') return undefined;
+  // Either the signal is named right here — `RunService.Heartbeat:Connect` —
+  // or it reached a local first, which is ordinary code and not evasion.
+  if (PER_FRAME_SIGNALS.has(receiver.text) && isOp(tokens, end - 1, '.')) return receiver.text;
+  if (isMemberAccess(tokens, end)) return undefined;
+  return bound.get(receiver.text);
+}
+
+/**
+ * Local names bound to a per-frame signal — `local heartbeat = RunService.Heartbeat`,
+ * and the bracket spelling of the same thing.
  *
  * The rule used to require the literal token run `.Heartbeat:Connect(function`,
  * so one intervening local turned it off. That spelling is not evasion: a
@@ -368,11 +436,25 @@ function perFrameSignalNames(context: RuleContext): Map<string, string> {
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    if (token === undefined || token.kind !== 'name' || !PER_FRAME_SIGNALS.has(token.text)) continue;
-    if (!isOp(tokens, i - 1, '.')) continue;
-    const binding = bindingOf(context, startOfPrefixExpression(context, i), i);
-    if (binding !== null) names.set(binding.name, token.text);
+    if (token === undefined) continue;
+
+    // `local heartbeat = RunService.Heartbeat` — the value ends at the name.
+    if (token.kind === 'name' && PER_FRAME_SIGNALS.has(token.text) && isOp(tokens, i - 1, '.')) {
+      bindSignal(context, names, token.text, i);
+      continue;
+    }
+
+    // `local heartbeat = RunService["Heartbeat"]` — it ends at the `]`.
+    if (token.kind === 'string' && token.value !== undefined && PER_FRAME_SIGNALS.has(token.value)) {
+      if (isOp(tokens, i - 1, '[') && isOp(tokens, i + 1, ']')) bindSignal(context, names, token.value, i + 1);
+    }
   }
 
   return names;
+}
+
+/** Records the local `valueEnd`'s expression is assigned to, when it is assigned to one. */
+function bindSignal(context: RuleContext, names: Map<string, string>, signal: string, valueEnd: number): void {
+  const binding = bindingOf(context, startOfPrefixExpression(context, valueEnd), valueEnd);
+  if (binding !== null) names.set(binding.name, signal);
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { analyse } from '../src/analyse.js';
 import { analyseStructure, blockAt, enclosingFunction, enclosingLoop } from '../src/structure.js';
 import { tokenize } from '../src/tokenizer.js';
 
@@ -113,5 +114,133 @@ describe('analyseStructure', () => {
     // inner closure — which is exactly the distinction the loop rules need.
     expect(enclosingFunction(structure, breakIndex)?.kind).toBe('function');
     expect(enclosingLoop(structure, breakIndex)?.kind).toBe('do');
+  });
+});
+
+/**
+ * Round four of the adversarial review, and the same defect class as the three
+ * before it: a recogniser that meets a shape it does not know and answers with
+ * the reading that keeps quiet.
+ *
+ * An `if` is classified by the token in front of it, and two of those tokens
+ * were classified wrongly in OPPOSITE directions — one statement read as a
+ * value, one value read as a statement. Alone each is a loud `fail` on correct
+ * Luau. Together in one file they cancel: the block stack balances, no error is
+ * reported, and every block range around them is wrong. That is the outcome
+ * this package least wants, because the verdict then says the source was read.
+ *
+ * All of these were reproduced against the built analyser before being fixed.
+ */
+describe('fail-closed regressions: telling an `if` statement from an if-expression', () => {
+  it('reads an `if` statement that follows a generic type annotation', () => {
+    // `>` closes a type-argument list as well as being the comparison operator.
+    // Read as a comparison, the `if` after it was a value, pushed no block, and
+    // its `end` closed the enclosing block instead: `local queue: Array<Job>`
+    // followed by an ordinary `if` returned
+    // `unexpected "end" — no block is open here` on valid Luau.
+    const sources = [
+      'local queue: Array<Job>\nif queue then drain(queue) end\n',
+      'local function all(): Array<Item>\n  if cached then return cached end\n  return {}\nend\n',
+      'local m: Map<string, Array<Item>>\nif m then print(1) end\n',
+      'local t: {[string]: Handler<Event>}\nif t then print(1) end\n',
+    ];
+    for (const source of sources) {
+      const { structure } = structureOf(source);
+      expect(structure.error, source).toBeUndefined();
+      expect(structure.blocks.filter((block) => block.kind === 'if').length, source).toBe(1);
+    }
+  });
+
+  it('still reads an if-expression written on the right of a comparison', () => {
+    // The control for the fix above, and the reason `>` cannot simply be moved
+    // out of the expression-position set: after a real comparison the `if` is a
+    // value, and reading it as a statement would demand an `end` that correct
+    // code does not have.
+    for (const source of [
+      'local total = budget > if premium then 200 else 50\nprint(total)\n',
+      'local ok = tries < limit and score > if boosted then 10 else 1\nprint(ok)\n',
+    ]) {
+      const { structure } = structureOf(source);
+      expect(structure.error, source).toBeUndefined();
+      expect(structure.blocks, source).toHaveLength(0);
+    }
+  });
+
+  it('reads an if-expression in a keyword position that can only hold a value', () => {
+    // `until`, `while`, `elseif` and `if` are each followed by an expression and
+    // never by a statement, so an `if` after one of them is the expression form.
+    // Left out of the set, `until if done then …` opened a block that never gets
+    // an `end`, and the source was reported as unterminated.
+    const sources: [string, string[]][] = [
+      ['repeat step() until if done then true else tries > 3\n', ['repeat']],
+      ['while if paused then false else running do work() end\n', ['do']],
+      ['if a then x() elseif if b then c else d then y() end\n', ['if']],
+    ];
+    for (const [source, kinds] of sources) {
+      const { structure } = structureOf(source);
+      expect(structure.error, source).toBeUndefined();
+      expect(structure.blocks.map((block) => block.kind), source).toEqual(kinds);
+    }
+  });
+
+  it('still reads ordinary `while`, `until` and `elseif` code as blocks', () => {
+    // The control for the keywords added above: they only ever introduce a
+    // value when the token after them is `if`, and nothing else about them moved.
+    const { structure } = structureOf(
+      'while ready do\n  repeat step() until done\n  if a then x() elseif b then y() else z() end\nend\n',
+    );
+    expect(structure.error).toBeUndefined();
+    expect(structure.blocks.map((block) => block.kind).sort()).toEqual(['do', 'if', 'repeat']);
+  });
+
+  it('does not let two misreadings cancel into a balanced stack with wrong ranges', () => {
+    // Both bugs in one file. The `until if` opened a block it should not have,
+    // the `if` after the generic annotation failed to open one it should have,
+    // the counts matched, and `analyseStructure` returned no error — over a
+    // phantom `if` block spanning lines 1 to 3 while the real `if` on line 3 had
+    // no block at all. Reproduced as `{"status":"ok","findings":[]}`.
+    const source = 'repeat step() until if done then true else false\nlocal m: Map<string, number>\nif m then print(1) end\n';
+    const { tokens, structure } = structureOf(source);
+    expect(structure.error).toBeUndefined();
+    expect(
+      structure.blocks.map((block) => `${block.kind} ${tokens[block.open]?.line}..${tokens[block.close]?.line}`),
+    ).toEqual(['repeat 1..1', 'if 3..3']);
+  });
+
+  it('refuses an if-expression whose `else` never arrives', () => {
+    // The backstop under all of the above. An if-expression always has an
+    // `else`; one that goes out of scope still waiting for a branch keyword is
+    // proof that the `if` was misread, and the honest report of that is a
+    // refusal rather than a recovery that leaves the ranges wrong.
+    expect(structureOf('local x = if ready then 1\nprint(x)\n').structure.error?.message).toContain(
+      'never arrives',
+    );
+  });
+});
+
+/**
+ * The invariant the README states, exercised where it is decided: a source the
+ * recogniser could not read must reach the caller as `fail`. `analyse` is the
+ * only thing that turns a structure error into a verdict, so a structure error
+ * that is not a `fail` is the invariant broken, whatever `analyseStructure`
+ * itself returned.
+ */
+describe('an unreadable source is never a pass', () => {
+  it('reports every shape the recogniser refuses as a fail, and nothing else', () => {
+    const unreadable = [
+      'if a then\n  print(1)\n',                       // block never closed
+      'print(1)\nend\n',                               // surplus `end`
+      'repeat\n  x()\nend\n',                         // closed with the wrong keyword
+      'local t = { 1, 2\n',                            // bracket never closed
+      'local t = (1]\n',                               // bracket closed by the wrong one
+      'local x = if ready then 1\nprint(x)\n',         // if-expression with no `else`
+    ];
+    for (const source of unreadable) {
+      const result = analyse(source);
+      expect(result.status, source).toBe('fail');
+      // One finding, naming the refusal: no other rule ran, so nothing else may
+      // claim to have checked anything.
+      expect(result.findings.map((finding) => finding.rule), source).toEqual(['luau/syntax-error']);
+    }
   });
 });

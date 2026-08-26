@@ -64,7 +64,7 @@ const OPENING_BRACKETS: Record<string, string> = { '(': ')', '[': ']', '{': '}' 
  */
 const EXPRESSION_POSITION_OPS: ReadonlySet<string> = new Set([
   '=', '(', '[', '{', ',', '..', '+', '-', '*', '/', '//', '%', '^', '#',
-  '==', '~=', '<', '>', '<=', '>=',
+  '==', '~=', '<', '<=', '>=',
   '+=', '-=', '*=', '/=', '//=', '%=', '^=', '..=',
 ]);
 
@@ -80,19 +80,46 @@ const EXPRESSION_POSITION_OPS: ReadonlySet<string> = new Set([
  * reported three of this repository's own plugin sources as unbalanced.
  */
 
+/**
+ * `>` ends a type too — it closes a generic argument list — but unlike those
+ * five it is *also* the comparison operator, and the two disagree about what may
+ * follow:
+ *
+ *   local total = budget > if premium then 200 else 50   -- comparison: a value follows
+ *   local queue: Array<Job>
+ *   if queue then drain(queue) end                       -- generic close: a statement follows
+ *
+ * So it is neither in the set nor simply absent from it: `isIfExpression` asks
+ * `closesTypeArguments` which `>` this is. Listing it unconditionally, which is
+ * what this file did until round four, read the second `if` as a value, so it
+ * pushed no block and its `end` closed the enclosing one instead — a `fail` on
+ * ordinary typed Luau. Both spellings are in test/structure.test.ts.
+ */
+
 const EXPRESSION_POSITION_KEYWORDS: ReadonlySet<string> = new Set([
   'return', 'and', 'or', 'not', 'in',
+  // Each of these four is *always* followed by an expression — Luau's grammar
+  // has nowhere for a statement to start after them — so an `if` here can only
+  // be the expression form:
+  //
+  //   repeat step() until if done then true else retries > 3
+  //   while if paused then false else running do work() end
+  //
+  // Left out, `until if …` opened a block that never gets an `end`. On its own
+  // that is a loud `fail`; in the same file as a misread in the other direction
+  // the two cancel, the stack balances, and the ranges are wrong in silence.
+  'until', 'while', 'elseif', 'if',
 ]);
 
 /**
- * `then`, `else` and `elseif` are deliberately not in that set either, and for
- * a different reason from the type suffixes: each of them introduces a
- * *statement* in an ordinary `if`, and an `if` right after one is the commonest
- * shape in Roblox code —
+ * `then` and `else` are deliberately *not* in that set, and for a different
+ * reason from the type suffixes: each of them introduces a *statement* in an
+ * ordinary `if`, and an `if` right after one is the commonest shape in Roblox
+ * code —
  *
  *   if ready then if fast then go() end end
  *
- * — while the same three keywords introduce an *expression* when the construct
+ * — while the same two keywords introduce an *expression* when the construct
  * they belong to is itself an if-expression:
  *
  *   local label = if ready then if fast then "go" else "wait" else "off"
@@ -104,17 +131,104 @@ const EXPRESSION_POSITION_KEYWORDS: ReadonlySet<string> = new Set([
  * existed the second `if` above opened a block, and a perfectly good line was
  * reported as an unterminated block — a `fail` on correct code, which is the
  * most expensive way this package can be wrong.
+ *
+ * `elseif` is not in that company, which is why it sits in the set above: it is
+ * followed by the *condition* of the next arm, never by a statement.
  */
+
+/** Operators that may appear inside a type, between the `<` and the `>` of a type-argument list. */
+const TYPE_ARGUMENT_OPS: ReadonlySet<string> = new Set([',', '.', ':', '?', '|', '&', '->', '...', '::', '=']);
+
+/** Keywords that may appear inside a type: the singleton types, and the `function` of a function type. */
+const TYPE_ARGUMENT_KEYWORDS: ReadonlySet<string> = new Set(['nil', 'true', 'false', 'function']);
+
+/**
+ * How far back `closesTypeArguments` will look for the `<`.
+ *
+ * A bound, not a judgement about type lengths: without one, a file full of `>`
+ * turns a linear scan into a quadratic one. A type-argument list longer than
+ * this is one this recogniser does not claim to read, and the reading it falls
+ * back to — comparison — is loud rather than silent, because the `if` after it
+ * then pushes no block and the surplus `end` is refused.
+ */
+const TYPE_ARGUMENT_SCAN_LIMIT = 64;
+
+/**
+ * True when the `>` at `index` closes a generic type-argument list rather than
+ * being the comparison operator.
+ *
+ * Walks back to the matching `<`, over the tokens a type may contain and
+ * nothing else. `local m: Map<string, number>` reaches its `<`; in
+ * `local total = budget > …` the walk crosses `budget` and the `=` and stops at
+ * the `local`, which no type contains, so it finds none. Bracket groups are
+ * stepped over whole, so a table or function type inside the arguments does not
+ * have to be understood, only skipped. `=` is allowed between them because a
+ * type parameter may have a default — `type Box<T = string>`.
+ *
+ * A wrong answer here is loud rather than quiet: the `if` after the `>` is then
+ * read as the wrong one of statement and expression, and the block stack ends
+ * up one opener short or one opener long, which `analyseStructure` refuses. The
+ * exception — two wrong answers in one file, in opposite directions, cancelling
+ * — is what the refusal in the scan below exists to catch.
+ */
+function closesTypeArguments(tokens: readonly Token[], index: number): boolean {
+  /** Angle depth: the `>` at `index` itself, waiting for its `<`. */
+  let depth = 1;
+  /** Bracket groups entered while walking back, so their contents are skipped. */
+  let group = 0;
+
+  for (let i = index - 1, steps = 0; i >= 0 && steps < TYPE_ARGUMENT_SCAN_LIMIT; i -= 1, steps += 1) {
+    const token = tokens[i];
+    if (token === undefined) return false;
+
+    if (token.kind === 'op') {
+      if (token.text === ')' || token.text === ']' || token.text === '}') {
+        group += 1;
+        continue;
+      }
+      if (token.text === '(' || token.text === '[' || token.text === '{') {
+        // An opener we never entered means the walk has left the type behind.
+        if (group === 0) return false;
+        group -= 1;
+        continue;
+      }
+      if (group > 0) continue;
+      if (token.text === '>') {
+        depth += 1;
+        continue;
+      }
+      if (token.text === '<') {
+        depth -= 1;
+        if (depth === 0) return true;
+        continue;
+      }
+      if (!TYPE_ARGUMENT_OPS.has(token.text)) return false;
+      continue;
+    }
+
+    if (group > 0) continue;
+    if (token.kind === 'name' || token.kind === 'string') continue;
+    if (token.kind === 'keyword' && TYPE_ARGUMENT_KEYWORDS.has(token.text)) continue;
+    return false;
+  }
+
+  return false;
+}
 
 export function isIfExpression(tokens: readonly Token[], index: number): boolean {
   const previous = tokens[index - 1];
   if (previous === undefined) return false;
-  if (previous.kind === 'op') return EXPRESSION_POSITION_OPS.has(previous.text);
+  if (previous.kind === 'op') {
+    if (previous.text === '>') return !closesTypeArguments(tokens, index - 1);
+    return EXPRESSION_POSITION_OPS.has(previous.text);
+  }
   if (previous.kind === 'keyword') return EXPRESSION_POSITION_KEYWORDS.has(previous.text);
   return false;
 }
 
 interface OpenIfExpression {
+  /** Token index of the `if`, so an unfinished one can be reported on its own line. */
+  at: number;
   /** Which branch keyword this if-expression is waiting for next. */
   wants: 'then' | 'else';
   /** Block and bracket depth at the `if`, so a nested construct's branches are not read as this one's. */
@@ -160,12 +274,21 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
     innermost[i] = top();
 
     // An if-expression cannot outlive the block or the bracket group it opened
-    // in. Dropping it here keeps a stale entry from claiming the `else` of some
-    // later construct as its own.
+    // in, and every one of them ends in an `else` — Luau has no if-expression
+    // without one. So a pending entry that goes out of scope still waiting for
+    // a branch keyword is not a stale entry to drop: it is proof that the `if`
+    // it came from was not the expression this pass read it as.
+    //
+    // Refusing here is what keeps a misreading from passing quietly. One `if`
+    // read as an expression when it was a statement leaves the block stack an
+    // opener short, and one read the other way leaves it an opener long; in the
+    // same file the two cancel, `analyseStructure` returns no error, and every
+    // block range around them is wrong while the verdict says the source was
+    // read. That case is in test/structure.test.ts.
     while (ifExpressions.length > 0) {
       const pending = ifExpressions[ifExpressions.length - 1] as OpenIfExpression;
       if (pending.blockDepth <= blockStack.length && pending.bracketDepth <= bracketStack.length) break;
-      ifExpressions.pop();
+      return refuse(unfinishedIfExpression(tokens, pending), tokens[pending.at]);
     }
 
     if (token.kind === 'op') {
@@ -206,6 +329,7 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
         // sits in the branch of an if-expression already open.
         if (isIfExpression(tokens, i) || expressionBranch.has(i - 1)) {
           ifExpressions.push({
+            at: i,
             wants: 'then',
             blockDepth: blockStack.length,
             bracketDepth: bracketStack.length,
@@ -272,6 +396,10 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
     }
   }
 
+  if (ifExpressions.length > 0) {
+    const pending = ifExpressions[ifExpressions.length - 1] as OpenIfExpression;
+    return refuse(unfinishedIfExpression(tokens, pending), tokens[pending.at]);
+  }
   if (bracketStack.length > 0) {
     const opener = bracketStack[bracketStack.length - 1] as { index: number };
     return refuse(`"${tokens[opener.index]?.text}" is never closed`, tokens[opener.index]);
@@ -291,6 +419,21 @@ export function analyseStructure(tokens: readonly Token[]): Structure {
   }
 
   return { blocks, bracket, innermost, expressionBranches: expressionBranch };
+}
+
+/**
+ * The message for an `if` this pass read as an expression and then could not
+ * finish reading as one. It names both readings, because which of the two is
+ * right is exactly what the reader has to decide.
+ */
+function unfinishedIfExpression(tokens: readonly Token[], pending: OpenIfExpression): string {
+  const line = tokens[pending.at]?.line;
+  const wanted = pending.wants === 'then' ? '"then"' : '"else"';
+  return (
+    `the "if" on line ${line} reads as an if-expression here, but its ${wanted} never arrives — ` +
+    'an if-expression always has one. Either it is a statement this pass misread, or the expression ' +
+    'is incomplete; the analyser cannot tell which, so it has not read this file'
+  );
 }
 
 /** The innermost block containing `index`, or null at the top level. */
