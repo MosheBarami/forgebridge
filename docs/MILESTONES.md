@@ -9,12 +9,17 @@
 > correct the numbering before it is treated as a contract; the *content* is what matters
 > and it is complete.
 
-**Live status, 26 Aug 2026** — this repo exists and has not been pushed yet. `M01`–`M04` are
+**Live status, 27 Aug 2026** — nine packages, all green: `protocol` (42 tests), `core` (84),
+`daemon` (121), `model-registry` (42), `luau-analysis` (64), `mcp` (61), `a2a` (93), `cli` (99)
+and `sdk-python` (77 pytest, ruff clean), plus 311 gate self-tests under `scripts/` and 118 Luau
+plugin tests run by hand. Five of those packages — `luau-analysis`, `mcp`, `a2a`, `cli`, `sdk-python` — landed
+together, and the four rows they belong to say what each still owes. `M01`–`M04` are
 done. `M07` is done and frozen: the Zod schemas are complete and
-42 tests are green — but only the TypeScript projection exists, so the cross-language drift
-gate that the M07 row used to claim has moved to `M08`, where the artefacts it would compare
-actually live. `M20`'s catalog is real: 417 models pulled live, 16 free and tool-capable, 3
-excluded with stated reasons.
+42 tests are green. `M08` is done too, so the cross-language drift gate the `M07` row used to
+claim now exists and has artefacts to compare: JSON Schema, an OpenAPI 3.1 document and
+pydantic models are generated from those schemas and committed, and a corpus of documents is
+run through all three projections and required to agree. `M20`'s catalog is real: 417 models
+pulled live, 16 free and tool-capable, 3 excluded with stated reasons.
 
 Two holes in the frozen protocol were found by adversarial review and closed before the first
 public commit: `setProperty` could write `Parent`, which relocated an entire subtree while
@@ -53,10 +58,10 @@ that needs evidence like any other.
 
 | # | Milestone | Status | Definition of done |
 |---|---|---|---|
-| M07 ✅ | `packages/protocol` — Zod schemas for ChangeSet/Run/Link/Apply | NEW | Schemas frozen; TS types are `z.infer` of them, so that projection cannot drift by construction; 42 tests green |
-| M08 | OpenAPI 3.1 + JSON Schema + Python model generation in CI | NEW | Generated artefacts committed; `verifyNoDrift` proves TS/OpenAPI/JSON-Schema/Python all regenerate identically; CI fails if regeneration produces a diff |
+| M07 ✅ | `packages/protocol` — Zod schemas for ChangeSet/Run/Link/Apply | NEW | Schemas frozen; TS types are `z.infer` of them, so that projection cannot drift by construction; 42 tests green. Every other projection of these schemas is generated from them by `M08`, never hand-written |
+| M08 ✅ | OpenAPI 3.1 + JSON Schema + Python model generation in CI | NEW | Generated artefacts committed: 52 JSON Schema (draft 2020-12) files and one OpenAPI 3.1 document under `packages/protocol/schema/`, and `models.py` under `packages/sdk-python`. One generator, `scripts/generate-schemas.ts`, writes all of them; its `verifyNoDrift` regenerates into memory and `npm run verify:schemas` fails the build on any difference. A 23-document corpus is judged identically by Zod, by the JSON Schema and by the pydantic models in `scripts/__tests__/schema-projection.test.ts`. The few refinements that had to be restated in JSON Schema carry probe values checked against the real Zod schemas on every run; the two constraints that do **not** survive the projection are named in `packages/protocol/schema/README.md`. The OpenAPI paths are read off the daemon's router, not off `docs/PROTOCOL.md`, and the generator fails when the two disagree — which is how the two endpoints the document had never listed were found |
 | M09 | `packages/core` RunPipeline: plan → generate → validate → diff | PART | Agent pipeline exists in `src/lib/agent`; must be extracted, de-Next-ified, and made transport-agnostic |
-| M10 | Luau static validation + policy rules on every ChangeSet | PART | Self-check exists; add path allowlist, `require` review, `HttpService` egress rules |
+| M10 | Luau static validation + policy rules on every ChangeSet | PART | `packages/luau-analysis` reads model-authored Luau and returns `ok`/`warn`/`fail` over eight rules — `loadstring`, `getfenv`/`setfenv`, `require` of an unreviewed asset id, `HttpService` to a non-allowlisted host, an unbounded `Heartbeat` loop, `while true` with no yield, a `RemoteEvent` handler with no argument validation, and the deprecated `wait`/`spawn` globals — with 64 tests. `packages/daemon` runs it at submit time, inside the trust boundary, over `writeScript` **and** over `Source` written as a property; the verdict it computes overwrites whatever the producer sent, and `POST /v1/changesets/:id/approve` refuses a `fail`. A source the analyser could not read is `fail`, never `ok`. Path policy was already real (`checkPolicy`). Two things it deliberately is not: a Luau compiler — it recognises what a script says, not what it computes — and per-project, since the `HttpService` allowlist is a daemon-wide option until `ProjectPolicy` grows a field for it (TODO(M38) in `packages/daemon/src/server.ts`). `packages/core`'s out-of-process `SandboxPort` still has no adapter (M13) |
 | M11 | Journal + inverse operations + `rollback` | NEW | Apply writes inverse ops; rollback restores prior tree byte-for-byte in tests |
 | M12 | `baseVersion` optimistic concurrency (`409 stale_base`) | NEW | Concurrent-edit test proves no last-write-wins |
 | M13 | Ports: Storage · Secrets · Transport · Telemetry · Sandbox | NEW | Core compiles with every port stubbed; no vendor import outside an adapter |
@@ -87,11 +92,11 @@ that needs evidence like any other.
 
 | # | Milestone | Status | Definition of done |
 |---|---|---|---|
-| M26 | `packages/mcp` — MCP server, stdio + streamable HTTP | NEW | Verified from Claude Code, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode |
-| M27 | `packages/a2a` — agent card + task endpoints | NEW | `/.well-known/agent.json` served; a second agent drives a full run |
-| M28 | `packages/cli` — `link · daemon · run · diff · apply · rollback · models` | NEW | Full loop drivable from a shell with no browser |
+| M26 | `packages/mcp` — MCP server, stdio + streamable HTTP | PART | Built: eleven tools over both transports, 61 tests, no business logic (ADR-009). `@modelcontextprotocol/sdk` is installed and pinned at the `^1.30.0` that every call was actually run against; the reference SDK `Client` listed all eleven tools with their projected schemas over an in-memory transport, and the HTTP binding answered a real `initialize` and refused an `Origin`-bearing request. **None of the nine editors this row names has been tried**, so the row stays `PART`: its definition of done is a verified run from each, and M31's conformance suite is what would keep them verified |
+| M27 | `packages/a2a` — agent card + task endpoints | PART | Built against A2A `v1.0.1`: Agent Card, `SendMessage`, `GetTask`, `ListTasks`, `CancelTask` over JSON-RPC, 93 tests. Streaming and push notifications are declared `false` in the card and answer the error §3.3.4 requires, which is implemented behaviour rather than a gap. Two corrections to this row's own wording: the card is served at `/.well-known/agent-card.json`, which is where A2A has registered it since 0.3.0, and **a second agent cannot drive a *full* run**, because no `/v1` route exposes `RunPipeline` for anything to drive (TODO(M09) — the same hole `forgebridge run` refuses on). What an agent can drive today is propose → diff → approve-with-a-human-grant → apply |
+| M28 | `packages/cli` — `link · daemon · run · diff · apply · rollback · models` | PART | Built: `daemon`, `link`, `status`, `diff`, `apply`, `rollback`, `models`, with human and `--json` output and distinct exit codes, 99 tests. `run` is the exception and it refuses out loud rather than pretending: there is no run endpoint on the `/v1` surface for it to call, and inventing one in a connector is what ADR-009 forbids (TODO(M09) in `packages/cli/src/commands/run.ts`). So the loop is drivable from a shell with no browser **except** for starting a run, which is what keeps this row `PART` |
 | M29 | `packages/sdk-ts` — generated client + ergonomic wrapper | NEW | Published to npm; example app in `examples/` |
-| M30 | `packages/sdk-python` — pydantic models + client | NEW | Published to PyPI; example script in `examples/` |
+| M30 | `packages/sdk-python` — pydantic models + client | PART | The generated models and the producer half of the client landed with `M08`, with ruff and pytest configured. Done when it is published to PyPI, an example script lives in `examples/`, and the three consumer routes can derive their own session key and MAC instead of taking one as a parameter — that last part is blocked on `M18` writing the pairing handshake down as a specification rather than as one TypeScript file |
 | M31 | Connector conformance suite | NEW | One test matrix every connector must pass; a connector that fails cannot ship |
 
 ## Phase 5 — Product surfaces (M32–M39)

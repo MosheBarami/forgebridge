@@ -55,17 +55,27 @@ paragraph's word for it.
 The model is an untrusted caller. Layered defence:
 
 1. **Schema** — Zod rejects anything not in the protocol.
-2. **Static analysis (M10 — unbuilt).** `packages/luau-analysis` does not exist; `ls
-   packages/` is `cli core daemon mcp model-registry protocol`. What exists is the seam
-   for it and an honest verdict in its absence: `packages/core` calls a `SandboxPort` and,
-   with no analyser configured, returns `warn` with the finding `core/luau-analysis-unavailable`
-   rather than `ok`; `packages/daemon` does the same with `luau/not-analysed` (TODO(M10) in
-   `packages/daemon/src/server.ts`). The rules that analyser will apply — parse failure,
-   unbounded loops in a `Heartbeat`, `require` of an unreviewed asset id, `HttpService`
-   calls to non-allowlisted hosts, `loadstring`, obfuscated payloads — are the design of
-   this layer, not a defence standing today. Until it lands, layers 3–5 carry T2 alone,
-   and the Studio plugin sends every ChangeSet carrying Luau source to a human regardless
-   of what verdict arrived with it.
+2. **Static analysis.** `packages/luau-analysis` reads every Luau source a ChangeSet
+   carries and returns a three-valued verdict, and `packages/daemon` runs it at submit
+   time, inside the trust boundary, overwriting whatever `validation` the producer sent.
+   The rules standing today are `loadstring`, `getfenv`/`setfenv`, `while true` with no
+   yield, an unbounded `Heartbeat` loop, `require` of an unreviewed asset id, `HttpService`
+   calls to non-allowlisted hosts, a `RemoteEvent` handler with no argument validation, and
+   the deprecated `wait`/`spawn` globals. A `fail` verdict is a gate, not a note: the
+   daemon's approve endpoint refuses it, so a set carrying a `loadstring` cannot be applied
+   at all.
+
+   Two limits, because a layer whose reach is unstated is a layer people over-trust.
+   **This is a recogniser over a token stream, not a Luau compiler** — it reads what a
+   script says, not what it computes, so an obfuscated payload assembled at runtime is
+   outside what it can see, and layers 3–5 are what cover that. And a source it could not
+   read — a tokenizer error, blocks that do not balance, a rule that threw, a budget that
+   ran out, a `Source` property holding something that is not a string — comes back `fail`,
+   never `ok`; the analyser never reports a pass for a check that did not run. `packages/core`
+   still calls a `SandboxPort` for the out-of-process case and, with no sandbox configured,
+   returns `warn` with `core/luau-analysis-unavailable` rather than `ok` (M13). The Studio
+   plugin sends every ChangeSet carrying Luau source to a human regardless of what verdict
+   arrived with it.
 3. **Policy** — path allowlist per project; a ChangeSet may not touch outside it.
    Deletion of more than N instances requires explicit confirmation regardless of policy.
 4. **Human approval** — default ON. Auto-apply is opt-in, per project, scoped to a path
@@ -98,9 +108,9 @@ place (a script comment can say "ignore your instructions").
   every ChangeSet it validates.
 - Producers cannot self-approve. Proposing and applying are separate calls with an approval
   in between; the daemon enforces the split at its endpoints, and the plugin re-decides
-  approval on arrival rather than trusting the verdict that came with the set. The MCP
-  spelling of it — `forge.propose_changeset` and `forge.apply_changeset` as distinct tools —
-  arrives with `packages/mcp`, which is an empty directory (M26).
+  approval on arrival rather than trusting the verdict that came with the set. `packages/mcp`
+  spells it out as two distinct tools, `forge.propose_changeset` and `forge.apply_changeset`,
+  neither of which can approve; `packages/a2a` refuses an apply that carries no human grant.
 
 ## T4 — Pairing and relay attacks
 
@@ -162,8 +172,9 @@ rule) and `plugin/` require BDFL review — a rule, enforced by review rather th
 Stated so nobody is surprised:
 
 - A compromised user machine. If malware owns the OS, it owns the keychain and the daemon.
-- A malicious model provider returning subtly wrong Luau. Static analysis will catch classes
-  of error, not intent — and it does not exist yet at all (M10, T2 layer 2). Review your
-  diffs. Today that is not advice, it is the control.
+- A malicious model provider returning subtly wrong Luau. Static analysis catches classes of
+  error, not intent: T2 layer 2 recognises `loadstring` and seven other patterns, and has
+  nothing to say about a script that does exactly what it appears to do and is wrong.
+  Review your diffs. That is still the control, not advice.
 - Roblox platform-side moderation decisions about generated content. That is the user's
   responsibility and the ToS is theirs to keep.

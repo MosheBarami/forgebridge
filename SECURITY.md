@@ -71,15 +71,21 @@ Also in scope:
   consumer will mis-apply.
 - `packages/core` — policy or validation bypass, prompt-injection paths that widen a
   ChangeSet's write scope, unsafe handling of secrets at a port.
+- `packages/luau-analysis` — a source that reaches an `ok` or `warn` verdict when a rule
+  should have fired on it, or an input that makes the analyser loop or exhaust memory
+  instead of returning. Note the layer's stated reach first: it is a recogniser over a
+  token stream, not a Luau compiler, so "an obfuscated payload assembled at runtime is not
+  detected" is a documented limit rather than a finding.
+- `packages/mcp`, `packages/a2a`, `packages/cli` — anything that lets a producer approve
+  its own ChangeSet, reach a project it was not linked to, or reach the daemon's approve
+  path from a tool. This is the single most valuable thing to break in a connector.
 - Continuous-integration integrity — a way to get unreviewed code into what
   `.github/workflows/` executes, or into the `assets/brands/` provenance manifest.
 
-**In scope the moment each of these exists.** None of them do today: the directories below are
-either empty or absent from the tree entirely, so there is nothing yet to report against them.
-They are listed so the boundary is not quietly redrawn when they land.
+**In scope the moment each of these exists.** The directories below are absent from the tree
+entirely, so there is nothing yet to report against them. They are listed so the boundary is
+not quietly redrawn when they land.
 
-- `packages/mcp` (M26), `packages/cli` (M28), and the other connectors — anything that lets a
-  producer approve its own ChangeSet, or reach a project it was not linked to.
 - `apps/relay` (M17) — pairing weaknesses, replay, cross-link injection, authentication
   bypass, reading or altering another link's traffic.
 - `apps/web` (M32–M39) — the usual web classes: authn/authz, XSS, CSRF, SSRF, RLS bypass,
@@ -136,12 +142,18 @@ write scope is fixed before generation, from the request and the project policy,
 text can widen it — that is the layer prompt-injection defence actually rests on. Pairing
 resists brute force, replay, and cross-link injection.
 
-**Not in force, named here so the paragraph above cannot be read as covering it.** Static
-analysis of generated Luau does not exist (M10): `packages/core` and `packages/daemon` return an
-explicit "not analysed" verdict rather than `ok`, and the plugin sends every ChangeSet carrying
-Luau source to a human regardless of the verdict that arrived with it. Rollback is scoped to the
-Studio session that applied the change, because `ApplyResult` has nowhere on the wire to carry
-the inverses (M11). Delimiting retrieved content as data inside the prompt is unbuilt (M22).
+Generated Luau is statically analysed: `packages/daemon` runs `packages/luau-analysis` over
+every source a ChangeSet carries, at submit time, and a `fail` verdict cannot be approved.
+
+**Not in force, named here so the paragraphs above cannot be read as covering it.** That
+analyser is a recogniser over a token stream and not a Luau compiler, so it reads what a
+script says rather than what it computes; the plugin therefore still sends every ChangeSet
+carrying Luau source to a human regardless of the verdict that arrived with it.
+`packages/core`'s out-of-process `SandboxPort` has no adapter, so a run driven through the
+pipeline rather than the daemon still returns `core/luau-analysis-unavailable` (M13).
+Rollback is scoped to the Studio session that applied the change, because `ApplyResult` has
+nowhere on the wire to carry the inverses (M11). Delimiting retrieved content as data inside
+the prompt is unbuilt (M22).
 
 Claims in that document are meant to be backed by tests rather than by prose (M43). **A claim
 there that no test defends is itself worth reporting** — quietly, through this policy.

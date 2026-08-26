@@ -36,7 +36,7 @@ the others.
 │                packages/protocol  —  the contract   (frozen)                 │
 │   ChangeSet · Operation · Run · Link · ApplyResult · JournalEntry · Error    │
 │   Zod schemas → TS types, inferred from the same file (zero drift)           │
-│   OpenAPI 3.1 · JSON Schema · Python models  (M08 — not generated yet)       │
+│   OpenAPI 3.1 · JSON Schema · pydantic models  (M08 — generated, committed)  │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
@@ -51,6 +51,10 @@ the others.
 │                apply → test → journal (→ rollback)                           │
 │                                                                              │
 │  Ports:  Storage · Secrets · Transport · Telemetry · Sandbox                 │
+│                                                                              │
+│  packages/luau-analysis  —  static analysis of model-authored Luau           │
+│    eight rules, three-valued verdict; run by packages/daemon on              │
+│    every ChangeSet at submit, inside the trust boundary                      │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
@@ -74,7 +78,10 @@ the others.
 ```
 
 Every box carrying a milestone marker is unbuilt or partial; the marker names the row in
-[`MILESTONES.md`](MILESTONES.md) that lands it. The relay line needs stating plainly:
+[`MILESTONES.md`](MILESTONES.md) that lands it. `packages/mcp`, `packages/a2a`,
+`packages/cli` and `packages/luau-analysis` now exist and are tested — their rows say what
+each still owes, and the connector table in §5 states each one's limits rather than leaving
+"exists" to mean "finished". The relay line needs stating plainly:
 **relay v1 is not a blind pipe.** It authenticates and integrity-protects every payload
 over TLS, but the operator *can* read ChangeSet contents, and the link indicator says so
 in those words rather than showing a padlock. A blind relay — end-to-end encrypted
@@ -110,7 +117,7 @@ reversible, testable, and transport-agnostic*. Free-text code is none of those.
 
 | | **Local daemon** (default) | **Cloud relay** (opt-in) |
 |---|---|---|
-| Runs | `forgebridge-daemon` on the user's machine — the bin `packages/daemon/package.json` declares. A unified `forgebridge daemon` subcommand arrives with `packages/cli` (M28), which is an empty directory today | `apps/relay` on apple.gg or self-hosted (M17 — absent) |
+| Runs | `forgebridge daemon` from `packages/cli`, or the `forgebridge-daemon` bin `packages/daemon/package.json` declares. Both start the same server; the CLI is a front-end over `createDaemon` and holds no transport decisions of its own | `apps/relay` on apple.gg or self-hosted (M17 — absent) |
 | Studio reaches it via | `HttpService` → `http://127.0.0.1:<port>` | `HttpService` → `https://…` long-poll |
 | Needs an account | No | Yes (for the sponsored run + sync) |
 | Sees user API keys | Yes — locally, from OS keychain | **Never** |
@@ -188,35 +195,39 @@ moved on. A silent downgrade would be a lie about what produced the code.
 ## 5. Agent connectors
 
 One core, five front doors. Each is a thin adapter — no business logic lives in a
-connector. **One of the five is open today**: the daemon's REST surface. The `Status`
-column says which, and a connector with a milestone in it is a door that does not open yet.
+connector. Four of the five are open. The `Status` column says what each one's limits are,
+because "the package exists" and "the door opens onto everything the row promises" are not
+the same claim.
 
 | Connector | Package | Status | Reaches |
 |---|---|---|---|
 | **REST** | `packages/daemon` | shipping | anything that can do HTTP, on `127.0.0.1` |
-| **REST + OpenAPI 3.1** | `apps/relay` | M17 — absent | the same surface, over a relay. The OpenAPI document it would be generated from is M08 |
-| **MCP** (stdio + streamable HTTP) | `packages/mcp` | M26 — empty dir | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
-| **A2A** (agent card + tasks) | `packages/a2a` | M27 — absent | agent-to-agent orchestration, multi-agent frameworks |
-| **CLI** | `packages/cli` | M28 — empty dir | shells, CI, Codex/Copilot CLI, scripting |
-| **SDKs** | `packages/sdk-ts`, `packages/sdk-python` | M29, M30 — absent | embedding ForgeBridge in other products |
+| **REST + OpenAPI 3.1** | `apps/relay` | M17 — absent | the same surface, over a relay. The OpenAPI document it must serve is generated (M08) and committed at `packages/protocol/schema/openapi.json` |
+| **MCP** (stdio + streamable HTTP) | `packages/mcp` | built; eleven tools over both transports, verified against the reference SDK client. **No editor in the next column has been tried** (M26, M31) | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
+| **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, message and task methods. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
+| **CLI** | `packages/cli` | built; every subcommand but `run`, which has no `/v1` route to call and refuses out loud (M09, M28) | shells, CI, Codex/Copilot CLI, scripting |
+| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client, unpublished (M30). TypeScript: absent | embedding ForgeBridge in other products |
 
-The MCP tool surface below is the **planned** contract, not a shipped one — `packages/mcp`
-has no files in it (M26). It is written down here because the split in the last paragraph is
-a protocol-level guarantee that every connector inherits, and it is easier to hold a
-connector to a surface that was designed before it was written:
+The MCP tool surface below is the shipped one — these are the eleven names
+`packages/mcp/src/tools.ts` registers, and a live client has listed them. Three of them
+(`read_tree`, `read_script`, `run_tests`) refuse today, because the `/v1` endpoints they
+would call do not exist yet; each refusal names the code and tells the model to ask the
+human instead:
 
 ```
-forge.list_projects        forge.read_tree         forge.read_script      (M26)
+forge.list_projects        forge.read_tree         forge.read_script
 forge.propose_changeset    forge.diff_changeset    forge.apply_changeset
 forge.run_tests            forge.rollback          forge.tail_output
 forge.list_models          forge.link_status
 ```
 
 `propose_` and `apply_` are deliberately separate calls: an external agent proposes,
-a human (or a policy) approves, and only then does anything touch the place. That part is
-not waiting on M26 — `packages/daemon` already enforces the split at its endpoints, and the
-Studio plugin decides approval itself on arrival rather than trusting the verdict that came
-with the ChangeSet.
+a human (or a policy) approves, and only then does anything touch the place. That guarantee
+does not rest on a connector honouring it — `packages/daemon` enforces the split at its
+endpoints, and the Studio plugin decides approval itself on arrival rather than trusting
+the verdict that came with the ChangeSet. Both connectors are built so the split is
+structural on their side too: no MCP tool calls the approve path, and `packages/a2a`'s
+apply is unreachable without an `ApprovalGrant` a human produced.
 
 ## 6. Data & persistence
 
@@ -303,23 +314,28 @@ this tree; the other three bullets are the design M45 lands, marked as such.
 
 Two different answers, and conflating them is how this section went stale before.
 
-**In this repository, right now** — `ls packages/` returns `cli core daemon mcp
-model-registry protocol`, and four of those six have code in them:
+**In this repository, right now** — `ls packages/` returns `a2a cli core daemon
+luau-analysis mcp model-registry protocol sdk-python`, and every one of the nine has code
+and tests in it:
 
 | Directory | What is in it |
 |---|---|
-| `packages/protocol/` | The frozen contract: Zod schemas and the types inferred from them, with its own test suite. The OpenAPI, JSON Schema and Python projections of it are M08 and not generated. |
+| `packages/protocol/` | The frozen contract: Zod schemas and the types inferred from them, with its own test suite. `schema/` holds the generated JSON Schema and OpenAPI projections (M08); nothing in it is hand-written, and `npm run verify:schemas` fails on any difference between it and `src/`. |
 | `packages/core/` | `RunPipeline`, the router, policy checks, the inverse-operation logic, and the ports (Storage, Secrets, Transport, Telemetry, Sandbox), with tests. |
 | `packages/daemon/` | The localhost transport: HTTP server, pairing, envelope handling, store seam, and the `forgebridge-daemon` bin, with tests. |
 | `packages/model-registry/` | The synced catalog and its capability metadata, plus `scripts/sync-catalog.ts` and the weekly `catalog-drift.yml` job that opens a PR on drift. |
+| `packages/luau-analysis/` | The Luau linter: a tokenizer, a block recogniser, eight rules, and an `analyse` that never reports a pass for a source it could not read. `packages/daemon` calls it on every ChangeSet. |
+| `packages/mcp/` | The MCP server: eleven tools over stdio and streamable HTTP, with the SDK confined to `src/server.ts` and everything above it tested against a double. |
+| `packages/a2a/` | The A2A connector: Agent Card, message and task methods over JSON-RPC, and an approval seam that makes apply unreachable without a human grant. |
+| `packages/cli/` | `forgebridge` — `daemon`, `link`, `status`, `diff`, `apply`, `rollback`, `models`, with `--json` output and distinct exit codes. `run` refuses (M09). |
+| `packages/sdk-python/` | The generated pydantic models and a thin `/v1` client, with ruff and pytest. Not published (M30). |
 | `plugin/` | The Studio plugin in Luau — transport, diff, approve, apply, journal — and a Luau test suite run by hand (in CI: M41). |
 | `scripts/` + `.github/workflows/` | The gates: boundaries, brand-asset provenance, key custody, secret scanning, DCO, and their own tests. `ci.yml`, `catalog-drift.yml`, `dco.yml` — there is no release workflow (M49). |
 
-`packages/cli/` and `packages/mcp/` are empty directories (M28, M26). `apps/`,
-`packages/a2a/`, `packages/sdk-ts/`, `packages/sdk-python/`, `packages/opencloud/`,
-`packages/luau-analysis/` and the storage adapters do not exist as directories at all.
-A milestone marker in §1 does not by itself mean absent — `packages/core` (M09–M13),
-`packages/daemon` (M14) and `plugin/` (M15) are all partial rather than missing;
+`apps/`, `packages/sdk-ts/`, `packages/opencloud/` and the storage adapters do not exist as
+directories at all. A milestone marker in §1 does not by itself mean absent — `packages/core`
+(M09–M13), `packages/daemon` (M14) and `plugin/` (M15) are all partial rather than missing,
+and so are the four connectors, each for a reason its row states;
 [`MILESTONES.md`](MILESTONES.md) carries the per-row status. No test count is quoted here
 on purpose: `npm run test` prints the real one, and a number transcribed into prose is the
 first thing in this document to rot.

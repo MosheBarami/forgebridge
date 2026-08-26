@@ -6,12 +6,15 @@ ForgeBridge is the engine. [apple.gg](#the-two-names) is the official instance t
 top of it. The engine is neutral, MIT-licensed, and yours to fork, self-host, or embed —
 the instance is one client of it among many.
 
-> **Status: pre-release.** The protocol package is frozen and tested (42 tests); most of the
-> rest is being built against it. Nothing is published to npm or PyPI yet. Every command,
-> diagram box and directory below that depends on unshipped work is marked with the milestone
-> that lands it — see [`docs/MILESTONES.md`](docs/MILESTONES.md). No install command in this
-> README points at a package that does not exist, and no diagram in it points at a capability
-> that does not either.
+> **Status: pre-release.** Nine packages, all green — the frozen protocol, the core, the
+> local daemon, the model registry, the Luau analyser, and the MCP, A2A, CLI and Python
+> connectors — plus a Studio plugin with its own Luau suite. Nothing is published to npm or
+> PyPI yet, so everything below runs from a checkout. Every command, diagram box and
+> directory that depends on unshipped work is marked with the milestone that lands it, and a
+> milestone number is never a claim of completeness: the row in
+> [`docs/MILESTONES.md`](docs/MILESTONES.md) says what is still owed. No install command in
+> this README points at a package that does not exist, and no diagram in it points at a
+> capability that does not either.
 
 ---
 
@@ -50,7 +53,7 @@ Studio plugin.
 │                packages/protocol  —  the contract   (frozen)                 │
 │   ChangeSet · Operation · Run · Link · ApplyResult · JournalEntry · Error    │
 │   Zod schemas → TS types, inferred from the same file (zero drift)           │
-│   OpenAPI 3.1 · JSON Schema · Python models  (M08 — not generated yet)       │
+│   OpenAPI 3.1 · JSON Schema · pydantic models  (M08 — generated, committed)  │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
@@ -65,6 +68,9 @@ Studio plugin.
 │                apply → test → journal (→ rollback)                           │
 │                                                                              │
 │  Ports:  Storage · Secrets · Transport · Telemetry · Sandbox                 │
+│                                                                              │
+│  packages/luau-analysis  —  static analysis of model-authored Luau           │
+│    eight rules; run by packages/daemon on every ChangeSet at submit          │
 └───────────────────────────────┬──────────────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────────────┐
@@ -88,7 +94,9 @@ Studio plugin.
 ```
 
 Every box carrying a milestone marker is unbuilt or partial — the marker is the row in
-[`docs/MILESTONES.md`](docs/MILESTONES.md) that lands it. The relay line is the one worth
+[`docs/MILESTONES.md`](docs/MILESTONES.md) that lands it, and the row says which of the two
+it is. `packages/mcp`, `packages/a2a` and `packages/cli` exist and are tested; each still
+owes something its row names. The relay line is the one worth
 reading twice: **relay v1 is not a blind pipe.** It authenticates and integrity-protects
 every payload and runs over TLS, but the operator *can* read ChangeSet contents, and the
 link indicator says exactly that. A blind relay — end-to-end encrypted payloads the
@@ -120,29 +128,39 @@ npm run check          # typecheck · test · build across the workspace
 > `check` as a linted codebase. The M04 follow-up row in
 > [`docs/MILESTONES.md`](docs/MILESTONES.md) tracks configuring one.
 
-### The loop, once the transport lands
+### The loop
+
+From a checkout, after `npm ci && npm run build` — the workspace links `forgebridge` into
+`node_modules/.bin`, so `npx` finds it. Nothing is published to npm yet (M49).
 
 ```bash
-# 1. Start the bridge on your own machine.        (M14 — packages/daemon)
-npm run daemon         # serves /v1/* on 127.0.0.1:7317
+# 1. Start the bridge on your own machine.
+#    Both allowlists deny by default: no writable path, no reachable host.
+npx forgebridge daemon \
+  --allow-path ServerScriptService.Shop \
+  --allow-http-host api.example.com
+#    Prints the pairing code and the producer token, once, to stderr.
 
-# 2. Install the Studio plugin.                   (M15 — plugin/)
-#    Build produces a .rbxm you drop in your local Plugins folder.
-npm run plugin:build
+# 2. Build the Studio plugin and drop it in your local Plugins folder.
+#    Needs Rojo — see plugin/BUILD.md for the exact command and its caveats.
+cd plugin && rojo build --output ForgeBridge.rbxm
 
-# 3. In Studio, open the ForgeBridge panel and pair with the daemon.
+# 3. In Studio, open the ForgeBridge panel and type the pairing code.
 #    Roblox asks once for permission to let the plugin reach that address.
 #    The plugin explains what it is about to ask for before that dialog appears.
 
-# 4. Point a producer at it.                      (M28 — packages/cli)
-npx forgebridge run "add a shop stall with a purchase prompt"
-npx forgebridge diff        # review before anything touches the place
-npx forgebridge apply
-npx forgebridge rollback    # every apply journals its inverse
+# 4. Review and apply. Every command takes --json for scripting.
+npx forgebridge status
+npx forgebridge diff <changeset-id>    # review before anything touches the place
+npx forgebridge apply <changeset-id>
+npx forgebridge rollback <journal-id> --expected-version <n>
 ```
 
-> **TODO(M14/M15/M28):** `npm run daemon` and `npm run plugin:build` do not exist yet. The
-> owners of those milestones add the scripts and update this block.
+> **`forgebridge run` refuses, on purpose.** There is no run endpoint on the `/v1` surface
+> for it to call, and inventing one inside a connector is what ADR-009 forbids. Until M09
+> lands that route, a ChangeSet reaches the daemon from an MCP client, from an A2A agent,
+> or from anything that can POST to `127.0.0.1` — and `diff`, `apply` and `rollback` above
+> work on it. The command exists and says this rather than appearing to work.
 
 ### Bring your own model
 
@@ -160,9 +178,9 @@ this lose trust.
 
 ### Connecting an agent instead
 
-One core, five front doors — MCP (M26), A2A (M27), REST + OpenAPI (M14/M17), CLI (M28), and
-TypeScript/Python SDKs (M29/M30). MCP is the primary connector, so Claude Code, Cursor,
-Windsurf, Cline, Continue and the rest reach ForgeBridge through the same tools:
+One core, five front doors — MCP, A2A, REST (the daemon today, a relay at M17), the CLI, and
+the SDKs. MCP is the primary connector (ADR-009), so an editor that speaks it reaches
+ForgeBridge through these eleven tools, which is the surface `packages/mcp` registers today:
 
 ```
 forge.list_projects        forge.read_tree         forge.read_script
@@ -173,6 +191,12 @@ forge.list_models          forge.link_status
 
 `propose_` and `apply_` are separate calls on purpose. An agent proposes; a human or a policy
 approves; only then does anything touch your place. A producer cannot approve its own work.
+
+Three of the eleven — `read_tree`, `read_script`, `run_tests` — refuse today, because the
+`/v1` endpoints behind them do not exist yet (M09/M13/M31/M41); each refusal names the code
+and tells the model to ask you instead. And **no editor on that list has actually been tried**:
+what has been verified is a run against the reference MCP SDK's own client. M31 is the
+conformance suite that would make the editor list a claim rather than an intention.
 
 ## The promises
 
@@ -243,22 +267,31 @@ Nothing here is a placeholder pretending to be a package.
 packages/protocol/       the contract — Zod schemas, zero deps but zod    frozen ✅
 packages/core/           RunPipeline, router, policy, breaker, ports      M09–M13
 packages/daemon/         localhost transport — the default path           M14
+packages/luau-analysis/  static analysis of model-authored Luau           M10
 packages/model-registry/ synced model catalog + capability metadata       M20
 plugin/                  Roblox Studio plugin (Luau) + its own tests      M15
-packages/mcp/            MCP server (stdio + streamable HTTP)             M26 — empty
-packages/cli/            the `forgebridge` binary                         M28 — empty
+packages/mcp/            MCP server (stdio + streamable HTTP)             M26
+packages/a2a/            A2A agent card + task endpoints                  M27
+packages/cli/            the `forgebridge` binary                         M28
+packages/sdk-python/     generated pydantic models + a thin client        M30
 examples/                SDK examples                                     M29/M30 — empty
 apps/web/                apple.gg — the official instance                 M32–M39 — absent
 assets/brands/           official third-party marks + provenance manifest
-scripts/                 sync-catalog · verify-assets · verify-boundaries
-                         · verify-no-key-storage · verify-no-secrets
+scripts/                 sync-catalog · generate-schemas · verify-assets
+                         · verify-boundaries · verify-no-key-storage
+                         · verify-no-secrets
                          · docs-claims-rules (read by the gate self-tests)
 docs/                    architecture, protocol, threat model, milestones, ADRs
 ```
 
-`apps/relay/`, `packages/a2a/`, `packages/sdk-ts/`, `packages/sdk-py/` and
-`packages/opencloud/` appear in the diagram above and do not exist as directories at all —
-M17, M27, M29, M30 and M48 respectively.
+Every directory above has code and tests in it, except the two marked otherwise. A
+milestone number is not a claim of completeness: `packages/mcp` has not been tried from any
+of the editors M26 names, `packages/a2a` cannot drive a full run because no `/v1` route
+exposes one, and `forgebridge run` refuses for the same reason. Each row in
+[`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
+
+`apps/relay/`, `packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and
+do not exist as directories at all — M17, M29 and M48 respectively.
 
 The boundary rules that keep this shape honest are in
 [`docs/REPO-LAYOUT.md`](docs/REPO-LAYOUT.md) and enforced by `scripts/verify-boundaries.ts`.
