@@ -3,6 +3,7 @@ import { registerForgeBridgeTools, renderToolName, type McpServerLike, type Tool
 import { TOOLS, TOOL_NAMES } from '../src/tools.js';
 import { codeOfFailure, type ToolResult } from '../src/errors.js';
 import { contextFor, fakeDaemon, payloadOf } from './fake-daemon.js';
+import { LocalOperatorRollbackGate } from '../src/approval.js';
 
 /**
  * The surface itself: the names `docs/ARCHITECTURE.md` §5 fixes, and the fact
@@ -131,18 +132,22 @@ describe('tools that this transport does serve', () => {
     expect((payload['messages'] as Array<{ message: string }>).map((m) => m.message)).toEqual(['two', 'three']);
   });
 
-  it('rollback dispatches and reports that it is only dispatched', async () => {
+  it('rollback dispatches, once cleared, and reports that it is only dispatched', async () => {
     const daemon = fakeDaemon();
+    const journalId = '44444444-4444-4444-8444-444444444444';
+    const gate = new LocalOperatorRollbackGate();
+    gate.record({ journalId, approvedBy: 'ada@example.com' });
     const tool = TOOLS.find((entry) => entry.name === 'forge.rollback')!;
     const payload = payloadOf(
       await tool.handler(
-        { journalId: '44444444-4444-4444-8444-444444444444', expectedVersion: 4, reason: 'the user asked' },
-        contextFor(daemon),
+        { journalId, expectedVersion: 4, reason: 'the user asked' },
+        contextFor(daemon, { rollbackGate: gate }),
       ),
     );
 
     expect(payload['status']).toBe('dispatched');
-    expect(daemon.paths()).toEqual(['POST /v1/journal/44444444-4444-4444-8444-444444444444/rollback']);
+    expect(payload['approvedBy']).toBe('ada@example.com');
+    expect(daemon.paths()).toEqual([`POST /v1/journal/${journalId}/rollback`]);
     expect(daemon.requests[0]?.body).toMatchObject({ expectedVersion: 4, reason: 'the user asked' });
     expect(tool.description).toMatch(/dispatched, not completed/);
   });

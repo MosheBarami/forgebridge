@@ -7,6 +7,7 @@
  * client can be imported — and tested — without loading a protocol library at
  * all. Reach for `@forgebridge/mcp/server` when you want a running server.
  */
+export * from './approval.js';
 export * from './config.js';
 export * from './daemon-client.js';
 export * from './errors.js';

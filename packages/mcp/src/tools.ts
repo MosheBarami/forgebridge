@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { ChangeSet, ChangeSetStatus, ForgeBridgeError, RollbackRequest } from '@forgebridge/protocol';
+import { DENY_ALL_ROLLBACKS, type RollbackGate } from './approval.js';
 import type { DaemonClient } from './daemon-client.js';
 import { textResult, type ToolResult } from './errors.js';
 import {
@@ -31,6 +32,13 @@ export interface ToolContext {
   client: DaemonClient;
   /** Project assumed when a call names none. Null means "ask the daemon". */
   defaultProjectId: string | null;
+  /**
+   * Where a human's clearance for a rollback comes from. Optional, and absent
+   * means `DENY_ALL_ROLLBACKS`: a context assembled by an embedder that has
+   * never heard of this field gets the refusing gate, not the open one. See
+   * `approval.ts` for why the default falls that way.
+   */
+  rollbackGate?: RollbackGate;
   /** Injected so a test can assert on the exact ChangeSet that was submitted. */
   newId?: () => string;
   now?: () => Date;
@@ -50,6 +58,9 @@ export interface ToolDefinition<Shape extends z.ZodRawShape = z.ZodRawShape> {
 
 const APPROVAL_NOTE =
   'Approval is a human action. No tool on this server can approve a ChangeSet, and this server never calls the daemon’s approve endpoint (ADR-012).';
+
+const ROLLBACK_APPROVAL_NOTE =
+  'Clearing a rollback is a human action. No tool on this server can clear one, and a clearance covers one journal entry only — the user approving a ChangeSet is not the user agreeing to reverse a different apply (ADR-012).';
 
 function idFactory(context: ToolContext): () => string {
   return context.newId ?? randomUUID;
@@ -330,16 +341,41 @@ const rollback: ToolDefinition = {
   name: 'forge.rollback',
   title: 'Roll back an applied ChangeSet',
   description: [
-    'Ask Roblox Studio to replay the inverse of an applied ChangeSet, from the journal that apply wrote. This reverses work in the user’s place, so only call it when the user has asked for it in this conversation — never on your own initiative to tidy up after a failure.',
-    'expectedVersion guards it: if the place has moved since, the rollback is refused rather than replayed onto a tree it no longer fits. The request is dispatched, not completed — the inverse operations live on the plugin, and only the plugin can carry them out.',
+    'Ask Roblox Studio to replay the inverse of an applied ChangeSet, from the journal that apply wrote.',
+    'A rollback is a WRITE: it reverses work the user may have wanted, so it is gated exactly the way an apply is. This tool CANNOT clear a rollback and it cannot make an uncleared one run — without a human clearance recorded for this exact journal id it refuses with not_approved, and a clearance for one journal entry never authorises another (ADR-012). Calling it on your own initiative to tidy up after a failure always fails.',
+    'When it refuses, do not retry and do not try another journal id: report the journal id to the user and ask them to reverse it themselves with `forgebridge rollback <journal-id> --expected-version <n>`, or to clear it in their ForgeBridge client.',
+    'expectedVersion guards it further: if the place has moved since, the rollback is refused rather than replayed onto a tree it no longer fits. Once cleared, the request is dispatched, not completed — the inverse operations live on the plugin, and only the plugin can carry them out.',
   ].join(' '),
   inputShape: rollbackInput,
   readOnlyHint: false,
   destructiveHint: true,
   handler: async (args, context): Promise<ToolResult> => {
+    // Arguments first, so a malformed journal id is reported as the
+    // invalid_request it is rather than as an approval failure — and so the
+    // gate is only ever asked about an id that could name a real entry.
     const input = objectOf(rollbackInput).parse(args);
+
+    // Before the daemon is touched at all. The daemon gates this route on the
+    // producer token, which this process holds; reaching it and letting it
+    // decide would be asking the lock whether it owns the key.
+    const grant = await (context.rollbackGate ?? DENY_ALL_ROLLBACKS).consume(input.journalId);
+    if (!grant) {
+      throw new ForgeBridgeError(
+        'not_approved',
+        `no human has cleared a rollback of journal ${input.journalId}`,
+        `Ask the user to reverse it themselves with \`forgebridge rollback ${input.journalId} --expected-version <n>\`, or to clear this journal entry in their ForgeBridge client. ${ROLLBACK_APPROVAL_NOTE}`,
+      );
+    }
+
     const request = RollbackRequest.parse(input);
-    return textResult(await context.client.rollback(request));
+    const dispatched = (await context.client.rollback(request)) as Record<string, unknown> | null;
+    return textResult({
+      ...(dispatched ?? {}),
+      // Named in the answer so the model reports back *whose* clearance ran
+      // this, rather than presenting a reversal as its own decision.
+      approvedBy: grant.approvedBy,
+      ...(grant.note ? { approvalNote: grant.note } : {}),
+    });
   },
 };
 

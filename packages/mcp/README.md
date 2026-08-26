@@ -21,8 +21,8 @@ wire format into a call and back.
 
 The package builds and typechecks. Both bindings have been exercised: a live SDK client
 over an in-memory transport listed the eleven tools with the JSON Schemas the SDK projects
-from their Zod shapes, and the streamable-HTTP binding answered a real `initialize` and
-refused an `Origin`-bearing request with 403. The API that had to be confirmed —
+from their Zod shapes, and the streamable-HTTP binding answered a real `initialize`, refused
+an `Origin`-bearing request with 403, and refused an unauthenticated one with 401. The API that had to be confirmed —
 constructor shapes, `registerTool`'s config keys, `handleRequest`'s signature — is listed
 in the block at the top of `src/server.ts`. `^1.30.0` is a floor that was run, not a guess:
 earlier 1.x releases are untested and therefore unclaimed.
@@ -39,6 +39,13 @@ On this connector the separation is structural rather than conditional:
 - **`forge.apply_changeset`** cannot approve. It reads the ChangeSet's status and reports
   it. If a human has not approved, it refuses with `not_approved` and tells the calling
   model to ask the user. Chaining propose → apply always fails.
+- **`forge.rollback` is gated the same way.** A rollback is a write: it reverses an apply
+  the user may have wanted. The daemon gates `POST /v1/journal/:id/rollback` on the producer
+  token and nothing else, and this process holds that token — so the tool refuses with
+  `not_approved` unless a `RollbackGate` (`src/approval.ts`) yields a grant for that exact
+  journal id. Grants are per journal entry and single use, so a human clearing ChangeSet A
+  never authorises reversing journal B, and `record` is an in-process method no tool call,
+  argument or JSON-RPC method can reach.
 - **There is no approve call anywhere in this package.** `DaemonClient` has no `approve()`
   method, no tool maps to `POST /v1/changesets/:id/approve`, and `test/approval-boundary.test.ts`
   asserts that no request any tool makes reaches an approve path — including one assembled
@@ -55,7 +62,8 @@ Two limits worth stating plainly rather than leaving to be discovered:
    *different* process holding that token could approve. The boundary this package provides
    is that the model's tool surface has no such call — not that the token cannot be used
    for one. The gate that does not depend on the token is the plugin's own approval step in
-   Studio.
+   Studio. This is also why the HTTP binding authenticates: anything that reached that port
+   unauthenticated would be holding the producer token by proxy.
 2. **`--dangerously-skip-permissions`-style client settings are not a ForgeBridge
    concern.** A client that auto-approves *tool calls* is auto-approving proposals, which is
    fine; it cannot auto-approve the ChangeSet, because no tool here does that.
@@ -76,13 +84,15 @@ protocol's refusals — a path segment that is not a safe identifier, a `setProp
 | `forge.diff_changeset` | `GET /v1/changesets/:id/diff` | also how you check whether a human approved yet |
 | `forge.apply_changeset` | `GET /v1/changesets/:id/diff` | reports; refuses `not_approved` for anything a human has not cleared |
 | `forge.run_tests` | — | **refuses with `provider_unconfigured`**: the Sandbox port has no adapter (M13) and `/v1` has no test endpoint (M31/M41) |
-| `forge.rollback` | `POST /v1/journal/:id/rollback` | dispatched, not completed — the inverses live on the plugin |
+| `forge.rollback` | `POST /v1/journal/:id/rollback` | **refuses with `not_approved`** unless a `RollbackGate` cleared this journal id; then dispatched, not completed — the inverses live on the plugin |
 | `forge.tail_output` | `GET /v1/output` | what Studio printed |
 | `forge.list_models` | `GET /v1/models` | the synced catalog and its live health |
 | `forge.link_status` | `GET /v1/link` | transport and what it implies about who can read your changes |
 
-The three that refuse say so in their description text as well as in their answer, because
-that text is what the calling model reads before it decides to try.
+The four that refuse say so in their description text as well as in their answer, because
+that text is what the calling model reads before it decides to try. Three of them refuse
+because the endpoint behind them does not exist yet; `forge.rollback` refuses because
+nobody has said yes, which is a different thing and its description says which.
 
 `baseVersion` has no read endpoint either: a fresh project is `0`, and a wrong value is
 refused with `stale_base` naming the version the project is actually at, which is the
@@ -120,9 +130,31 @@ FORGEBRIDGE_PRODUCER_TOKEN=<the token the daemon printed> \
   node /absolute/path/to/forgebridge/packages/mcp/dist/bin.js --http --port 7318
 ```
 
+which prints, on stderr, the bearer token that binding requires:
+
+```
+forgebridge-mcp: streamable HTTP on http://127.0.0.1:7318/mcp, daemon http://127.0.0.1:7317
+forgebridge-mcp: bearer token: 8Qk1…
+forgebridge-mcp: send it as "Authorization: Bearer <token>"; requests without it are refused with 401.
+```
+
 The HTTP binding serves `POST /mcp`, binds `127.0.0.1` unless told otherwise, checks the
-`Host` header, and refuses any request carrying an `Origin` — this process holds a token
-that can propose changes to somebody's place, and no browser is a legitimate client of it.
+`Host` header, refuses any request carrying an `Origin`, and **requires that bearer token
+on every request**. Four checks answering four different questions; only the last is
+authentication.
+
+The token is minted per process unless `--http-token` / `FORGEBRIDGE_MCP_TOKEN` names one,
+it is compared with `timingSafeEqual` behind a length check, and **there is no way to turn
+it off**. Loopback is not an authentication boundary — `packages/daemon/src/envelope.ts`
+says exactly that about the daemon's own port — and every request this binding accepts is
+served by a tool server backed by the daemon's producer token. An open port here is that
+token handed to whatever process found it. An opt-out was considered: the only honest
+version would be the daemon refusing to issue a producer token to an unauthenticated MCP
+binding, and the daemon cannot see how its token is being used, so the flag would disable
+the boundary with nothing anywhere to compensate.
+
+The stdio binding needs none of this. It is a child process the client spawned, and the
+parent is the trust boundary.
 
 ## Client configuration
 
@@ -258,7 +290,13 @@ Whether any shipping client actually refuses it is **not known here**. If one do
 | `--project <uuid>` | `FORGEBRIDGE_PROJECT_ID` | the daemon's default project |
 | `--host <host>` | `FORGEBRIDGE_MCP_HOST` | `127.0.0.1` |
 | `--port <port>` | `FORGEBRIDGE_MCP_PORT` | `7318` |
+| `--http-token <token>` | `FORGEBRIDGE_MCP_TOKEN` | minted per process, printed once at startup |
 | `--tool-name-separator <c>` | `FORGEBRIDGE_MCP_TOOL_SEPARATOR` | `.` |
+
+An `--http-token` shorter than 16 characters is refused rather than accepted: choosing your
+own token must not be quietly weaker than not choosing one. An empty value is treated as
+"none supplied" and mints one, so the shape someone reaches for when they mean to switch
+authentication off fails closed instead.
 
 The daemon URL default is imported from `@forgebridge/daemon`, not written down twice: the
 daemon's port is fixed because Roblox scopes a plugin's HTTP permission per address, and a
@@ -300,12 +338,22 @@ detail-free `internal`, the same rule the daemon applies to its own responses.
 npm run test
 ```
 
-Six files, covering tool registration and the exact eleven names, schema validation
+Seven files, covering tool registration and the exact eleven names, schema validation
 rejecting malformed input, the propose/apply separation, error-code mapping, the daemon
-client's headers and refusal handling, and transport selection. The one that matters most
-is `test/approval-boundary.test.ts`: it drives a recording stand-in for `/v1` and asserts
-that an agent cannot chain propose → apply, and that no tool, under any arguments, issues a
-request to an approve path.
+client's headers and refusal handling, transport selection, and the HTTP binding's
+authentication. The two that matter most:
+
+- `test/approval-boundary.test.ts` drives a recording stand-in for `/v1` and asserts that an
+  agent cannot chain propose → apply, that no tool under any arguments issues a request to
+  an approve path, and that `forge.rollback` refuses an uncleared journal id *without
+  reaching the daemon* — the daemon would have accepted it, since this process holds the
+  producer token. Its control is the case the gate must not break: a journal entry a human
+  did clear still dispatches, and a clearance for one entry does not carry to another.
+- `test/http-auth.test.ts` runs the real binding on an ephemeral port and asserts that an
+  unauthenticated request is refused with 401 before it is even routed, that a token of the
+  wrong *length* is that same 401 rather than the 500 an unguarded `timingSafeEqual` throws,
+  that `timingSafeEqual` is what does the comparing, and — the control — that a request
+  carrying the token still gets a real `initialize` answered.
 
 `src/server.ts` is the one file that imports the SDK, and `register.ts` describes the slice
 of it this package calls as a structural interface — `createForgeBridgeServer` assigns the
@@ -320,9 +368,12 @@ a recording double.
 | `TODO(M31)` in `src/tools.ts` | a `/v1` read for a project's current tree version, and one for a ChangeSet's per-operation `ApplyResult` |
 | `TODO(M31)` in `src/daemon-client.ts` | a protocol error code for "the transport is not reachable"; today it lands on `internal` and carries the truth in its remedy |
 | `TODO(M31)` in `src/config.ts` | whether any client actually refuses a dot in a tool name |
+| `TODO(M28)` in `src/approval.ts` | a durable, cross-process approval path to record rollback grants into — until it exists, `forgebridge-mcp` run from the command line has no gate to offer and `forge.rollback` refuses every call. It is also where this gate and A2A's, now two hand-copies of one idea, should be merged |
 | `TODO(M49)` | publishing to npm, so there is an `npx` command worth writing down |
 
 `forge.read_tree`, `forge.read_script` and `forge.run_tests` are not TODOs in this package:
 they need endpoints and adapters that belong to other milestones (M09/M13/M31/M41), and
 until those exist the honest implementation is the one here — refuse, name the code, and
-tell the model to ask the human instead.
+tell the model to ask the human instead. `forge.rollback` refusing is not a TODO either: it
+is what the tool is supposed to do until a human says otherwise, and the M28 row above is
+about giving them somewhere to say it, not about removing the gate.

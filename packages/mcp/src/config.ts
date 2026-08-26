@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { DEFAULT_DAEMON_PORT, LOOPBACK_HOST, PRODUCER_TOKEN_ENV } from '@forgebridge/daemon';
 
 /**
@@ -26,6 +27,7 @@ export const PROJECT_ID_ENV = 'FORGEBRIDGE_PROJECT_ID';
 export const HTTP_PORT_ENV = 'FORGEBRIDGE_MCP_PORT';
 export const HTTP_HOST_ENV = 'FORGEBRIDGE_MCP_HOST';
 export const TOOL_SEPARATOR_ENV = 'FORGEBRIDGE_MCP_TOOL_SEPARATOR';
+export const HTTP_TOKEN_ENV = 'FORGEBRIDGE_MCP_TOKEN';
 
 /**
  * The default HTTP port for the *MCP* binding, which is not the daemon's.
@@ -49,6 +51,18 @@ export const DEFAULT_HTTP_PORT = 7318;
  */
 export const DEFAULT_TOOL_SEPARATOR = '.';
 
+/**
+ * The floor on an operator-supplied HTTP bearer token, in characters.
+ *
+ * A policy, not a measurement. The thing this token stands in front of is a
+ * process holding the daemon's producer token, and the endpoint is a local HTTP
+ * socket that answers as fast as the machine can loop — a four-character secret
+ * there is a formality. A minted token is 32 bytes of CSPRNG rendered base64url,
+ * which is 43 characters; this floor exists only so that *choosing* your own
+ * token cannot quietly be weaker than not choosing one.
+ */
+export const MIN_HTTP_TOKEN_CHARS = 16;
+
 export interface ServerConfig {
   transport: TransportBinding;
   /** Base URL of the daemon's `/v1` surface, without a trailing slash. */
@@ -63,6 +77,12 @@ export interface ServerConfig {
   /** Only meaningful for the `http` binding. */
   httpHost: string;
   httpPort: number;
+  /**
+   * The bearer token the HTTP binding requires. Minted per process unless an
+   * operator names one, and non-optional so that a config assembled by hand
+   * cannot omit it into an open endpoint.
+   */
+  httpToken: string;
   toolSeparator: string;
 }
 
@@ -154,7 +174,43 @@ export function resolveConfig(argv: readonly string[], env: NodeJS.ProcessEnv): 
     throw new ConfigError('--tool-name-separator must be one of . _ -');
   }
 
-  return { transport, daemonUrl, producerToken, defaultProjectId, httpHost, httpPort, toolSeparator };
+  const httpToken = resolveHttpToken(flagValue(argv, '--http-token') ?? env[HTTP_TOKEN_ENV]);
+
+  return { transport, daemonUrl, producerToken, defaultProjectId, httpHost, httpPort, httpToken, toolSeparator };
+}
+
+/**
+ * The HTTP binding's bearer token: taken from the operator, or minted.
+ *
+ * Minted rather than optional, and there is deliberately **no way to turn the
+ * check off**. Binding loopback is not an authentication boundary — the daemon's
+ * own `envelope.ts` says the MAC exists precisely because "any process on the
+ * box can open a socket to 127.0.0.1" — and this process answers every request
+ * with the daemon's producer token behind it. An unauthenticated HTTP binding is
+ * therefore that token handed to whatever found the port, which is the boundary
+ * ADR-012 depends on, gone.
+ *
+ * An opt-out was considered and rejected: the only honest version of one would
+ * be the daemon refusing to issue a producer token to an unauthenticated MCP
+ * binding, and the daemon has no way to know how its token is being used. A flag
+ * this package could offer would therefore be a flag that disables the boundary
+ * and cannot be compensated for anywhere else. Minting costs an operator one
+ * copy-paste from the line `startHttp` prints, which is what they already do for
+ * the producer token and the pairing code.
+ *
+ * An empty or whitespace value is treated as "not supplied" rather than as "no
+ * token", so `FORGEBRIDGE_MCP_TOKEN=` — the shape someone reaches for when they
+ * mean to switch this off — mints one and fails closed.
+ */
+export function resolveHttpToken(raw: string | undefined): string {
+  const supplied = (raw ?? '').trim();
+  if (supplied === '') return randomBytes(32).toString('base64url');
+  if (supplied.length < MIN_HTTP_TOKEN_CHARS) {
+    throw new ConfigError(
+      `--http-token must be at least ${MIN_HTTP_TOKEN_CHARS} characters; omit it and one is minted for you`,
+    );
+  }
+  return supplied;
 }
 
 /** True when the HTTP binding would be reachable from outside this machine. */

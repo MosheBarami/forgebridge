@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -6,7 +7,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { DaemonClient } from './daemon-client.js';
 import { registerForgeBridgeTools, type McpServerLike } from './register.js';
 import type { ToolContext } from './tools.js';
-import { bindsPublicly, type ServerConfig } from './config.js';
+import { bindsPublicly, ConfigError, MIN_HTTP_TOKEN_CHARS, type ServerConfig } from './config.js';
 
 /**
  * The two transport bindings, over one server implementation.
@@ -114,10 +115,46 @@ export const HTTP_ENDPOINT = '/mcp';
 
 const JSON_RPC_HEADERS = { 'content-type': 'application/json', 'cache-control': 'no-store' } as const;
 
-function rejectRequest(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, JSON_RPC_HEADERS);
+function rejectRequest(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  extraHeaders: Record<string, string> = {},
+): void {
+  res.writeHead(status, { ...JSON_RPC_HEADERS, ...extraHeaders });
   // JSON-RPC shaped so a client surfaces the sentence rather than "bad response".
   res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message }, id: null }));
+}
+
+/**
+ * Whether an `Authorization` header carries this binding's bearer token.
+ *
+ * This is the whole of the HTTP binding's authentication, and it is not
+ * optional: `startHttp` hands every accepted request to a fully registered tool
+ * server backed by the daemon's producer token, so a request that gets past this
+ * line is holding that token by proxy. Loopback does not draw that boundary —
+ * `packages/daemon/src/envelope.ts` says so about its own port, and this one is
+ * no different. `packages/a2a/src/server.ts` reached the same conclusion for the
+ * A2A ingress; this is that check, in this file's idiom.
+ *
+ * Exported so a test can drive it directly, including the two shapes that a
+ * naive implementation gets wrong.
+ */
+export function authorizationMatches(header: string | string[] | undefined, expected: string): boolean {
+  // `IncomingHttpHeaders` values are `string | string[]`, so the widened shape
+  // is what a caller can hand over. Read the first entry rather than joining:
+  // two half-tokens must never be able to add up to one match.
+  const raw = (Array.isArray(header) ? header[0] : header) ?? '';
+  const [scheme, ...rest] = raw.split(' ');
+  if ((scheme ?? '').toLowerCase() !== 'bearer') return false;
+  const provided = rest.join(' ').trim();
+  // Constant time, and length-checked first: `timingSafeEqual` throws outright
+  // on a length mismatch, which would turn a wrong-length token into a 500 —
+  // and a 500 that only wrong-*length* tokens produce is a length oracle.
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(provided, 'utf8');
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 async function readBody(req: IncomingMessage, limitBytes: number): Promise<unknown> {
@@ -139,6 +176,13 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 /**
  * Streamable HTTP, for a remote client.
  *
+ * Four things stand in front of the tool surface here, and they answer different
+ * questions: the `Host` check is "was this request addressed to us or rebound at
+ * us", the `Origin` check is "is a browser making it", the bearer token is "is
+ * the caller the one the human started this server for", and the path and method
+ * are ordinary routing. Only the third is authentication, and it is the one this
+ * binding did not have at all until this change — see `authorizationMatches`.
+ *
  * A fresh server and transport per request: the stateless shape, which needs no
  * session table and cannot leak one client's state into another's response. The
  * cost is constructing eleven tool registrations per call, which is object
@@ -147,6 +191,21 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 export function startHttp(options: StartOptions): Promise<Server> {
   const { config } = options;
   const log = options.log ?? ((message: string): void => void process.stderr.write(`${message}\n`));
+
+  // Checked here as well as in `resolveConfig`, because a `ServerConfig` can be
+  // assembled by hand and TypeScript cannot stop a JavaScript embedder passing
+  // `httpToken: ''`. There is no binding without a token to require.
+  if (config.httpToken.trim().length < MIN_HTTP_TOKEN_CHARS) {
+    // Rejected rather than thrown, because this function returns a promise: a
+    // caller that wired up only `.catch()` would otherwise take a synchronous
+    // throw it never sees, and an unhandled throw here is a server that did not
+    // start for a reason nobody printed.
+    return Promise.reject(
+      new ConfigError(
+        `the HTTP binding needs a bearer token of at least ${MIN_HTTP_TOKEN_CHARS} characters; resolveConfig mints one when none is supplied`,
+      ),
+    );
+  }
 
   const http = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async (): Promise<void> => {
@@ -159,6 +218,17 @@ export function startHttp(options: StartOptions): Promise<Server> {
         // carrying an Origin is a browser saying so.
         if (req.headers.origin !== undefined) {
           rejectRequest(res, 403, 'cross-origin requests are not permitted');
+          return;
+        }
+        // Before the path and the method, so an unauthenticated caller learns
+        // nothing here about what this binding serves — and, more to the point,
+        // so there is no route that reaches a registered tool without it.
+        if (!authorizationMatches(req.headers.authorization, config.httpToken)) {
+          rejectRequest(res, 401, 'a bearer token is required to call this MCP endpoint', {
+            // The standard challenge, and the one line that tells an operator
+            // which of the two ForgeBridge secrets this endpoint wants.
+            'www-authenticate': 'Bearer',
+          });
           return;
         }
         const path = (req.url ?? '/').split('?')[0];
@@ -199,6 +269,21 @@ export function startHttp(options: StartOptions): Promise<Server> {
       log(
         `forgebridge-mcp: streamable HTTP on http://${config.httpHost}:${config.httpPort}${HTTP_ENDPOINT}, daemon ${config.daemonUrl}`,
       );
+      // Printed once, straight to stderr, exactly where `packages/daemon/src/
+      // bin.ts` prints its producer token and its pairing code: it is a secret
+      // the human carries from this terminal to the client that needs it.
+      //
+      // Deliberately *not* through `log`. That is the one line in this file that
+      // must not take the injectable sink, because the sink is a public option:
+      // an embedder writing `startHttp({ config, log: logger.info })` would be
+      // shipping the bearer token into whatever aggregator that logger feeds,
+      // and a key that reached a log has left the user's custody (THREAT-MODEL
+      // T1). `scripts/verify-no-key-storage.ts` rule K3 refuses the `log` form
+      // for exactly this reason, and it is right to. The banner below is a
+      // terminal handoff, not a log line, so it goes where a terminal handoff
+      // goes and nowhere a logger can be pointed.
+      process.stderr.write(`forgebridge-mcp: bearer token: ${config.httpToken}\n`);
+      log('forgebridge-mcp: send it as "Authorization: Bearer <token>"; requests without it are refused with 401.');
       resolve(http);
     });
   });

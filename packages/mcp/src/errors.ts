@@ -54,7 +54,7 @@ export const CODE_GUIDANCE: Record<z.infer<typeof ErrorCode>, CodeGuidance> = {
   not_approved: {
     retryable: true,
     agentShould:
-      'A human has not approved this ChangeSet yet. Report the changeset id to the user and ask them to approve it in Roblox Studio or in their ForgeBridge client. Do not attempt to approve it yourself; no tool on this server can.',
+      'A human has not cleared this work — an unapproved ChangeSet, or a rollback nobody asked for. Report the id named in the message to the user and ask them to clear it in Roblox Studio or in their ForgeBridge client. Do not attempt to approve it yourself and do not try a different id; no tool on this server can approve anything.',
   },
   policy_violation: {
     retryable: false,
