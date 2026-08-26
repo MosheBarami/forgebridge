@@ -234,28 +234,49 @@ function pythonInterpreter(): string | null {
   return null;
 }
 
+interface PythonResult {
+  readonly name: string;
+  readonly valid: boolean;
+  readonly parsed: Json | null;
+  readonly error: string | null;
+}
+
 const python = pythonInterpreter();
 
+/**
+ * Run the Python leg here, outside the `describe`, and only when there is an
+ * interpreter to run it with.
+ *
+ * `describe.skipIf` skips the *tests* a block registers; it still executes the
+ * block's body to find out what they are. So a `spawnSync(python as string, …)`
+ * inside the body ran even when `python` was null, and the `as string` — which
+ * was covering for exactly that — turned "no usable interpreter on this
+ * machine" into `TypeError: The "file" argument must be of type string` at
+ * collection time, failing the whole file and taking the other 107 assertions
+ * with it. That is the outcome the interpreter probe above was written to
+ * prevent, in the same file, a few lines up.
+ *
+ * CI never saw it: the workflow installs Python 3.10 and the SDK, so `python3`
+ * always answers the probe. It bit on a checkout without an interpreter that
+ * can import the models — which is every contributor who has not installed the
+ * package, running the command CONTRIBUTING tells them to run.
+ */
+const run =
+  python === null
+    ? null
+    : spawnSync(python, ['tests/roundtrip.py'], {
+        cwd: SDK,
+        encoding: 'utf8',
+        maxBuffer: 32 * 1024 * 1024,
+      });
+
 describe.skipIf(python === null)('the pydantic projection agrees with Zod', () => {
-  interface PythonResult {
-    readonly name: string;
-    readonly valid: boolean;
-    readonly parsed: Json | null;
-    readonly error: string | null;
-  }
-
-  const run = spawnSync(python as string, ['tests/roundtrip.py'], {
-    cwd: SDK,
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-  });
-
   it('ran', () => {
-    expect(run.status, run.stderr).toBe(0);
+    expect(run?.status, run?.stderr).toBe(0);
   });
 
   const results = new Map<string, PythonResult>(
-    (JSON.parse(run.stdout || '[]') as PythonResult[]).map((result) => [result.name, result]),
+    (JSON.parse(run?.stdout || '[]') as PythonResult[]).map((result) => [result.name, result]),
   );
 
   it.each(corpus.cases.map((c) => [c.name, c] as const))('%s — accepted or refused alike', (_name, testCase) => {
