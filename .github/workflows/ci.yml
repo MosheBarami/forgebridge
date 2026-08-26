@@ -38,6 +38,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Every `verify:*` script below runs through `tsx`, and the gate self-tests
+      # run through `vitest`. Both are devDependencies, so this job needs an
+      # install even though it needs no build output.
+      - run: npm ci
+
       - uses: actions/setup-python@v5
         with:
           # The generated pydantic models are the third leg of the cross-language
