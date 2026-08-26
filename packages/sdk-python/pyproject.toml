@@ -31,7 +31,7 @@ dependencies = ["pydantic>=2.7,<3", "annotated-types>=0.6"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.urls]
-Repository = "https://github.com/MPROGAMING/forgebridge"
+Repository = "https://github.com/MosheBarami/forgebridge"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/forgebridge"]

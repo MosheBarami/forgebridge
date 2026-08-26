@@ -14,7 +14,7 @@ trust than a modest one kept.
 **Do not open a public issue for a security problem.** Use either:
 
 1. **GitHub private vulnerability reporting** — on this repository,
-   [*Security → Report a vulnerability*](https://github.com/MPROGAMING/forgebridge/security/advisories/new).
+   [*Security → Report a vulnerability*](https://github.com/MosheBarami/forgebridge/security/advisories/new).
    This is the channel to use. It is private, it threads, it produces a CVE-ready advisory at
    the end, and it depends on no email address staying alive.
 2. If you cannot use GitHub for any reason, open a public issue containing **only** the words

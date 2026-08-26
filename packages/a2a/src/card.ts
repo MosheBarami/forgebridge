@@ -39,7 +39,7 @@ export const A2A_CONNECTOR_VERSION: string = (
 ).version;
 
 /** The repository. Used as the provider URL and as the documentation root. */
-export const FORGEBRIDGE_REPOSITORY_URL = 'https://github.com/MPROGAMING/forgebridge' as const;
+export const FORGEBRIDGE_REPOSITORY_URL = 'https://github.com/MosheBarami/forgebridge' as const;
 
 export interface AgentCardOptions {
   /**

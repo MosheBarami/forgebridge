@@ -42,15 +42,25 @@ export function hostMatches(host: string, entry: string): boolean {
   return target === normaliseHost(pattern);
 }
 
-/** Lowercased, without a scheme, credentials, port, path or trailing dot. */
+/**
+ * Lowercased, without a scheme, credentials, port, path or trailing dot.
+ *
+ * ORDER IS LOAD-BEARING. Userinfo lives in the authority component, which ends
+ * at the first `/`, `?` or `#`. Stripping at `@` before cutting the path reads
+ * `https://evil.com/@api.example.com` as host `api.example.com` — so a URL that
+ * really reaches evil.com passes an allowlist containing api.example.com. That
+ * exact string was confirmed to return zero findings before this was fixed.
+ */
 export function normaliseHost(value: string): string {
   let host = value.trim().toLowerCase();
   const scheme = host.indexOf('://');
   if (scheme !== -1) host = host.slice(scheme + 3);
-  const at = host.indexOf('@');
-  if (at !== -1) host = host.slice(at + 1);
+  // Authority ends here. Everything after is path/query/fragment.
   host = host.split('/')[0] ?? host;
   host = host.split('?')[0] ?? host;
+  host = host.split('#')[0] ?? host;
+  const at = host.lastIndexOf('@');
+  if (at !== -1) host = host.slice(at + 1);
   const colon = host.lastIndexOf(':');
   if (colon > 0 && !host.includes(']')) host = host.slice(0, colon);
   return host.endsWith('.') ? host.slice(0, -1) : host;
@@ -71,6 +81,13 @@ export const httpEgressUnallowlisted: Rule = {
     const { tokens, allowedHttpHosts } = context;
     const findings: Finding[] = [];
     const serviceNames = httpServiceBindings(context);
+    // Whether this source touches HttpService at all. Gates the fail-closed
+    // branch above so a DataStore's `:GetAsync` is not mistaken for egress.
+    const sourceTouchesHttpService = tokens.some(
+      (t) =>
+        (t.kind === 'name' && serviceNames.has(t.text)) ||
+        (t.kind === 'string' && (t.value ?? t.text) === 'HttpService'),
+    );
     const allowed = allowedHttpHosts.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
     const allowedText =
       allowed.length === 0
@@ -81,9 +98,87 @@ export const httpEgressUnallowlisted: Rule = {
       const token = tokens[i];
       if (token === undefined || token.kind !== 'name' || !EGRESS_METHODS.has(token.text)) continue;
       if (!isOp(tokens, i - 1, ':')) continue;
+
+      // Receiver resolution, fail-closed.
+      //
+      // The previous version skipped anything it did not recognise, which meant
+      // the two most ordinary spellings in Roblox code walked straight past it:
+      //   game:GetService("HttpService"):GetAsync(url)   -- receiver is `)`
+      //   local H: HttpService = ...  H:GetAsync(url)    -- binding walk-back missed
+      // A rule that answers "I don't recognise this, so it's fine" is not a
+      // security rule. Now: a known binding is a hit; a receiver we cannot
+      // resolve is ALSO a hit, but only when this source touches HttpService at
+      // all — `dataStore:GetAsync(key)` is not egress and must not be flagged.
       const receiver = tokens[i - 2];
-      if (receiver === undefined || receiver.kind !== 'name' || !serviceNames.has(receiver.text)) continue;
-      if (!isOp(tokens, i + 1, '(')) continue;
+      const namedReceiver =
+        receiver !== undefined && receiver.kind === 'name' && serviceNames.has(receiver.text);
+      const chainedReceiver = receiver !== undefined && receiver.kind === 'op' && receiver.text === ')';
+      const unresolvedReceiver = !namedReceiver && !chainedReceiver;
+
+      if (unresolvedReceiver && !sourceTouchesHttpService) continue;
+      if (unresolvedReceiver) {
+        findings.push(
+          findingAt(
+            token,
+            'warning',
+            'luau/http-egress-unallowlisted',
+            `This source uses \`HttpService\`, and \`:${token.text}\` is called on something this check ` +
+              'cannot resolve, so it cannot tell whether the call goes out to the network ' +
+              `(${allowedText}). Call the service through a plain local variable so the destination is ` +
+              'readable in the diff.',
+          ),
+        );
+        continue;
+      }
+
+      // Call-form resolution, fail-closed.
+      //
+      // Luau lets a single argument be passed with no parentheses: `f"str"` and
+      // `f{tbl}` are calls. Requiring `(` meant deleting two characters removed
+      // the rule, and a table-constructor call is the natural spelling of
+      // RequestAsync{Url = ...}.
+      const next = tokens[i + 1];
+      const callOpen =
+        isOp(tokens, i + 1, '(') ? 'paren'
+        : next !== undefined && next.kind === 'string' ? 'string'
+        : isOp(tokens, i + 1, '{') ? 'table'
+        : null;
+
+      if (callOpen === null) continue; // not a call at all: `local f = H.GetAsync`
+
+      if (callOpen === 'table') {
+        findings.push(
+          findingAt(
+            token,
+            'warning',
+            'luau/http-egress-unallowlisted',
+            `\`HttpService:${token.text}\` is called with a table, so the destination is inside a field ` +
+              `this check does not read (${allowedText}). Pass the URL as a literal string argument, or ` +
+              'assign it to a local from a literal so the host is visible.',
+          ),
+        );
+        continue;
+      }
+
+      if (callOpen === 'string') {
+        const literal = next as typeof token;
+        const directHost = hostOf(literal.value ?? literal.text);
+        if (directHost !== null && allowed.some((entry) => hostMatches(directHost, entry))) continue;
+        findings.push(
+          findingAt(
+            literal,
+            directHost === null ? 'warning' : 'error',
+            'luau/http-egress-unallowlisted',
+            directHost === null
+              ? `\`HttpService:${token.text}\` is given a string this check cannot read as an absolute URL ` +
+                `(${allowedText}). Pass a full \`https://host/path\` URL.`
+              : `\`HttpService:${token.text}\` reaches \`${directHost}\`, which is not on this project's ` +
+                `allowed-host list (${allowedText}). A place that talks to an unreviewed host can send ` +
+                'player data out of the game and can take instructions back in.',
+          ),
+        );
+        continue;
+      }
 
       const url = urlArgument(context, i + 1, token.text);
 

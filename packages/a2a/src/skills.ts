@@ -37,7 +37,7 @@ import { type AgentSkill, type Message, type Part } from './spec.js';
  * so a client author who pastes it into a browser lands on the answer.
  */
 export const SKILL_INVOCATION_EXTENSION_URI =
-  'https://github.com/MPROGAMING/forgebridge/tree/main/packages/a2a#skill-invocation-v1' as const;
+  'https://github.com/MosheBarami/forgebridge/tree/main/packages/a2a#skill-invocation-v1' as const;
 
 export const SKILL_IDS = [
   'propose-changeset',

@@ -286,3 +286,64 @@ describe('luau/syntax-error', () => {
     expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
   });
 });
+
+/**
+ * Bypasses found by adversarial review, each reproduced against the built
+ * analyser before it was fixed. They share one root cause: the rules were
+ * fail-OPEN — a token shape they did not recognise produced no finding, so
+ * "I don't understand this" and "this is safe" were the same answer.
+ *
+ * Every case below returned `status: 'ok'` with zero findings.
+ */
+describe('fail-closed regressions', () => {
+  const ALLOW: AnalyseOptions = { allowedHttpHosts: ['api.example.com'] };
+
+  it('reads the host from the authority, not from after an @ in the path', () => {
+    // normaliseHost stripped userinfo before it cut the path, so this URL —
+    // which really reaches evil.com — was read as host api.example.com and
+    // matched the allowlist.
+    const result = analyse('HttpService:GetAsync("https://evil.com/@api.example.com")\n', ALLOW);
+    expect(result.status).not.toBe('ok');
+  });
+
+  it('sees a call chained straight off GetService', () => {
+    // The receiver of `:GetAsync` here is `)`, not a name, so the receiver
+    // guard skipped it. This is the most ordinary one-liner in Roblox code.
+    const result = analyse('game:GetService("HttpService"):GetAsync("https://evil.com/x")\n', ALLOW);
+    expect(result.status).not.toBe('ok');
+  });
+
+  it('sees Luau call forms that take no parentheses', () => {
+    // `f"str"` and `f{tbl}` are calls. Requiring `(` meant deleting two
+    // characters turned the rule off.
+    const head = 'local H = game:GetService("HttpService")\n';
+    expect(analyse(`${head}H:GetAsync"https://evil.com"\n`, ALLOW).status).not.toBe('ok');
+    expect(analyse(`${head}H:RequestAsync{Url = "https://evil.com"}\n`, ALLOW).status).not.toBe('ok');
+  });
+
+  it('reports a call whose receiver it cannot resolve, when the source uses HttpService', () => {
+    const source = 'local H = game:GetService("HttpService")\nlocal t = pick()\nt:GetAsync("https://evil.com")\n';
+    expect(analyse(source, ALLOW).status).not.toBe('ok');
+  });
+
+  it('does NOT report a DataStore call in a source that never touches HttpService', () => {
+    // The control for the rule above. Fail-closed must not mean fail-noisy:
+    // `:GetAsync` is DataStore's method too, and flagging it would train
+    // people to ignore the rule.
+    const source = 'local ds = game:GetService("DataStoreService"):GetDataStore("s")\nlocal v = ds:GetAsync("k")\n';
+    expect(analyse(source, ALLOW)).toEqual({ status: 'ok', findings: [] });
+  });
+
+  it('reads a require argument through wrapping parentheses', () => {
+    // One added pair of parentheses — not even obfuscation — turned the rule off.
+    expect(analyse('require((1234567))\n').status).not.toBe('ok');
+    expect(analyse('require(1234567 + 0)\n').status).not.toBe('ok');
+  });
+
+  it('still treats a path built with a service call as a path', () => {
+    // The control for the require fix: a path may carry strings and call
+    // parens, it just may not carry a number or arithmetic.
+    const source = 'local Shop = require(game:GetService("ReplicatedStorage").Modules.Shop)\nprint(Shop)\n';
+    expect(analyse(source)).toEqual({ status: 'ok', findings: [] });
+  });
+});

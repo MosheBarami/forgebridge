@@ -92,7 +92,7 @@ from free text is exactly the failure ADR-012 exists to prevent. So the invocati
 explicit, and it is declared on the card as an A2A extension (§4.6.1) with this URI:
 
 ```
-https://github.com/MPROGAMING/forgebridge/tree/main/packages/a2a#skill-invocation-v1
+https://github.com/MosheBarami/forgebridge/tree/main/packages/a2a#skill-invocation-v1
 ```
 
 The extension is marked `required: true`, which under §3.3.4 means a caller that has not
