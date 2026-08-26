@@ -202,10 +202,23 @@ describe('Zod and the JSON Schema projection judge the same documents', () => {
  * The interpreter to run the Python leg with.
  *
  * Preference order: an explicit override, then the SDK's own virtualenv, then
- * whatever `python3` is. Returns null when none of them can import the package,
- * because a machine without pydantic is a normal state for a TypeScript
- * contributor and failing here would teach them to ignore this file.
+ * whatever `python3` is. Returns null when none of them can run the leg, because
+ * a machine without the toolchain is a normal state for a TypeScript contributor
+ * and failing here would teach them to ignore this file.
+ *
+ * The probe imports the **generated models**, not merely pydantic. Those are two
+ * different questions and the difference is not theoretical: a `python3` that is
+ * 3.9 with pydantic installed passes an `import pydantic` probe and then fails on
+ * every case, because `models.py` writes `Annotated[...] | None` in a class body
+ * and `packages/sdk-python` declares `requires-python = ">=3.10"`. Probing the
+ * dependency instead of the thing under test turned an interpreter this leg
+ * cannot use into three dozen failures that look like a drift finding.
  */
+const PROBE = [
+  '-c',
+  'import sys; sys.path.insert(0, "src"); import forgebridge.models, forgebridge.checks',
+];
+
 function pythonInterpreter(): string | null {
   const candidates = [
     process.env['FORGEBRIDGE_PYTHON'],
@@ -214,10 +227,7 @@ function pythonInterpreter(): string | null {
   ].filter((candidate): candidate is string => Boolean(candidate));
 
   for (const candidate of candidates) {
-    const probe = spawnSync(candidate, ['-c', 'import pydantic, annotated_types'], {
-      cwd: SDK,
-      encoding: 'utf8',
-    });
+    const probe = spawnSync(candidate, PROBE, { cwd: SDK, encoding: 'utf8' });
     if (probe.status === 0) return candidate;
   }
   return null;
@@ -287,7 +297,8 @@ describe('the Python leg is not silently skipped', () => {
     // the message below is what says so.
     if (python === null) {
       console.warn(
-        'schema-projection: the Python leg was skipped — no interpreter with pydantic and ' +
+        'schema-projection: the Python leg was skipped — no interpreter could import the ' +
+          'generated models. It needs Python 3.10 or newer with pydantic v2 and ' +
           'annotated_types. Set FORGEBRIDGE_PYTHON, or create packages/sdk-python/.venv.',
       );
     }
