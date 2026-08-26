@@ -1,0 +1,9 @@
+# Toolchain for building the Studio plugin. Pinned so that everyone who runs
+# `rojo build` runs the same Rojo, and so the version is a reviewed decision in
+# the tree rather than whatever each contributor happens to have installed.
+#
+# Nothing is published yet (M49), so this is not yet "the version the release
+# artefact was built with" — it is the version this repository asks for, and the
+# one M49's release job should read rather than choose again.
+[tools]
+rojo = "rojo-rbx/rojo@7.4.4"

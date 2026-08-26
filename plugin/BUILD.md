@@ -8,6 +8,10 @@ requires in `init.server.luau` read `require(script.Transport)`.
 rojo build --output ForgeBridge.rbxm
 ```
 
+Rojo's version is pinned in `aftman.toml` at the repository root; `aftman install`
+puts that version on the path. A `.rbxm` that differs by builder is a plugin nobody
+can reproduce, and this is code that runs inside Studio with the user's session.
+
 `default.project.json` maps `src/` onto a single `Script` named `ForgeBridge`, so the
 built `.rbxm` is one plugin object with its modules inside it. Nothing else is needed
 at build time — the plugin has no dependencies, no bundler and no codegen step.
