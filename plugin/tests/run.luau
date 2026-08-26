@@ -81,6 +81,7 @@ local suites = {
 	require("./TransportSpec"),
 	require("./PairingSpec"),
 	require("./CryptoSpec"),
+	require("./DiffSpec"),
 }
 
 for _, suite in suites do

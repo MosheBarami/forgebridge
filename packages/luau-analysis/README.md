@@ -56,6 +56,19 @@ analyser cannot prove where a binding stops holding, so it keeps the reading tha
 finding rather than the one that hides it.
 
 ### What it cannot see
+### It does not resolve scope
+
+There is no symbol table. A name is judged by the tokens around it, so a *use*
+of a local that shadows a banned global — `local ok, loadstring = pcall(f)` and
+then `loadstring` on a later line — is reported as a use of the global. The
+declaration itself is correctly ignored; the later use is not distinguishable
+without scope resolution, which a token recogniser does not have.
+
+This is a false positive, not a hole, and it is the trade this design accepts:
+a rule that stays quiet when it cannot resolve a name would be fail-open, and
+fail-open is what round two and round three of review kept finding. When the
+two must be traded, this analyser errs toward telling you.
+
 
 Everything past that one hop. These are the classes of it, and the last column is what the analyser
 actually reports today — measured against the code in `src/`, not what it ought to do:

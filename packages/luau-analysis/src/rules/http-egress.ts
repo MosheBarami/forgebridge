@@ -84,11 +84,35 @@ export const httpEgressUnallowlisted: Rule = {
     const serviceNames = httpServiceBindings(context);
     // Whether this source touches HttpService at all. Gates the fail-closed
     // branch above so a DataStore's `:GetAsync` is not mistaken for egress.
-    const sourceTouchesHttpService = tokens.some(
-      (t) =>
-        (t.kind === 'name' && serviceNames.has(t.text)) ||
-        (t.kind === 'string' && (t.value ?? t.text) === 'HttpService'),
-    );
+    // The gate that arms the fail-closed branch below. It was itself
+    // fail-open: requiring the literal identifier or the literal string
+    // `HttpService` meant assembling the name at run time —
+    // `game:GetService("Http" .. "Service")` — put the file back in the
+    // "nothing to see here" bucket entirely. A guard that a two-character
+    // concatenation switches off is not a guard.
+    //
+    // So a GetService call whose argument this check cannot read as a literal
+    // now counts as touching HttpService: we cannot prove it is not.
+    const sourceTouchesHttpService = tokens.some((token, i) => {
+      if (token.kind === 'name' && serviceNames.has(token.text)) return true;
+      if (token.kind === 'string' && (token.value ?? token.text) === 'HttpService') return true;
+
+      if (token.kind !== 'name' || token.text !== 'GetService') return false;
+      const open = tokens[i + 1];
+      if (open === undefined || open.kind !== 'op' || open.text !== '(') return false;
+      const argument = tokens[i + 2];
+      const close = tokens[i + 3];
+      // A single readable string literal is resolvable — trust it. Anything
+      // else (concatenation, a variable, an unreadable escape) is not.
+      const resolvable =
+        argument !== undefined &&
+        argument.kind === 'string' &&
+        argument.value !== undefined &&
+        close !== undefined &&
+        close.kind === 'op' &&
+        close.text === ')';
+      return !resolvable;
+    });
     const allowed = allowedHttpHosts.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
     const allowedText =
       allowed.length === 0

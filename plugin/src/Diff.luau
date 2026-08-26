@@ -96,6 +96,24 @@ local function countDescendants(instance: any): number
 end
 
 --- Counts by operation kind, plus the numbers the approval UI gates on.
+--[[
+	True when this operation puts Luau source into the place, however it is
+	spelled. `Source` is the property Roblox runs.
+]]
+local function carriesLuau(operation: any): boolean
+	if operation.op == "writeScript" then
+		return true
+	end
+	if operation.op == "setProperty" then
+		return operation.property == "Source"
+	end
+	if operation.op == "createInstance" then
+		local properties = operation.properties
+		return properties ~= nil and properties.Source ~= nil
+	end
+	return false
+end
+
 function Diff.summarise(changeSet: any): any
 	local counts = {
 		createInstance = 0,
@@ -110,9 +128,25 @@ function Diff.summarise(changeSet: any): any
 			counts[kind] += 1
 		end
 	end
+	-- Count operations that INSTALL LUAU, not operations named `writeScript`.
+	-- A Script can arrive three ways, and only one of them is called
+	-- writeScript: `createInstance` carrying `Source` in its property bag, and
+	-- `setProperty` of `Source`, install code just as surely. Counting by op
+	-- kind made the panel say "0 scripts" over a ChangeSet that installed one,
+	-- and a human approving a diff that does not show the code being installed
+	-- is approving nothing (ADR-012). The daemon-side twin of this was already
+	-- fixed; this is the half a person actually reads.
+	local scripts = 0
+	for _, operation in changeSet.operations do
+		if carriesLuau(operation) then
+			scripts += 1
+		end
+	end
+
 	return {
 		total = #changeSet.operations,
 		counts = counts,
+		scripts = scripts,
 		deletions = counts.deleteInstance,
 		destructive = counts.deleteInstance + counts.moveInstance,
 	}
@@ -142,7 +176,24 @@ function Diff.render(changeSet: any, ctx: Context): any
 			local propertyCount = 0
 			for name, value in operation.properties or {} do
 				propertyCount += 1
-				table.insert(entry.details, string.format("%s = %s", name, ctx.describe(value)))
+				if name == "Source" and type(value) == "table" and value.t == "String" then
+					-- NOT through ctx.describe, which truncates a String at 60
+					-- characters. This is the Luau about to run in the place;
+					-- the whole point of the gate is that a person reads it.
+					-- Rendered exactly the way writeScript renders its source, so
+					-- toText carries it to the panel a person actually reads.
+					-- Setting entry.source alone was invisible: toText only walks
+					-- entry.details, so the code stayed off screen while a unit
+					-- test on the entry object passed.
+					local text = tostring(value.v)
+					entry.source = text
+					table.insert(entry.details, string.format("Source — %d lines:", #lines(text)))
+					for _, line in preview(text, 12) do
+						table.insert(entry.details, line)
+					end
+				else
+					table.insert(entry.details, string.format("%s = %s", name, ctx.describe(value)))
+				end
 			end
 			if propertyCount == 0 then
 				table.insert(entry.details, "no properties set")
@@ -172,6 +223,17 @@ function Diff.render(changeSet: any, ctx: Context): any
 			end
 			table.insert(entry.details, string.format("before: %s", beforeText))
 			table.insert(entry.details, string.format("after:  %s", ctx.describe(operation.value)))
+
+			-- Same reason as the createInstance bag: `Source` is code, and
+			-- ctx.describe would clip it at 60 characters.
+			if operation.property == "Source" and type(operation.value) == "table" and operation.value.t == "String" then
+				local text = tostring(operation.value.v)
+				entry.source = text
+				table.insert(entry.details, string.format("Source — %d lines:", #lines(text)))
+				for _, line in preview(text, 12) do
+					table.insert(entry.details, line)
+				end
+			end
 		elseif operation.op == "writeScript" then
 			local target, err = ctx.resolve(operation.path)
 			if target == nil then

@@ -66,6 +66,7 @@ export function isDeclaredName(tokens: readonly Token[], index: number): boolean
   if (isKeyword(tokens, index - 1, 'local') || isKeyword(tokens, index - 1, 'function')) return true;
 
   let i = index - 1;
+  let sawSeparator = false;
   while (i >= 0) {
     const token = tokens[i];
     if (token === undefined) return false;
@@ -88,7 +89,28 @@ export function isDeclaredName(tokens: readonly Token[], index: number): boolean
       return isKeyword(tokens, j, 'function');
     }
 
-    if (token.kind === 'name' || (token.kind === 'op' && DECLARATION_LIST_OPS.has(token.text))) {
+    // Crossing declaration-list punctuation is fine: a comma separates entries,
+    // and `:` `.` `<` `>` and friends sit inside one entry's type annotation.
+    // Crossing any of them means the NEXT name back is legitimately part of
+    // this list.
+    if (token.kind === 'op' && DECLARATION_LIST_OPS.has(token.text)) {
+      sawSeparator = true;
+      i -= 1;
+      continue;
+    }
+
+    if (token.kind === 'name') {
+      // THE STATEMENT BOUNDARY. Two names with no separator between them are
+      // two different statements, not one declaration list. Without this the
+      // walk crossed out of `local cache` into the statement below it, so
+      //     local cache
+      //     loadstring(payload)()
+      // read `loadstring` as a name being declared — silently disarming every
+      // rule built on isGlobalReference at once: no-loadstring,
+      // no-getfenv-setfenv, require-unreviewed-asset and deprecated-wait-spawn.
+      // Two tokens of prefix turned the analyser off.
+      if (!sawSeparator) return false;
+      sawSeparator = false;
       i -= 1;
       continue;
     }
