@@ -17,6 +17,9 @@ which is strictly worse than having no copy at all.
 - `openapi.json` — one OpenAPI 3.1 document for the `/v1` surface. Its paths are read off
   `packages/daemon/src/server.ts`, which is the implementation, not off the endpoint table
   in `docs/PROTOCOL.md`. Where the two disagree the code wins and the generator says so.
+  Its `servers` entry is built the same way: the `port` variable's default is that file's
+  exported `DEFAULT_DAEMON_PORT`, imported rather than transcribed, because a URL nobody
+  answers on is a worse lie than a missing one.
 
 ## What does NOT survive the projection
 

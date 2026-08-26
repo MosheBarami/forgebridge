@@ -148,3 +148,30 @@ def test_an_absent_optional_stays_absent_after_a_round_trip() -> None:
         }
     )
     assert link.model_dump(mode="json", by_alias=True)["sessionKeyId"] is None
+
+
+def test_an_approval_cannot_be_built_without_the_content_it_approves() -> None:
+    """ADR-012's approval is a statement about operations, not about an id.
+
+    The daemon refuses an approve whose `contentDigest` does not match the
+    operations it holds, and the projection carries that refusal one step
+    earlier: a Python producer cannot even *construct* an approval that names no
+    reviewed content. A default here would have been a caller opting out of the
+    binding without noticing.
+    """
+    from forgebridge.models import ApproveRequest
+
+    with pytest.raises(ValidationError):
+        ApproveRequest()
+
+    # The control: the same call with the digest the diff reported is the
+    # ordinary, legitimate shape and is accepted unchanged.
+    approval = ApproveRequest(contentDigest="vOZa1mHnQnJ1H+D5b3Rk8lYbC2s9nqJ3nS0k1s5oJ0Q=")
+    assert approval.model_dump(mode="json", by_alias=True)["contentDigest"] == (
+        "vOZa1mHnQnJ1H+D5b3Rk8lYbC2s9nqJ3nS0k1s5oJ0Q="
+    )
+
+    # …and an empty string is not a digest. `min_length=1` on the wire is what
+    # stops "" from reading as "I approved nothing in particular".
+    with pytest.raises(ValidationError):
+        ApproveRequest(contentDigest="")

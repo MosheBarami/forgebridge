@@ -153,9 +153,14 @@ The rule here is therefore structural rather than procedural:
 - **Grants come only from an `ApprovalGate`**, whose `consume(skill, subject)` takes the
   identifier of the thing being approved and nothing else. There is no parameter through
   which a request can describe, hint at, or assert its own authorisation.
-- **The caller cannot name its own approver or confirm its own bulk delete.** Those fields
-  live on the grant. `apply-approved-changeset`'s input schema is strict, so a caller that
-  sends `approvedBy` is refused outright rather than having the field quietly dropped.
+- **The caller cannot name its own approver, confirm its own bulk delete, or say which
+  content it reviewed.** Those fields live on the grant. `apply-approved-changeset`'s input
+  schema is strict, so a caller that sends `approvedBy` is refused outright rather than
+  having the field quietly dropped.
+- **A grant names content, not just an id.** `ApplyApprovalGrant.contentDigest` is required,
+  and it is the digest `GET /v1/changesets/:id/diff` reported to the human who read it. The
+  daemon refuses an approve whose digest does not match the operations it holds, so a "yes"
+  covers the operations that were read and nothing that arrives on that id afterwards.
 - **The default gate approves nothing.** `DENY_ALL_APPROVALS` is the default for the same
   reason the daemon defaults to `DENY_ALL_POLICY`: a half-configured connector should be one
   that can propose and read and cannot write.
@@ -329,10 +334,14 @@ await server.listen();
 
 // The only way an apply is ever cleared. Called by a local approver -- never
 // reachable over A2A.
+// `contentDigest` is the one the diff reported to the human who read it --
+// `(await backend.diff(changeSetId)).contentDigest`. The daemon refuses an
+// approve that does not echo it, so the yes is bound to what was reviewed.
 gate.record({
   skill: 'apply-approved-changeset',
   subject: changeSetId,
   approvedBy: 'operator@workstation',
+  contentDigest,
 });
 ```
 

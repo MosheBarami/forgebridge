@@ -22,25 +22,24 @@ import type { SkillId } from './skills.js';
  * endpoints are reachable only when holding an `ApprovalGrant`, grants are
  * minted only by an `ApprovalGate`, and no gate implementation takes any input
  * from the A2A request beyond the identifier of the thing being approved. The
- * request cannot name its approver, cannot confirm a bulk delete, and cannot
- * carry a grant of its own — `ApplyApprovedChangesetInput` is `.strict()`, so a
- * caller that tries to add such a field is refused outright rather than having
- * the field quietly dropped.
+ * request cannot name its approver, cannot confirm a bulk delete, cannot say
+ * which content was reviewed, and cannot carry a grant of its own —
+ * `ApplyApprovedChangesetInput` is `.strict()`, so a caller that tries to add
+ * such a field is refused outright rather than having the field quietly
+ * dropped.
  *
  * A remote agent is less trusted than a local editor, not more. It may propose,
  * and it may read. Writing needs a human.
  */
 
 /**
- * Proof that a human — or a local policy acting for one — cleared a specific
- * piece of work.
+ * What every grant carries, whichever endpoint it opens.
  *
  * `subject` is the ChangeSet id or the journal id, and a grant is good for that
  * one identifier: a grant is not a session, and holding one for ChangeSet A
  * confers nothing over ChangeSet B.
  */
-export interface ApprovalGrant {
-  readonly skill: Extract<SkillId, 'apply-approved-changeset' | 'rollback-apply'>;
+interface ApprovalGrantBase {
   readonly subject: string;
   /**
    * Who cleared it. Recorded in the daemon's journal, so it must describe a
@@ -48,6 +47,38 @@ export interface ApprovalGrant {
    * from the A2A request.
    */
   readonly approvedBy: string;
+  readonly note?: string;
+}
+
+/**
+ * Proof that a human — or a local policy acting for one — cleared one specific
+ * ChangeSet, as it read when they read it.
+ */
+export interface ApplyApprovalGrant extends ApprovalGrantBase {
+  readonly skill: Extract<SkillId, 'apply-approved-changeset'>;
+  /**
+   * The `contentDigest` the daemon's diff reported for this ChangeSet.
+   *
+   * Required, and required *here* rather than being optional and filled in by
+   * the backend, because it is what makes the grant a statement about content
+   * instead of about an identifier. `POST /v1/changesets/:id/approve` demands
+   * it back (`ApproveRequest` in `packages/daemon/src/wire.ts`) and refuses a
+   * mismatch: a human who read diff X and said yes cannot have their yes spent
+   * on whatever is on that id later.
+   *
+   * It has to arrive by this route and no other. The digest is the one half of
+   * the approval that describes the work rather than the approver, so it is
+   * exactly the field a remote agent would most like to supply — and a digest
+   * the requester chose would bind the approval to what the *requester* read,
+   * which is not a binding at all. So it travels the way `approvedBy` and
+   * `confirmBulkDelete` travel: from the human who read the diff, through
+   * `record`, which nothing on the wire can reach.
+   *
+   * Not a secret and not a capability: anyone holding the operations can compute
+   * it. It grants nothing on its own — the producer token is what authorises —
+   * and it is compared as a plain string on both sides for that reason.
+   */
+  readonly contentDigest: string;
   /**
    * Set only by an approver who was shown the deletion count and said yes to it
    * (`LIMITS.BULK_DELETE_CONFIRM_THRESHOLD`). A remote caller has no way to
@@ -56,8 +87,32 @@ export interface ApprovalGrant {
    * approver saying anything.
    */
   readonly confirmBulkDelete?: boolean;
-  readonly note?: string;
 }
+
+/**
+ * Proof that a human cleared the reversal of one specific apply.
+ *
+ * No `contentDigest`: a rollback names a journal entry, and the inverse
+ * operations it will run are the daemon's own record of what happened rather
+ * than a diff the approver was shown. There is nothing here for a digest to
+ * bind to, and inventing one would be ceremony rather than a check.
+ */
+export interface RollbackApprovalGrant extends ApprovalGrantBase {
+  readonly skill: Extract<SkillId, 'rollback-apply'>;
+}
+
+/**
+ * A grant, discriminated by the skill it opens.
+ *
+ * A union rather than one interface with optional fields, so that the compiler
+ * refuses an apply grant built without a digest. An optional field would make
+ * omitting the binding a valid thing to write, and the caller who omitted it
+ * would learn only from a daemon refusal at the far end of a human's approval.
+ */
+export type ApprovalGrant = ApplyApprovalGrant | RollbackApprovalGrant;
+
+/** The grant type a given writing skill takes. */
+export type GrantFor<S extends ApprovalGrant['skill']> = Extract<ApprovalGrant, { skill: S }>;
 
 /**
  * The port through which an approval reaches this connector.
@@ -68,10 +123,7 @@ export interface ApprovalGrant {
  * added one would be re-opening the hole this file exists to close.
  */
 export interface ApprovalGate {
-  consume(
-    skill: Extract<SkillId, 'apply-approved-changeset' | 'rollback-apply'>,
-    subject: string,
-  ): Promise<ApprovalGrant | null>;
+  consume<S extends ApprovalGrant['skill']>(skill: S, subject: string): Promise<GrantFor<S> | null>;
 }
 
 /**
@@ -136,12 +188,15 @@ export class LocalOperatorApprovalGate implements ApprovalGate {
     return [...this.#pending.values()];
   }
 
-  async consume(skill: ApprovalGrant['skill'], subject: string): Promise<ApprovalGrant | null> {
+  async consume<S extends ApprovalGrant['skill']>(skill: S, subject: string): Promise<GrantFor<S> | null> {
     const key = keyOf(skill, subject);
     const grant = this.#pending.get(key);
     if (!grant) return null;
     this.#pending.delete(key);
-    return grant;
+    // The key is `skill subject`, so a grant found under this key was recorded
+    // for this skill and the union is already narrowed in fact. The cast says
+    // so to the compiler, which cannot see through the map.
+    return grant as GrantFor<S>;
   }
 }
 

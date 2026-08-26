@@ -188,16 +188,46 @@ export async function submit(daemon: ForgeBridgeDaemon, changeSet: ChangeSet): P
   });
 }
 
+export async function diff(daemon: ForgeBridgeDaemon, id: string): Promise<RawResponse> {
+  return raw({
+    port: portOf(daemon),
+    method: 'GET',
+    path: `/v1/changesets/${id}/diff`,
+    headers: producerHeaders(daemon),
+  });
+}
+
+/**
+ * The digest the daemon currently reports for a set, read off its rendered diff.
+ *
+ * Read rather than computed, deliberately: computing it here with the daemon's
+ * own function would make every test agree with the implementation by
+ * construction, and the whole point of the field is that it travels from the
+ * page a human read back to the approval. Undefined when there is no diff to
+ * read, which is the honest input for a set that does not exist.
+ */
+export async function renderedDigest(daemon: ForgeBridgeDaemon, id: string): Promise<string | undefined> {
+  const response = await diff(daemon, id);
+  return response.status === 200 ? response.json<{ contentDigest: string }>().contentDigest : undefined;
+}
+
+/**
+ * Approve a set the way an approver does: read the diff, then approve what it
+ * showed. A caller that names its own `contentDigest` — including one that
+ * names a stale or absent one — gets exactly what it asked for instead.
+ */
 export async function approve(
   daemon: ForgeBridgeDaemon,
   id: string,
   body: Record<string, unknown> = {},
 ): Promise<RawResponse> {
+  const withDigest =
+    'contentDigest' in body ? body : { ...body, contentDigest: await renderedDigest(daemon, id) };
   return raw({
     port: portOf(daemon),
     method: 'POST',
     path: `/v1/changesets/${id}/approve`,
     headers: producerHeaders(daemon),
-    body: JSON.stringify(body),
+    body: JSON.stringify(withDigest),
   });
 }

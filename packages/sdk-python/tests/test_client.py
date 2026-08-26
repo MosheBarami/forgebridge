@@ -17,6 +17,12 @@ from forgebridge.client import (
 from forgebridge.errors import ForgeBridgeError, TransportError
 from forgebridge.models import ApproveRequest, ChangeSet
 
+# The digest `GET /v1/changesets/:id/diff` reports for CHANGESET's operations.
+# An approve must echo it: the daemon binds a "yes" to the content that was
+# reviewed, not to the id it arrived on. It is opaque to this client, which
+# never computes one — it repeats what the approver read.
+REVIEWED_DIGEST = "vOZa1mHnQnJ1H+D5b3Rk8lYbC2s9nqJ3nS0k1s5oJ0Q="
+
 CHANGESET = {
     "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
     "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
@@ -99,12 +105,16 @@ def test_approve_carries_the_producer_token_and_the_bulk_delete_flag() -> None:
     recorder = Recorder(ok(approved, status=202))
     client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
     client.approve_changeset(
-        str(CHANGESET["id"]), ApproveRequest(approvedBy="alex", confirmBulkDelete=True)
+        str(CHANGESET["id"]),
+        ApproveRequest(
+            contentDigest=REVIEWED_DIGEST, approvedBy="alex", confirmBulkDelete=True
+        ),
     )
     _, url, headers, body = recorder.calls[0]
     assert url.endswith(f"/v1/changesets/{CHANGESET['id']}/approve")
     assert headers[PRODUCER_TOKEN_HEADER] == "t0ken"
     assert json.loads(body)["confirmBulkDelete"] is True
+    assert json.loads(body)["contentDigest"] == REVIEWED_DIGEST
 
 
 def test_a_producer_route_without_a_token_fails_before_it_sends() -> None:
@@ -112,7 +122,9 @@ def test_a_producer_route_without_a_token_fails_before_it_sends() -> None:
     recorder = Recorder()
     client = ForgeBridgeClient("http://127.0.0.1:8787", transport=recorder)
     with pytest.raises(TransportError):
-        client.approve_changeset(str(CHANGESET["id"]), ApproveRequest())
+        client.approve_changeset(
+            str(CHANGESET["id"]), ApproveRequest(contentDigest=REVIEWED_DIGEST)
+        )
     assert recorder.calls == []
 
 
@@ -160,7 +172,9 @@ def test_an_id_cannot_walk_out_of_its_route() -> None:
     approved = {"changeSetId": CHANGESET["id"], "status": "approved", "nonce": 1}
     recorder = Recorder(ok(approved, status=202))
     client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
-    client.approve_changeset("../../v1/journal/x/rollback", ApproveRequest())
+    client.approve_changeset(
+        "../../v1/journal/x/rollback", ApproveRequest(contentDigest=REVIEWED_DIGEST)
+    )
     _, url, _, _ = recorder.calls[0]
     assert "/v1/journal/" not in url
     assert url.endswith("/approve")

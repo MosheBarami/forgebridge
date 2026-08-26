@@ -11,7 +11,14 @@ import {
 } from '../src/spec.js';
 import { IllegalTaskTransition, TaskStore, decodePageToken } from '../src/tasks.js';
 import type { A2AServer } from '../src/server.js';
-import { forgeBridgeError, invocationMessage, makeChangeSet, startServer, type StartedServer } from './helpers.js';
+import {
+  FAKE_CONTENT_DIGEST,
+  forgeBridgeError,
+  invocationMessage,
+  makeChangeSet,
+  startServer,
+  type StartedServer,
+} from './helpers.js';
 
 const running: A2AServer[] = [];
 afterEach(async () => {
@@ -241,7 +248,7 @@ describe('lifecycle over the wire', () => {
     });
     const taskId = parked.body.result.task.id;
 
-    gate.record({ skill: 'apply-approved-changeset', subject: changeSetId, approvedBy: 'a human' });
+    gate.record({ skill: 'apply-approved-changeset', contentDigest: FAKE_CONTENT_DIGEST, subject: changeSetId, approvedBy: 'a human' });
 
     const resumed = await started.rpc('SendMessage', {
       message: invocationMessage('apply-approved-changeset', { changeSetId }, { taskId }),

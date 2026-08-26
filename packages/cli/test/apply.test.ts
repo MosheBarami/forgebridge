@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { LIMITS } from '@forgebridge/protocol';
+import { ApproveRequest } from '@forgebridge/daemon';
 import { applyCommand } from '../src/commands/apply.js';
 import { DaemonClient } from '../src/client.js';
 import { CliError, EXIT } from '../src/exit.js';
@@ -66,6 +68,52 @@ describe('apply refuses anything that is not approved', () => {
     expect(error.remedy).toContain(`${BASE}/v1/changesets/`);
     expect(error.remedy).toContain('/approve');
     expect(error.remedy).toMatch(/will not do it for you/);
+  });
+
+  it('prints an approve body the daemon would actually accept', async () => {
+    // The remedy is a command a human pastes. `POST /v1/changesets/:id/approve`
+    // requires `contentDigest` and refuses a body without one, so a remedy that
+    // omitted it would send the reader to a refusal — and it must be *this*
+    // diff's digest, because that is what makes the paste an approval of the
+    // operations that were just on screen rather than of an id.
+    const io = captureIo();
+    const diff = diffFixture({ status: 'validated' });
+    const transport = stubTransport({
+      linkStatus: async () => linkStatusFixture(),
+      diff: async () => diff,
+    });
+
+    const error = (await applyCommand(invocation(), testDeps(io, transport)).catch(
+      (thrown: unknown) => thrown,
+    )) as CliError;
+
+    const body = error.remedy?.match(/-d '(\{.*\})'/)?.[1];
+    expect(body).toBeDefined();
+    expect(JSON.parse(body as string)).toMatchObject({ contentDigest: diff.contentDigest });
+    // …and it parses against the daemon's own schema for that route, which is
+    // the check that follows a rename of the field rather than restating it.
+    expect(() => ApproveRequest.parse(JSON.parse(body as string))).not.toThrow();
+  });
+
+  it('adds the bulk-delete confirmation only when the set is above the threshold', async () => {
+    // The control for the line above: `confirmBulkDelete: true` printed by
+    // default would be the CLI saying the destructive part out loud on the
+    // approver's behalf, which is the one thing ADR-012 asks the human to do.
+    const bodyFor = async (deletes: number): Promise<Record<string, unknown>> => {
+      const io = captureIo();
+      const diff = diffFixture({
+        status: 'validated',
+        counts: { total: deletes, creates: 0, setProperties: 0, scripts: 0, moves: 0, deletes },
+      });
+      const transport = stubTransport({ linkStatus: async () => linkStatusFixture(), diff: async () => diff });
+      const error = (await applyCommand(invocation(), testDeps(io, transport)).catch(
+        (thrown: unknown) => thrown,
+      )) as CliError;
+      return JSON.parse(error.remedy?.match(/-d '(\{.*\})'/)?.[1] ?? '{}') as Record<string, unknown>;
+    };
+
+    expect(await bodyFor(LIMITS.BULK_DELETE_CONFIRM_THRESHOLD)).not.toHaveProperty('confirmBulkDelete');
+    expect(await bodyFor(LIMITS.BULK_DELETE_CONFIRM_THRESHOLD + 1)).toMatchObject({ confirmBulkDelete: true });
   });
 
   it('explains the extra confirmation a bulk delete needs', async () => {

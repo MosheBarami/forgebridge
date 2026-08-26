@@ -4,7 +4,7 @@ import { DENY_ALL_APPROVALS, LocalOperatorApprovalGate } from '../src/approval.j
 import { A2A_METHODS } from '../src/spec.js';
 import { JSONRPC_ERRORS } from '../src/errors.js';
 import type { A2AServer } from '../src/server.js';
-import { invocationMessage, makeChangeSet, startServer, type StartedServer } from './helpers.js';
+import { FAKE_CONTENT_DIGEST, invocationMessage, makeChangeSet, startServer, type StartedServer } from './helpers.js';
 
 /**
  * The approval boundary.
@@ -141,7 +141,7 @@ describe('what a remote caller may not do', () => {
     const gate = new LocalOperatorApprovalGate();
     const started = await serve({ gate });
     const changeSetId = randomUUID();
-    gate.record({ skill: 'apply-approved-changeset', subject: changeSetId, approvedBy: 'a human' });
+    gate.record({ skill: 'apply-approved-changeset', contentDigest: FAKE_CONTENT_DIGEST, subject: changeSetId, approvedBy: 'a human' });
 
     const first = await started.rpc('SendMessage', {
       message: invocationMessage('apply-approved-changeset', { changeSetId }),
@@ -160,7 +160,7 @@ describe('what a remote caller may not do', () => {
     const started = await serve({ gate });
     const approved = randomUUID();
     const other = randomUUID();
-    gate.record({ skill: 'apply-approved-changeset', subject: approved, approvedBy: 'a human' });
+    gate.record({ skill: 'apply-approved-changeset', contentDigest: FAKE_CONTENT_DIGEST, subject: approved, approvedBy: 'a human' });
 
     const { body } = await started.rpc('SendMessage', {
       message: invocationMessage('apply-approved-changeset', { changeSetId: other }),
@@ -173,7 +173,7 @@ describe('what a remote caller may not do', () => {
     const gate = new LocalOperatorApprovalGate();
     const started = await serve({ gate });
     const id = randomUUID();
-    gate.record({ skill: 'apply-approved-changeset', subject: id, approvedBy: 'a human' });
+    gate.record({ skill: 'apply-approved-changeset', contentDigest: FAKE_CONTENT_DIGEST, subject: id, approvedBy: 'a human' });
 
     const { body } = await started.rpc('SendMessage', {
       message: invocationMessage('rollback-apply', { journalId: id, expectedVersion: 1 }),
@@ -192,6 +192,7 @@ describe('what a local approval does', () => {
     gate.record({
       skill: 'apply-approved-changeset',
       subject: changeSetId,
+      contentDigest: FAKE_CONTENT_DIGEST,
       approvedBy: 'operator@workstation',
       confirmBulkDelete: true,
       note: 'reviewed the diff',
@@ -203,9 +204,16 @@ describe('what a local approval does', () => {
 
     expect(body.result.task.status.state).toBe('TASK_STATE_COMPLETED');
     const [call] = started.backend.callsTo('approve');
-    expect(call?.grant?.approvedBy).toBe('operator@workstation');
-    expect(call?.grant?.confirmBulkDelete).toBe(true);
-    expect(call?.grant?.subject).toBe(changeSetId);
+    const grant = call?.grant;
+    expect(grant?.approvedBy).toBe('operator@workstation');
+    expect(grant?.subject).toBe(changeSetId);
+    // `confirmBulkDelete` and `contentDigest` are on the apply half of the
+    // grant union, so reaching them says which half arrived as well as what it
+    // carried.
+    expect(grant?.skill).toBe('apply-approved-changeset');
+    if (grant?.skill !== 'apply-approved-changeset') throw new Error('expected an apply grant');
+    expect(grant.confirmBulkDelete).toBe(true);
+    expect(grant.contentDigest).toBe(FAKE_CONTENT_DIGEST);
   });
 
   it('can be withdrawn before it is spent', async () => {
@@ -213,7 +221,7 @@ describe('what a local approval does', () => {
     const started = await serve({ gate });
     const changeSetId = randomUUID();
 
-    gate.record({ skill: 'apply-approved-changeset', subject: changeSetId, approvedBy: 'a human' });
+    gate.record({ skill: 'apply-approved-changeset', contentDigest: FAKE_CONTENT_DIGEST, subject: changeSetId, approvedBy: 'a human' });
     expect(gate.pending.length).toBe(1);
     expect(gate.revoke('apply-approved-changeset', changeSetId)).toBe(true);
 

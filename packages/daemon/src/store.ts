@@ -77,6 +77,16 @@ export interface DaemonStore {
   getProjectPolicy(projectId: string): Promise<ProjectPolicy | null>;
   setProjectPolicy(projectId: string, policy: ProjectPolicy): Promise<void>;
 
+  /**
+   * Store a ChangeSet under an id nothing has used yet.
+   *
+   * Refuses an id that already exists, for the reason `putJournal` does: the id
+   * is the handle every later step names the work by — the diff a human read,
+   * the approval, the delivery, the ApplyResult. A second set written under it
+   * is a different proposal inheriting the reviewed one's name and its cleared
+   * status. Status changes go through `setChangeSetStatus`, which is the only
+   * mutation a stored set ever gets.
+   */
   putChangeSet(changeSet: ChangeSet): Promise<void>;
   getChangeSet(id: string): Promise<ChangeSet | null>;
   setChangeSetStatus(id: string, status: ChangeSetStatus): Promise<ChangeSet | null>;
@@ -205,6 +215,19 @@ export class InMemoryDaemonStore implements DaemonStore {
   }
 
   async putChangeSet(changeSet: ChangeSet): Promise<void> {
+    if (this.#changeSets.has(changeSet.id)) {
+      // The last line of defence, not the first: `#submitChangeSet` checks and
+      // refuses with a message a producer can act on. This one closes the gap
+      // that check cannot — it reads and then writes, with an await between, so
+      // two submissions of the same id can both find it free. An adapter that
+      // talks to a database gets the same guarantee from a unique constraint,
+      // not from checking first and hoping.
+      throw new ForgeBridgeError(
+        'invalid_request',
+        `changeset ${changeSet.id} already exists and would be overwritten`,
+        'Mint a fresh ChangeSet id; an id that has been proposed once names that proposal for good.',
+      );
+    }
     this.#changeSets.set(changeSet.id, changeSet);
   }
 

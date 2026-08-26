@@ -52,16 +52,22 @@ from forgebridge.models import ApproveRequest
 client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token=token)
 
 submitted = client.propose_changeset(changeset)     # stored and validated
-print(client.get_diff(submitted.changeSetId))       # a human reads this
+reviewed = client.get_diff(submitted.changeSetId)   # a human reads this
 client.approve_changeset(                           # a human decides this
     submitted.changeSetId,
-    ApproveRequest(approvedBy="alex"),
+    ApproveRequest(contentDigest=reviewed.contentDigest, approvedBy="alex"),
 )
 ```
 
 There is no method that does both, and there will not be one. ADR-012 puts a
 person between the two steps; a helper that chained them would let a model
 approve its own work, which is the single thing the approval gate exists to stop.
+
+`contentDigest` is the reason the diff is read into a variable rather than
+printed and thrown away. The daemon refuses an approve whose digest does not
+match the operations it holds, so the field is what turns "I approve set X" into
+"I approve the operations I was shown for set X" — and `ApproveRequest` has no
+default for it, so a producer cannot skip the binding by accident.
 
 ## Consumer routes need a MAC this package cannot compute
 

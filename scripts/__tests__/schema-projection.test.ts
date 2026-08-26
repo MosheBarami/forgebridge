@@ -8,6 +8,7 @@ import * as protocol from '../../packages/protocol/src/index.js';
 import {
   type Json,
   checkRouteTable,
+  daemonDefaultPort,
   deepEqual,
   validate,
 } from '../generate-schemas.js';
@@ -384,5 +385,125 @@ describe('the router cross-check can actually fail', () => {
       'served but not in the PROTOCOL.md table: GET /V1/MODELS',
       'in the PROTOCOL.md table but not served: GET /V1/MODELS-WAS-HERE',
     ]);
+  });
+});
+
+describe('the OpenAPI server URL points at the port the daemon binds', () => {
+  /**
+   * The document advertised `http://127.0.0.1:{port}/` with `port` defaulting to
+   * `8787`, a number no `DEFAULT_DAEMON_PORT` has ever held.
+   *
+   * That is not a typo, because of what this generator says about itself:
+   * `packages/protocol/schema/README.md` tells a consumer the `/v1` paths are
+   * read off `packages/daemon/src/server.ts` and therefore cannot drift from it.
+   * A hand-typed constant sitting beside those paths is the drift that claim
+   * denies, and the reader who trusts it gets connection refused.
+   *
+   * So this reads the number out of the daemon's *source* rather than importing
+   * it. Two reasons, both load-bearing: the repository-gates CI job runs this
+   * suite with no build output, and `server.ts` needs three packages' `dist` to
+   * import; and an auditor that reached the value by the same route as the
+   * generator would agree with it even when both are wrong.
+   */
+  const openapi = JSON.parse(readFileSync(path.join(SCHEMA_DIR, 'openapi.json'), 'utf8')) as Record<
+    string,
+    Json
+  >;
+  const serverSource = readFileSync(path.join(ROOT, 'packages/daemon/src/server.ts'), 'utf8');
+
+  const emittedPort = (): string => {
+    const servers = openapi['servers'] as Array<Record<string, Json>>;
+    const first = servers[0] as Record<string, Json>;
+    const variables = first['variables'] as Record<string, Record<string, Json>>;
+    return (variables['port'] as Record<string, Json>)['default'] as string;
+  };
+
+  /** Does the daemon declare this exact number as its default port? */
+  const daemonDeclares = (source: string, port: string): boolean =>
+    new RegExp(`^export const DEFAULT_DAEMON_PORT(?:\\s*:\\s*number)?\\s*=\\s*${port}\\s*;`, 'm').test(
+      source,
+    );
+
+  // The port the daemon binds today, read straight out of the declaration. The
+  // three cases below are about the recogniser, not about the committed
+  // document, so they measure themselves against this rather than against what
+  // was generated — a control that fails whenever the artefact is stale tells
+  // you nothing about the control.
+  const declaredPort = /^export const DEFAULT_DAEMON_PORT\s*=\s*(\d+)\s*;/m.exec(serverSource)?.[1];
+
+  it('emits a port, and emits it as the string an OpenAPI variable default must be', () => {
+    expect(emittedPort()).toMatch(/^\d+$/);
+    expect((openapi['servers'] as Array<Record<string, Json>>)[0]?.['url']).toContain('{port}');
+  });
+
+  it('emits the port the daemon actually binds', () => {
+    expect(
+      daemonDeclares(serverSource, emittedPort()),
+      `openapi.json advertises port ${emittedPort()}; packages/daemon/src/server.ts does not ` +
+        `declare it as DEFAULT_DAEMON_PORT. Run \`npm run generate:schemas\`.`,
+    ).toBe(true);
+  });
+
+  it('fails when the daemon moves its port and the committed document does not', () => {
+    const moved = serverSource.replace(
+      /(export const DEFAULT_DAEMON_PORT\s*=\s*)(\d+)/,
+      (_match, declaration: string, port: string) => `${declaration}${Number(port) + 1}`,
+    );
+    expect(moved).not.toBe(serverSource);
+    expect(declaredPort).toBeDefined();
+    expect(daemonDeclares(moved, declaredPort as string)).toBe(false);
+  });
+
+  it('is not satisfied by some other constant that happens to hold the old number', () => {
+    // The shape this check is most likely to be fooled by: the number survives
+    // in the file under a different name — a legacy alias, a test fixture — while
+    // the daemon's own default has moved on.
+    const decoy = serverSource.replace(
+      /(export const DEFAULT_DAEMON_PORT\s*=\s*)(\d+)/,
+      (_match, declaration: string, port: string) =>
+        `const LEGACY_DAEMON_PORT = ${port};\n${declaration}${Number(port) + 1}`,
+    );
+    expect(decoy).not.toBe(serverSource);
+    expect(declaredPort).toBeDefined();
+    expect(daemonDeclares(decoy, declaredPort as string)).toBe(false);
+  });
+
+  it('still recognises the declaration when it carries an explicit type', () => {
+    // The control. `export const DEFAULT_DAEMON_PORT: number = 7317;` is the same
+    // constant, and a check that called that drift would be worse than no check:
+    // it would train the next reader to regenerate past a red gate.
+    const typed = serverSource.replace(
+      /export const DEFAULT_DAEMON_PORT\s*=/,
+      'export const DEFAULT_DAEMON_PORT: number =',
+    );
+    expect(typed).not.toBe(serverSource);
+    expect(declaredPort).toBeDefined();
+    expect(daemonDeclares(typed, declaredPort as string)).toBe(true);
+  });
+});
+
+describe('the generator refuses to guess the daemon port', () => {
+  // `daemonDefaultPort` is the generator's own reader. It has no fallback on
+  // purpose: emitting a plausible number when the constant has been renamed is
+  // how the wrong one got committed in the first place.
+
+  it('projects the constant the daemon exports', () => {
+    expect(daemonDefaultPort({ DEFAULT_DAEMON_PORT: 7317 })).toBe('7317');
+  });
+
+  it('fails generation when the daemon stops exporting it', () => {
+    expect(() => daemonDefaultPort({})).toThrow(/DEFAULT_DAEMON_PORT/);
+    expect(() => daemonDefaultPort({ DEFAULT_DAEMON_PORT: undefined })).toThrow(
+      /DEFAULT_DAEMON_PORT/,
+    );
+  });
+
+  it('fails on a value that is not a port rather than emitting it', () => {
+    // A string reaches `String()` unchanged and would look right in the diff,
+    // which is exactly why it is refused here.
+    expect(() => daemonDefaultPort({ DEFAULT_DAEMON_PORT: '7317' })).toThrow(/DEFAULT_DAEMON_PORT/);
+    expect(() => daemonDefaultPort({ DEFAULT_DAEMON_PORT: 0 })).toThrow(/DEFAULT_DAEMON_PORT/);
+    expect(() => daemonDefaultPort({ DEFAULT_DAEMON_PORT: 70_000 })).toThrow(/DEFAULT_DAEMON_PORT/);
+    expect(() => daemonDefaultPort({ DEFAULT_DAEMON_PORT: 7317.5 })).toThrow(/DEFAULT_DAEMON_PORT/);
   });
 });

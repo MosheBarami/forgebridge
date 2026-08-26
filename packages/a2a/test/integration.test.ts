@@ -100,19 +100,79 @@ describe('DaemonBackend against a real daemon', () => {
     expect(diff.stale).toBe(false);
   });
 
-  it('reaches the approve route — proving the path and the producer header are right', async () => {
+  it('reaches the approve route — proving the path, the producer header and the digest are right', async () => {
     // No Studio session is paired, so the daemon refuses with `link_unpaired`.
     // That refusal is the evidence: it is raised after the producer token has
-    // been accepted and the ChangeSet found, so reaching it means this
-    // connector addressed the right endpoint with the right credential.
+    // been accepted, the ChangeSet found and the content digest matched, so
+    // reaching it means this connector addressed the right endpoint with the
+    // right credential and the right binding.
+    const { daemon, baseUrl } = await realDaemon();
+    const backend = backendFor(daemon, baseUrl);
+    const changeSet = makeChangeSet({ projectId: daemon.defaultProjectId });
+    await backend.propose(changeSet);
+    const diff = await backend.diff(changeSet.id);
+    expect(diff.contentDigest).toBeTypeOf('string');
+
+    await expect(
+      backend.approve({
+        skill: 'apply-approved-changeset',
+        subject: changeSet.id,
+        approvedBy: 'a human',
+        contentDigest: diff.contentDigest!,
+      }),
+    ).rejects.toMatchObject({ code: 'link_unpaired' });
+  });
+
+  it('is refused when the grant names a digest the daemon does not hold', async () => {
+    // The whole point of the field: an approval is a statement about the
+    // operations the human read, so a grant carrying any other digest buys
+    // nothing. The control above is the same call with the right digest, which
+    // gets all the way to `link_unpaired`; this one does not get past the bind.
     const { daemon, baseUrl } = await realDaemon();
     const backend = backendFor(daemon, baseUrl);
     const changeSet = makeChangeSet({ projectId: daemon.defaultProjectId });
     await backend.propose(changeSet);
 
     await expect(
-      backend.approve({ skill: 'apply-approved-changeset', subject: changeSet.id, approvedBy: 'a human' }),
-    ).rejects.toMatchObject({ code: 'link_unpaired' });
+      backend.approve({
+        skill: 'apply-approved-changeset',
+        subject: changeSet.id,
+        approvedBy: 'a human',
+        contentDigest: 'sha256:a-digest-of-something-else',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
+  it('will not spend a digest read from one ChangeSet on another', async () => {
+    // Two sets, each validated, each with its own digest. The approver read the
+    // first and the grant is presented against the second: refused, because the
+    // binding is to content and these are different content.
+    const { daemon, baseUrl } = await realDaemon();
+    const backend = backendFor(daemon, baseUrl);
+    const reviewed = makeChangeSet({ projectId: daemon.defaultProjectId });
+    const other = makeChangeSet({
+      projectId: daemon.defaultProjectId,
+      operations: [
+        {
+          op: 'writeScript',
+          path: 'ServerScriptService.Other',
+          scriptType: 'Script',
+          source: 'print("something else entirely")',
+        },
+      ],
+    });
+    await backend.propose(reviewed);
+    await backend.propose(other);
+    const reviewedDiff = await backend.diff(reviewed.id);
+
+    await expect(
+      backend.approve({
+        skill: 'apply-approved-changeset',
+        subject: other.id,
+        approvedBy: 'a human',
+        contentDigest: reviewedDiff.contentDigest!,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_request' });
   });
 
   it('is refused by the daemon when the producer token is wrong', async () => {
@@ -220,7 +280,15 @@ describe('a second agent drives a run over A2A', () => {
     // 6. A human approves out of band, and only then does the daemon see an
     //    approve at all -- which here reaches `link_unpaired`, because there is
     //    no Studio session in this test to deliver to.
-    gate.record({ skill: 'apply-approved-changeset', subject: changeSet.id, approvedBy: 'operator@workstation' });
+    gate.record({
+      skill: 'apply-approved-changeset',
+      subject: changeSet.id,
+      approvedBy: 'operator@workstation',
+      // The digest off the diff this human just read, which is the whole of
+      // what "approved" means here. It reaches the gate from the reading, never
+      // from the agent's request.
+      contentDigest: diff.contentDigest,
+    });
     const resumed = await rpc('SendMessage', {
       message: invocationMessage('apply-approved-changeset', { changeSetId: changeSet.id }),
     });

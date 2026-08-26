@@ -167,6 +167,12 @@ function report(io: Io, diff: ChangeSetDiff): void {
  * actually needs. Naming the endpoint is not a loophole — calling it is a
  * deliberate act by whoever holds the producer token, which is the human who
  * started the daemon. Doing it silently from inside `apply` would not be.
+ *
+ * The `contentDigest` in the printed body is this diff's own. The daemon
+ * refuses an approve that does not echo the digest of the operations it holds,
+ * so a command without it is one the reader would paste and watch fail — and
+ * the digest belongs to the diff *this command just read*, which is what makes
+ * pasting it an approval of what was on screen rather than of an id.
  */
 function refusal(diff: ChangeSetDiff, baseUrl: string): Error {
   const bulk =
@@ -183,6 +189,12 @@ function refusal(diff: ChangeSetDiff, baseUrl: string): Error {
     ? ` It was built against version ${diff.baseVersion} and the project is at ${diff.currentVersion}; it must be rebased and resubmitted.`
     : '';
 
+  const body = JSON.stringify({
+    contentDigest: diff.contentDigest,
+    approvedBy: 'your-name',
+    ...(diff.counts.deletes > LIMITS.BULK_DELETE_CONFIRM_THRESHOLD ? { confirmBulkDelete: true } : {}),
+  });
+
   return operationFailed(
     `changeset ${diff.changeSetId} is "${diff.status}", not approved — nothing was applied.${stale}${validation}${bulk}`,
     [
@@ -190,7 +202,7 @@ function refusal(diff: ChangeSetDiff, baseUrl: string): Error {
       'Approve it in the Studio plugin diff view, or from a shell with the producer token:',
       `  curl -fsS -X POST ${baseUrl}/v1/changesets/${diff.changeSetId}/approve \\`,
       `    -H "X-ForgeBridge-Token: $FORGEBRIDGE_PRODUCER_TOKEN" \\`,
-      `    -H 'content-type: application/json' -d '{"approvedBy":"your-name"}'`,
+      `    -H 'content-type: application/json' -d '${body}'`,
     ].join('\n'),
   );
 }

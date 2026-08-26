@@ -1175,6 +1175,35 @@ export function extractHeaderNames(serverSource: string, authSource: string): Re
   };
 }
 
+/**
+ * The daemon's default port, imported rather than restated.
+ *
+ * The OpenAPI server URL used to carry a hand-typed `8787`; the daemon has only
+ * ever bound `DEFAULT_DAEMON_PORT`, which is a different number. That is worse
+ * than a typo in a document nobody generates. This file's claim — the one
+ * `packages/protocol/schema/README.md` repeats — is that the `/v1` surface is
+ * read off the implementation and therefore cannot drift from it, and a private
+ * second copy of the implementation's most user-visible number is exactly the
+ * drift the claim denies. Roblox scopes a plugin's HttpService permission to an
+ * address, so a wrong port reads to a user as "the bridge is broken" long before
+ * anyone suspects a schema.
+ *
+ * Unlike the header names above there is something to import — the constant is
+ * exported, and nothing in `scripts/verify-boundaries.ts` scopes `scripts/` — so
+ * it is imported, and a rename or a retype fails generation here instead of
+ * publishing a URL no daemon answers on.
+ */
+export function daemonDefaultPort(server: Record<string, unknown>): string {
+  const port = server['DEFAULT_DAEMON_PORT'];
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    fail(
+      `packages/daemon/src/server.ts does not export DEFAULT_DAEMON_PORT as a port number ` +
+        `(got ${JSON.stringify(port)}). The OpenAPI server URL is built from it and has no default to fall back on.`,
+    );
+  }
+  return String(port);
+}
+
 // ──────────────────────────────── projection ────────────────────────────────
 
 function namedSchemas(module: Record<string, unknown>): Map<string, ZodLike> {
@@ -1676,6 +1705,7 @@ function buildOpenApi(
   components: Readonly<Record<string, JsonObject>>,
   headers: Record<string, string>,
   discrepancies: readonly string[],
+  defaultPort: string,
 ): JsonObject {
   const paths: JsonObject = {};
 
@@ -1756,7 +1786,7 @@ function buildOpenApi(
         description:
           'The local daemon. Loopback only, and it refuses any request whose Host header is ' +
           'not a loopback address.',
-        variables: { port: { default: '8787' } },
+        variables: { port: { default: defaultPort } },
       },
     ],
     tags: [
@@ -1839,6 +1869,9 @@ function schemaReadme(names: readonly string[], discrepancies: readonly string[]
     '- `openapi.json` — one OpenAPI 3.1 document for the `/v1` surface. Its paths are read off',
     '  `packages/daemon/src/server.ts`, which is the implementation, not off the endpoint table',
     '  in `docs/PROTOCOL.md`. Where the two disagree the code wins and the generator says so.',
+    '  Its `servers` entry is built the same way: the `port` variable\'s default is that file\'s',
+    '  exported `DEFAULT_DAEMON_PORT`, imported rather than transcribed, because a URL nobody',
+    '  answers on is a worse lie than a missing one.',
     '',
     '## What does NOT survive the projection',
     '',
@@ -1881,16 +1914,22 @@ export interface Artifacts {
 /**
  * Produce every generated artefact in memory.
  *
- * The daemon's wire module is imported dynamically rather than at the top of
- * this file for one reason: `packages/daemon/src/wire.ts` resolves
- * `@forgebridge/protocol` through the workspace symlink, which needs
- * `packages/protocol/dist`. Keeping that import inside this function lets the
- * gate's own test suite import `validate` and `deepEqual` from here without a
- * build, which is what the repository-gates CI job does.
+ * The daemon's modules are imported dynamically rather than at the top of this
+ * file for one reason: they resolve `@forgebridge/protocol` — and, in
+ * `server.ts`'s case, `@forgebridge/core` and `@forgebridge/luau-analysis` —
+ * through the workspace symlinks, which need those packages' `dist`. Keeping the
+ * imports inside this function lets the gate's own test suite import `validate`,
+ * `deepEqual` and `daemonDefaultPort` from here without a build, which is what
+ * the repository-gates CI job does. That is also why the gate self-test that
+ * pins the emitted server URL to `DEFAULT_DAEMON_PORT` reads the daemon's
+ * *source* rather than importing it: it has to be able to run in that job, and
+ * an auditor that reads the value by a different route than the generator is
+ * the only kind whose agreement means anything.
  */
 export async function buildArtifacts(): Promise<Artifacts> {
   const built = (await import('@forgebridge/protocol')) as unknown as Record<string, unknown>;
   const wire = (await import('../packages/daemon/src/wire.js')) as unknown as Record<string, unknown>;
+  const server = (await import('../packages/daemon/src/server.js')) as unknown as Record<string, unknown>;
 
   const source = namedSchemas(protocol as unknown as Record<string, unknown>);
   const compiled = namedSchemas(built);
@@ -1968,7 +2007,10 @@ export async function buildArtifacts(): Promise<Artifacts> {
     components[name] = (HANDLER_SHAPED_SCHEMAS[name] ?? openApiCtx.defs.get(name)) as JsonObject;
   }
 
-  files.set(`${SCHEMA_DIR}/openapi.json`, stableJson(buildOpenApi(components, headers, discrepancies)));
+  files.set(
+    `${SCHEMA_DIR}/openapi.json`,
+    stableJson(buildOpenApi(components, headers, discrepancies, daemonDefaultPort(server))),
+  );
   files.set(`${SCHEMA_DIR}/README.md`, schemaReadme(names, discrepancies));
   files.set(PYTHON_MODELS, pythonModels(components));
 

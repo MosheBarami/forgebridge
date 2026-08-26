@@ -62,6 +62,20 @@ export const DiffResponse = z
         deletes: z.number().int().min(0),
       })
       .passthrough(),
+    /**
+     * What an approver must echo back on approve, and the one field of this
+     * response the approval path in this package depends on: an
+     * `ApplyApprovalGrant` is not constructible without it.
+     *
+     * Declared rather than left to `.passthrough()` because the rule at the top
+     * of this file is that a schema names the fields this package reads, and a
+     * local approval UI reading the digest off an untyped bag would be reading
+     * it by luck. Optional, because a diff is a read: a daemon too old to
+     * render a digest should still be readable here, and the honest refusal for
+     * that case belongs at `POST /v1/changesets/:id/approve`, which is where the
+     * binding is actually enforced — not at the read that precedes it.
+     */
+    contentDigest: z.string().min(1).optional(),
     operations: z.array(z.unknown()),
     validation: Validation.optional(),
   })

@@ -84,6 +84,7 @@ class ApplyResultAck(_Model):
     journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
 
 class ApproveRequest(_Model):
+    contentDigest: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     approvedBy: Annotated[str, StringConstraints(max_length=120)] = Field(default="local")
     note: Annotated[str, StringConstraints(max_length=500)] | None = Field(default=None)
     confirmBulkDelete: bool = Field(default=False)
@@ -303,11 +304,12 @@ class OperationDiff(_Model):
     summary: str
     destructive: bool
     after: str | None = Field(default=None)
+    properties: dict[str, str] | None = Field(default=None)
 
     # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
     # parsed object entirely, and a projection that emitted `null` instead would not
     # round-trip.
-    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"after"})
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"after", "properties"})
 
 class ChangeSetDiff(_Model):
     changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
@@ -318,6 +320,7 @@ class ChangeSetDiff(_Model):
     currentVersion: Annotated[int, Ge(0)]
     stale: bool
     counts: ChangeSetDiffCounts
+    contentDigest: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     operations: list[OperationDiff]
     validation: Validation | None = Field(default=None)
     treeAware: Literal[False]

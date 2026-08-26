@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ChangeSet, ForgeBridgeError, type Validation } from '@forgebridge/protocol';
-import type { ApprovalGrant } from '../src/approval.js';
+import type { ApplyApprovalGrant, ApprovalGrant, RollbackApprovalGrant } from '../src/approval.js';
 import type { ForgeBridgeBackend } from '../src/backend.js';
 import type {
   ApproveResponse,
@@ -36,6 +36,13 @@ export function makeChangeSet(overrides: Record<string, unknown> = {}): ChangeSe
     ...overrides,
   });
 }
+
+/**
+ * The digest `FakeBackend.diff` reports, and the one an apply grant in these
+ * tests carries. A constant rather than a random value so that a test which
+ * means "the approver read a different set" has to say so explicitly.
+ */
+export const FAKE_CONTENT_DIGEST = 'sha256:fake-digest-of-the-reviewed-operations';
 
 export interface BackendCall {
   method: keyof ForgeBridgeBackend;
@@ -76,19 +83,20 @@ export class FakeBackend implements ForgeBridgeBackend {
       currentVersion: 0,
       stale: false,
       counts: { total: 1, creates: 0, setProperties: 0, scripts: 1, moves: 0, deletes: 0 },
+      contentDigest: FAKE_CONTENT_DIGEST,
       operations: [{ index: 0, op: 'writeScript', summary: 'write Script ServerScriptService.Shop' }],
       validation: okValidation,
     };
   }
 
-  async approve(grant: ApprovalGrant): Promise<ApproveResponse> {
+  async approve(grant: ApplyApprovalGrant): Promise<ApproveResponse> {
     this.calls.push({ method: 'approve', argument: grant.subject, grant });
     this.#maybeThrow('approve');
     return { changeSetId: grant.subject, status: 'approved', nonce: 1 };
   }
 
   async rollback(
-    grant: ApprovalGrant,
+    grant: RollbackApprovalGrant,
     request: { journalId: string; expectedVersion: number; reason?: string },
   ): Promise<RollbackResponse> {
     this.calls.push({ method: 'rollback', argument: request, grant });

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ApprovalGate, ApprovalGrant } from './approval.js';
+import type { ApprovalGate, ApprovalGrant, GrantFor } from './approval.js';
 import type { ForgeBridgeBackend } from './backend.js';
 import { renderFailure, type ErrorDetail } from './errors.js';
 import { SKILL_INVOCATION_EXTENSION_URI, WRITING_SKILLS, type ParsedInvocation, type SkillId } from './skills.js';
@@ -174,10 +174,10 @@ export class SkillExecutor {
    * to route it through the gate, the set in `skills.ts` and the call sites
    * disagree, and this throws rather than quietly writing.
    */
-  async #requireGrant(
-    skill: Extract<SkillId, 'apply-approved-changeset' | 'rollback-apply'>,
+  async #requireGrant<S extends ApprovalGrant['skill']>(
+    skill: S,
     subject: string,
-  ): Promise<ApprovalGrant | null> {
+  ): Promise<GrantFor<S> | null> {
     if (!WRITING_SKILLS.has(skill)) {
       throw new Error(`skill "${skill}" asked for an approval grant but is not declared as a writing skill`);
     }

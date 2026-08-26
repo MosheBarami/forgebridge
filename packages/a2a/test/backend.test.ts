@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { ForgeBridgeError } from '@forgebridge/protocol';
 import { DaemonBackend } from '../src/backend.js';
-import type { ApprovalGrant } from '../src/approval.js';
+import type { ApplyApprovalGrant } from '../src/approval.js';
 import { makeChangeSet, okValidation } from './helpers.js';
 
 /**
@@ -55,10 +55,11 @@ function backendWith(
   };
 }
 
-const grant: ApprovalGrant = {
+const grant: ApplyApprovalGrant = {
   skill: 'apply-approved-changeset',
   subject: '11111111-1111-4111-8111-111111111111',
   approvedBy: 'operator@workstation',
+  contentDigest: 'sha256:the-digest-the-diff-reported',
   confirmBulkDelete: true,
   note: 'reviewed',
 };
@@ -109,10 +110,26 @@ describe('daemon endpoint fidelity', () => {
     await backend.approve(grant);
     expect(seen[0]?.url).toBe(`http://127.0.0.1:7317/v1/changesets/${grant.subject}/approve`);
     expect(seen[0]?.body).toEqual({
+      contentDigest: 'sha256:the-digest-the-diff-reported',
       approvedBy: 'operator@workstation',
       confirmBulkDelete: true,
       note: 'reviewed',
     });
+  });
+
+  it('carries the digest the approver was shown, so the daemon can bind the yes to it', async () => {
+    // The daemon refuses an approve whose digest does not match the operations
+    // it holds. Sending the grant's digest is what makes this connector's
+    // approve a statement about reviewed content rather than about an id, and
+    // the field can only have come from `record` — there is no path from an A2A
+    // request to it.
+    const { backend, seen } = backendWith(() => ({
+      status: 202,
+      body: { changeSetId: grant.subject, status: 'approved', nonce: 1 },
+    }));
+
+    await backend.approve({ ...grant, contentDigest: 'sha256:what-the-human-actually-read' });
+    expect((seen[0]?.body as { contentDigest: string }).contentDigest).toBe('sha256:what-the-human-actually-read');
   });
 
   it('defaults confirmBulkDelete to false when the approver did not confirm one', async () => {
@@ -121,7 +138,12 @@ describe('daemon endpoint fidelity', () => {
       body: { changeSetId: grant.subject, status: 'approved', nonce: 1 },
     }));
 
-    await backend.approve({ skill: 'apply-approved-changeset', subject: grant.subject, approvedBy: 'a human' });
+    await backend.approve({
+      skill: 'apply-approved-changeset',
+      subject: grant.subject,
+      approvedBy: 'a human',
+      contentDigest: 'sha256:the-digest-the-diff-reported',
+    });
     expect((seen[0]?.body as { confirmBulkDelete: boolean }).confirmBulkDelete).toBe(false);
   });
 

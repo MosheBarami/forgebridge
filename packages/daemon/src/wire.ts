@@ -68,6 +68,24 @@ export const HealthResponse = z.object({
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
 export const ApproveRequest = z.object({
+  /**
+   * The `contentDigest` the diff reported for the set being approved.
+   *
+   * Required, with no default, and that is the point: an approval names a
+   * ChangeSet id, and an id is not content. Echoing the digest is what turns
+   * "I approve set X" into "I approve the operations I was shown for set X",
+   * which is the only version of the sentence ADR-012 can rest on. A default
+   * here — or an optional field the daemon skipped when absent — would be a
+   * caller opting out of the binding, so a caller that has not read a diff is
+   * refused rather than trusted.
+   *
+   * Both connectors satisfy this the same way, and neither could route it from
+   * a request even if it wanted to: `packages/a2a` carries the digest on
+   * `ApplyApprovalGrant`, which is minted only by `LocalOperatorApprovalGate.
+   * record` from the human who read the diff, and `packages/mcp` never approves
+   * at all — `forge.apply_changeset` reads the daemon's own verdict instead.
+   */
+  contentDigest: z.string().min(1).max(200),
   /** Who cleared it. "local" when the daemon operator approved at the terminal. */
   approvedBy: z.string().max(120).default('local'),
   note: z.string().max(500).optional(),
@@ -97,8 +115,19 @@ export const OperationDiff = z.object({
   /**
    * The value the operation writes — a script's new source, a property's new
    * value. There is no matching `before`: see `treeAware` below.
+   *
+   * Luau source appears here verbatim whichever operation installs it, so a
+   * reviewer reads the same thing whether it arrived as `writeScript` or as a
+   * `createInstance` carrying `Source`.
    */
   after: z.string().optional(),
+  /**
+   * The rest of a `createInstance` property bag, each value as its JSON.
+   * Present only when the operation carries properties beyond the `Source`
+   * already rendered in `after`; a diff that showed the class and the path and
+   * silently dropped the bag was hiding half of what the operation does.
+   */
+  properties: z.record(z.string(), z.string()).optional(),
 });
 export type OperationDiff = z.infer<typeof OperationDiff>;
 
@@ -111,6 +140,16 @@ export const ChangeSetDiff = z.object({
   currentVersion: z.number().int().min(0),
   /** True when the tree moved after this set was built; it must be rebased. */
   stale: z.boolean(),
+  /**
+   * The shape of the set at a glance.
+   *
+   * `scripts` is a cross-cut of the others rather than one more slice of the
+   * same pie: it counts every operation that installs Luau, and such an
+   * operation is also counted under `creates` or `setProperties` when that is
+   * how it arrived. So these do not sum to `total`, and a UI that adds them up
+   * is asking the wrong question — `scripts` answers "is there code in here",
+   * which is what decides whether a human reads the diff line by line.
+   */
   counts: z.object({
     total: z.number().int().min(0),
     creates: z.number().int().min(0),
@@ -119,6 +158,12 @@ export const ChangeSetDiff = z.object({
     moves: z.number().int().min(0),
     deletes: z.number().int().min(0),
   }),
+  /**
+   * A fingerprint of the operations on this page, which `POST
+   * /v1/changesets/:id/approve` requires back. It is what binds an approval to
+   * what was reviewed rather than to an id — see `changeSetContentDigest`.
+   */
+  contentDigest: z.string().min(1).max(200),
   operations: z.array(OperationDiff),
   validation: Validation.optional(),
   /**

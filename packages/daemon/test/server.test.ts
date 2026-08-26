@@ -4,11 +4,14 @@ import { connect } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { DENY_ALL_POLICY } from '@forgebridge/core';
 import { LIMITS, PROTOCOL_VERSION, ProtocolError, STRUCTURAL_PROPERTIES, Validation } from '@forgebridge/protocol';
+import type { ChangeSet } from '@forgebridge/protocol';
 import { LOOPBACK_HOST, MAX_ERROR_MESSAGE_CHARS } from '../src/http.js';
 import { InMemoryDaemonStore } from '../src/store.js';
 import { DAEMON_VERSION, type ForgeBridgeDaemon } from '../src/server.js';
 import {
   approve,
+  diff,
+  renderedDigest,
   okValidation,
   makeApplyResult,
   makeChangeSet,
@@ -205,6 +208,63 @@ describe('POST /v1/changesets', () => {
     expect(response.json<{ code: string }>().code).toBe('stale_base');
   });
 
+  it('refuses a second submission that reuses an existing changeset id', async () => {
+    // The producer-controlled half of a complete review bypass: overwriting let
+    // a set be swapped after a human read its diff and before the approval
+    // landed. The id is write-once now, the way a journal id is.
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet();
+    expect((await submit(daemon, changeSet)).status).toBe(201);
+
+    const swapped = makeChangeSet({
+      id: changeSet.id,
+      projectId: changeSet.projectId,
+      summary: changeSet.summary,
+      operations: [
+        {
+          op: 'createInstance',
+          path: 'ServerScriptService.Shop',
+          className: 'Script',
+          properties: { Source: { t: 'String', v: 'print("pwned")' } },
+        },
+      ],
+    });
+    const response = await submit(daemon, swapped);
+
+    expect(response.status).toBe(400);
+    expect(response.json<{ code: string }>().code).toBe('invalid_request');
+    expect((await daemon.store.getChangeSet(changeSet.id))?.operations).toEqual(changeSet.operations);
+  });
+
+  it('accepts the same work proposed again under a fresh id', async () => {
+    // The control, and the shape write-once is most confusable with: a producer
+    // that rebuilt or re-proposed identical operations is doing something
+    // ordinary. Only the *id* is spent, not the content.
+    const daemon = await daemonFor();
+    const first = makeChangeSet();
+    expect((await submit(daemon, first)).status).toBe(201);
+
+    const again = makeChangeSet({ projectId: first.projectId, operations: first.operations });
+    expect((await submit(daemon, again)).status).toBe(201);
+    expect((await daemon.store.getChangeSet(again.id))?.operations).toEqual(first.operations);
+  });
+
+  it('cannot be used to reset an already-approved set back to approvable', async () => {
+    // Resubmission did not only swap content: it put `status` back to
+    // `validated`, so an approved, applying or applied set became approvable
+    // again — a second delivery of work that was cleared once.
+    const daemon = await daemonFor();
+    const client = await pair(daemon);
+    const changeSet = makeChangeSet({ projectId: client.projectId });
+    expect((await submit(daemon, changeSet)).status).toBe(201);
+    expect((await approve(daemon, changeSet.id)).status).toBe(202);
+
+    expect((await submit(daemon, changeSet)).status).toBe(400);
+    expect((await daemon.store.getChangeSet(changeSet.id))?.status).toBe('approved');
+    // One delivery, from the one approval.
+    expect(await daemon.store.lastOutboundNonce(client.linkId)).toBe(1);
+  });
+
   it('refuses a changeset that fails schema validation', async () => {
     const daemon = await daemonFor();
     const response = await raw({
@@ -271,6 +331,176 @@ describe('POST /v1/changesets/:id/approve', () => {
     const response = await approve(daemon, changeSet.id);
     expect(response.status).toBe(409);
     expect(response.json<{ code: string }>().code).toBe('link_unpaired');
+  });
+});
+
+/**
+ * A store that will write a ChangeSet twice — the seam an adapter, a fixture or
+ * a future ingress would arrive by.
+ *
+ * `POST /v1/changesets` refuses a reused id and `InMemoryDaemonStore` refuses
+ * an overwrite, so this is the only way left to ask the question the content
+ * digest exists to answer: if the stored operations *did* move under an id a
+ * human had already reviewed, would the approval still go through? Id
+ * uniqueness is the fix for the route that exists today; the digest is what
+ * holds when a route that does not exist yet is added.
+ */
+class SwappableStore extends InMemoryDaemonStore {
+  readonly #swapped = new Map<string, ChangeSet>();
+
+  swap(changeSet: ChangeSet): void {
+    this.#swapped.set(changeSet.id, changeSet);
+  }
+
+  override async getChangeSet(id: string): Promise<ChangeSet | null> {
+    return this.#swapped.get(id) ?? (await super.getChangeSet(id));
+  }
+}
+
+describe('approval is bound to the content that was reviewed', () => {
+  it('refuses an approve that carries no contentDigest at all', async () => {
+    // Required with no default: an approval that names only an id is a
+    // statement about a name, and names are not content.
+    const daemon = await daemonFor();
+    const client = await pair(daemon);
+    const changeSet = makeChangeSet({ projectId: client.projectId });
+    await submit(daemon, changeSet);
+
+    const response = await approve(daemon, changeSet.id, { contentDigest: undefined });
+    expect(response.status).toBe(400);
+    expect(response.json<{ code: string }>().code).toBe('invalid_request');
+    expect((await daemon.store.getChangeSet(changeSet.id))?.status).toBe('validated');
+    expect(await daemon.store.nextDelivery(client.linkId, 0)).toBeNull();
+  });
+
+  it('refuses an approve whose digest is for other content', async () => {
+    // A stale digest: the approver read one page and the digest they echoed
+    // describes a different one. Whichever way round that happened, the yes
+    // does not cover what is stored.
+    const daemon = await daemonFor();
+    const client = await pair(daemon);
+    const reviewed = makeChangeSet({ projectId: client.projectId });
+    const other = makeChangeSet({
+      projectId: client.projectId,
+      operations: [
+        { op: 'writeScript', path: 'ServerScriptService.Other', scriptType: 'Script', source: 'print("other")' },
+      ],
+    });
+    await submit(daemon, reviewed);
+    await submit(daemon, other);
+
+    const response = await approve(daemon, reviewed.id, { contentDigest: await renderedDigest(daemon, other.id) });
+
+    expect(response.status).toBe(400);
+    expect(response.json<{ code: string }>().code).toBe('invalid_request');
+    expect((await daemon.store.getChangeSet(reviewed.id))?.status).toBe('validated');
+    expect(await daemon.store.nextDelivery(client.linkId, 0)).toBeNull();
+  });
+
+  it('approves on the digest the diff reported, and reports the same digest every time', async () => {
+    // The control, and the property that makes the requirement satisfiable: a
+    // digest that churned between two reads of the same unchanged set would
+    // fail every honest approval, and the field would be deleted within a week.
+    const daemon = await daemonFor();
+    const client = await pair(daemon);
+    const changeSet = makeChangeSet({ projectId: client.projectId });
+    await submit(daemon, changeSet);
+
+    const first = await renderedDigest(daemon, changeSet.id);
+    const second = await renderedDigest(daemon, changeSet.id);
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+
+    expect((await approve(daemon, changeSet.id, { contentDigest: first })).status).toBe(202);
+    expect((await daemon.store.getChangeSet(changeSet.id))?.status).toBe('approved');
+  });
+
+  it('refuses the approval when the stored content moved under the reviewed id', async () => {
+    // The digest layer on its own, with the id layer taken out of the picture
+    // by a store that permits the swap. This is the regression the id check
+    // cannot cover: a future code path that updates a set in place.
+    const store = new SwappableStore();
+    const daemon = await daemonFor({ store });
+    const client = await pair(daemon);
+    const reviewed = makeChangeSet({ projectId: client.projectId });
+    await submit(daemon, reviewed);
+
+    const digest = await renderedDigest(daemon, reviewed.id);
+
+    store.swap(
+      makeChangeSet({
+        id: reviewed.id,
+        projectId: reviewed.projectId,
+        summary: reviewed.summary,
+        operations: [
+          {
+            op: 'createInstance',
+            path: 'ServerScriptService.Shop',
+            className: 'Script',
+            properties: { Source: { t: 'String', v: 'print("pwned")' } },
+          },
+        ],
+        validation: okValidation,
+      }),
+    );
+
+    const response = await approve(daemon, reviewed.id, { contentDigest: digest });
+    expect(response.status).toBe(400);
+    expect(await daemon.store.nextDelivery(client.linkId, 0)).toBeNull();
+  });
+
+  it('blocks the whole swap: submit, diff, re-submit, approve', async () => {
+    // The two findings combined, replayed end to end. Benign set in, diff read
+    // by a human, malicious set re-submitted under the same id, approval landed
+    // on the digest the human was shown.
+    const daemon = await daemonFor();
+    const client = await pair(daemon);
+
+    // 1. A benign proposal: one property write, no code.
+    const proposal = makeChangeSet({
+      projectId: client.projectId,
+      summary: 'make the platform solid',
+      operations: [
+        { op: 'setProperty', path: 'Workspace.Platform', property: 'Anchored', value: { t: 'Bool', v: true } },
+      ],
+    });
+    expect((await submit(daemon, proposal)).status).toBe(201);
+
+    // 2. The human reads the diff. No Luau on the page, and a digest of it.
+    const reviewed = (await diff(daemon, proposal.id)).json<{
+      counts: { scripts: number };
+      contentDigest: string;
+      operations: { after?: string }[];
+    }>();
+    expect(reviewed.counts.scripts).toBe(0);
+    expect(reviewed.operations[0]?.after).toBe('{"t":"Bool","v":true}');
+
+    // 3. The producer re-submits the same id carrying a Script instead.
+    const swap = await submit(
+      daemon,
+      makeChangeSet({
+        id: proposal.id,
+        projectId: proposal.projectId,
+        summary: proposal.summary,
+        operations: [
+          {
+            op: 'createInstance',
+            path: 'ServerScriptService.Shop',
+            className: 'Script',
+            properties: { Source: { t: 'String', v: 'print("pwned")' } },
+          },
+        ],
+      }),
+    );
+    expect(swap.status).toBe(400);
+
+    // 4. The approval lands on the digest the human was shown, and clears the
+    //    set the human actually read.
+    expect((await approve(daemon, proposal.id, { contentDigest: reviewed.contentDigest })).status).toBe(202);
+
+    const delivery = await daemon.store.nextDelivery(client.linkId, 0);
+    expect(delivery?.payload).toMatchObject({ kind: 'changeset', changeSet: { operations: proposal.operations } });
+    expect(JSON.stringify(delivery?.payload)).not.toContain('pwned');
   });
 });
 
@@ -476,6 +706,88 @@ describe('GET /v1/changesets/:id/diff', () => {
     expect(diff.operations[0]?.after).toBe('print("hello")');
     expect(diff.treeAware).toBe(false);
     expect(diff.stale).toBe(false);
+  });
+
+  it('renders a createInstance that carries Source as script content, and counts it', async () => {
+    // The reviewed half of the bypass: this operation installs Luau exactly as
+    // writeScript does, and the diff used to render it as one line naming a
+    // class and a path — `counts.scripts: 0`, no source text anywhere on the
+    // page. A human approving that is approving nothing (ADR-012).
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        {
+          op: 'createInstance',
+          path: 'ServerScriptService.Shop',
+          className: 'Script',
+          properties: {
+            Source: { t: 'String', v: 'print("pwned")' },
+            Disabled: { t: 'Bool', v: false },
+          },
+        },
+      ],
+    });
+    await submit(daemon, changeSet);
+
+    const response = await diff(daemon, changeSet.id);
+    const rendered = response.json<{
+      counts: { total: number; creates: number; scripts: number };
+      operations: { summary: string; after?: string; properties?: Record<string, string> }[];
+    }>();
+
+    expect(response.status).toBe(200);
+    expect(rendered.counts).toMatchObject({ total: 1, creates: 1, scripts: 1 });
+    // Shown the same way writeScript's source is shown: raw Luau, in `after`.
+    expect(rendered.operations[0]?.after).toBe('print("pwned")');
+    // The same rendering setProperty's `after` uses — the tagged PropertyValue,
+    // not a coerced primitive, so a reviewer sees the datatype as well as the value.
+    expect(rendered.operations[0]?.properties).toEqual({ Disabled: '{"t":"Bool","v":false}' });
+    expect(rendered.operations[0]?.summary).toContain('Source');
+  });
+
+  it('counts a setProperty on Source as a script too', async () => {
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        {
+          op: 'setProperty',
+          path: 'ServerScriptService.Shop',
+          property: 'Source',
+          value: { t: 'String', v: 'print("hi")' },
+        },
+      ],
+    });
+    await submit(daemon, changeSet);
+
+    const rendered = (await diff(daemon, changeSet.id)).json<{ counts: { scripts: number } }>();
+    expect(rendered.counts.scripts).toBe(1);
+  });
+
+  it('does not count a createInstance that carries no Source as a script', async () => {
+    // The control, and it holds both before and after the fix: fail-closed must
+    // not mean fail-noisy. A diff that called every createInstance a script
+    // would teach reviewers that the script count means nothing, which lands in
+    // the same place as reporting zero for one that really carries code.
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        {
+          op: 'createInstance',
+          path: 'Workspace.Platform',
+          className: 'Part',
+          properties: { Anchored: { t: 'Bool', v: true } },
+        },
+      ],
+    });
+    await submit(daemon, changeSet);
+
+    const rendered = (await diff(daemon, changeSet.id)).json<{
+      counts: { creates: number; scripts: number };
+      operations: { after?: string }[];
+    }>();
+
+    expect(rendered.counts).toMatchObject({ creates: 1, scripts: 0 });
+    expect(rendered.operations[0]?.after).toBeUndefined();
   });
 
   it('404s an unknown changeset', async () => {

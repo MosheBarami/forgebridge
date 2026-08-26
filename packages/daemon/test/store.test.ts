@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Link } from '@forgebridge/protocol';
 import { NONCE_ORIGIN } from '../src/envelope.js';
 import { InMemoryDaemonStore, RETENTION, type JournalRecord } from '../src/store.js';
+import { makeChangeSet } from './helpers.js';
 import type { DeliveryPayload } from '../src/wire.js';
 
 function makeLink(overrides: Record<string, unknown> = {}) {
@@ -100,6 +101,43 @@ describe('InMemoryDaemonStore inbound watermark', () => {
     expect(await store.tryAdvanceInboundNonce(one, 3)).toBe(true);
     expect(await store.tryAdvanceInboundNonce(two, 1)).toBe(true);
     expect(await store.lastInboundNonce(one)).toBe(3);
+  });
+});
+
+describe('InMemoryDaemonStore changesets', () => {
+  it('refuses to overwrite a changeset id that already exists', async () => {
+    // The id is the handle the diff a human read, the approval and the
+    // ApplyResult all name the work by. A second set written under it inherits
+    // the reviewed one's name and its cleared status, which is a review bypass
+    // rather than an update.
+    const store = new InMemoryDaemonStore();
+    const first = makeChangeSet();
+    await store.putChangeSet(first);
+
+    const swapped = makeChangeSet({
+      id: first.id,
+      projectId: first.projectId,
+      operations: [
+        { op: 'writeScript', path: 'ServerScriptService.Shop', scriptType: 'Script', source: 'print("pwned")' },
+      ],
+    });
+    await expect(store.putChangeSet(swapped)).rejects.toThrow(
+      expect.objectContaining({ code: 'invalid_request' }),
+    );
+    expect((await store.getChangeSet(first.id))?.operations).toEqual(first.operations);
+  });
+
+  it('still lets the status of a stored set move', async () => {
+    // The control: write-once is about content, not about the lifecycle. A set
+    // that could never be marked approved or applied would be a store that
+    // refuses the one mutation the protocol requires.
+    const store = new InMemoryDaemonStore();
+    const changeSet = makeChangeSet();
+    await store.putChangeSet(changeSet);
+
+    expect((await store.setChangeSetStatus(changeSet.id, 'approved'))?.status).toBe('approved');
+    expect((await store.getChangeSet(changeSet.id))?.status).toBe('approved');
+    expect((await store.getChangeSet(changeSet.id))?.operations).toEqual(changeSet.operations);
   });
 });
 

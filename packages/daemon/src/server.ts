@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   ApplyResult,
   ChangeSet,
@@ -27,7 +27,7 @@ import { DENY_ALL_POLICY, checkPolicy, type ProjectPolicy } from '@forgebridge/c
 import { analyse, normaliseHost } from '@forgebridge/luau-analysis';
 import type { Finding, Validation } from '@forgebridge/protocol';
 import { PRODUCER_TOKEN_HEADER, assertProducerToken, mintProducerToken } from './auth.js';
-import { NONCE_ORIGIN, openEnvelope, sealEnvelope, verifyRequestMac } from './envelope.js';
+import { NONCE_ORIGIN, canonicalJson, openEnvelope, sealEnvelope, verifyRequestMac } from './envelope.js';
 import {
   LOOPBACK_HOST,
   corsHeadersFor,
@@ -85,6 +85,49 @@ export const POLL_TIMEOUT_MS = 25_000;
 const LINK_HEADER = 'X-ForgeBridge-Link';
 const MAC_HEADER = 'X-ForgeBridge-Mac';
 const OUTPUT_READ_LIMIT = 200;
+
+/**
+ * Domain separator for the content digest, in the style of the envelope MACs.
+ * A digest is not a MAC, but it is compared against a value that arrived from
+ * outside, so it gets the same treatment: a hash of one kind of thing must
+ * never be a valid hash of another.
+ */
+const CONTENT_DIGEST_DOMAIN = 'forgebridge/v1/changeset-content';
+
+/**
+ * A stable fingerprint of the work a ChangeSet would do.
+ *
+ * This is what binds an approval to what was reviewed. `#approve` requires the
+ * approver to echo the digest the diff showed them, and refuses when it does
+ * not match what is stored now — so an approval is a statement about *this
+ * content*, not about an identifier that content might later be swapped under
+ * (ADR-012: approval is the safety mechanism, and approving a diff you were not
+ * shown is approving nothing).
+ *
+ * Two decisions worth stating:
+ *
+ * - It hashes `operations` and nothing else, because operations are the whole
+ *   of what reaches the place. The other fields either cannot change what is
+ *   written (`summary`) or are computed by this daemon rather than supplied
+ *   (`validation`, `status`), and folding a daemon-computed timestamp in would
+ *   make the digest churn between the diff and the approval for no gain.
+ * - It canonicalises with `canonicalJson`, the same function the envelope MAC
+ *   uses, rather than `JSON.stringify`. A second canonicalisation is a second
+ *   thing that can disagree with the first, and key order out of `JSON.stringify`
+ *   follows insertion order — so a re-parsed ChangeSet could digest differently
+ *   from the one that was parsed a moment earlier.
+ *
+ * It is a fingerprint, not a capability: anyone holding the operations can
+ * compute it, and it grants nothing. Its job is to bind, not to authorise —
+ * `#assertProducer` is what authorises.
+ */
+export function changeSetContentDigest(operations: readonly Operation[]): string {
+  const hash = createHash('sha256');
+  hash.update(CONTENT_DIGEST_DOMAIN, 'utf8');
+  hash.update('\n');
+  hash.update(canonicalJson(operations), 'utf8');
+  return hash.digest('base64');
+}
 
 export interface DaemonLogger {
   info(message: string, fields?: Record<string, unknown>): void;
@@ -566,6 +609,29 @@ export class ForgeBridgeDaemon {
       );
     }
 
+    // A ChangeSet id is write-once, for the same reason `#applyResult` refuses a
+    // reused `journalId`: the id is what every later step names the work by, so
+    // a second set arriving under an existing id is not an update, it is a
+    // different proposal wearing the reviewed one's name. Overwriting let a
+    // producer swap the contents of a proposal *after* a human read its diff and
+    // *before* the approval landed — and reset an already-approved, applying or
+    // applied set back to `validated` while it was at it.
+    //
+    // Refused rather than minted here: the daemon could assign the id itself and
+    // sidestep the collision, but then a producer that retried a lost response
+    // would silently create a second proposal, the id it recorded would name
+    // nothing, and the swap would become quiet instead of loud. The cost of
+    // refusing is that a producer retrying a request whose response it never saw
+    // must mint a fresh id — a retry that reads as a duplicate proposal, which is
+    // what it is.
+    if (await this.store.getChangeSet(changeSet.id)) {
+      throw new ForgeBridgeError(
+        'invalid_request',
+        `changeset ${changeSet.id} already exists and cannot be replaced`,
+        'Mint a fresh ChangeSet id; an id that has been proposed once names that proposal for good.',
+      );
+    }
+
     const current = await this.store.getProjectVersion(changeSet.projectId);
     if (changeSet.baseVersion !== current) {
       // No merge, no last-write-wins: the producer rebases (PROTOCOL invariant 1).
@@ -598,11 +664,30 @@ export class ForgeBridgeDaemon {
     }
 
     // The verdict rides on the response so a producer does not have to fetch
-    // the diff to learn that its set is already dead.
+    // the diff to learn that its set is already dead. The content digest rides
+    // along too — not as a shortcut past the diff, since approval requires the
+    // digest of what was *reviewed* and the reviewer reads it there, but so a
+    // producer can tell at a glance that the daemon stored the operations it
+    // sent and not something else.
+    //
+    // TODO(M31): this response has no schema, so `scripts/generate-schemas.ts`
+    // transcribes it by hand into `HANDLER_SHAPED_SCHEMAS` — and that
+    // transcription does not list `contentDigest`, because a hand copy is a copy
+    // that goes stale. The generator's own TODO(M31) asks for the same thing
+    // from the other side: give this handler a `SubmitChangeSetResponse` in
+    // `wire.ts` and delete the transcription. Both halves have to land together
+    // — the transcription currently *wins* over a wire schema of the same name,
+    // so adding one here alone would change nothing.
     writeJson(
       res,
       201,
-      { changeSetId: stored.id, status, baseVersion: stored.baseVersion, validation },
+      {
+        changeSetId: stored.id,
+        status,
+        baseVersion: stored.baseVersion,
+        contentDigest: changeSetContentDigest(stored.operations),
+        validation,
+      },
       cors,
     );
   }
@@ -652,10 +737,20 @@ export class ForgeBridgeDaemon {
         total: changeSet.operations.length,
         creates: countOps(changeSet.operations, 'createInstance'),
         setProperties: countOps(changeSet.operations, 'setProperty'),
-        scripts: countOps(changeSet.operations, 'writeScript'),
+        // Every operation that installs Luau, counted with the same predicate
+        // the analyser gate uses to decide what it must read. Counting only
+        // `writeScript` reported `scripts: 0` for a ChangeSet whose Script
+        // arrived as a `createInstance` carrying `Source` — a set the analyser
+        // was checking and the summary said contained no code at all. The two
+        // numbers cannot drift now because there is only one definition of
+        // "carries Luau".
+        scripts: changeSet.operations.filter(carriesLuauSource).length,
         moves: countOps(changeSet.operations, 'moveInstance'),
         deletes: countOps(changeSet.operations, 'deleteInstance'),
       },
+      // What an approver must echo back on approve. Rendering it here is what
+      // makes the approval a statement about the content on this page.
+      contentDigest: changeSetContentDigest(changeSet.operations),
       operations,
       ...(changeSet.validation ? { validation: changeSet.validation } : {}),
       treeAware: false,
@@ -672,6 +767,31 @@ export class ForgeBridgeDaemon {
   ): Promise<void> {
     const body = parseOrThrow(ApproveRequest, await readJson(req, 16 * 1024), 'approve request');
     const changeSet = await this.#requireChangeSet(id);
+
+    // First, before any other question about this set: is it the set that was
+    // approved? Everything below decides whether *this content* may be applied,
+    // and none of it means anything if the content is not what the approver
+    // read. The approver echoes the digest `GET /v1/changesets/:id/diff` showed
+    // them; a mismatch means the operations moved between the reading and the
+    // yes, and the yes does not cover them.
+    //
+    // This is the property that survives: ids are write-once now, so nothing on
+    // the wire can move the content today — but "no code path currently does
+    // this" is not a guarantee, and an approval bound to an identifier alone
+    // would be re-broken by the first code path that learned to update a set in
+    // place. Bound to content, such a path is a refusal rather than a bypass.
+    //
+    // A plain comparison, not `timingSafeEqual`: the digest is derived from
+    // content the caller already holds, so there is no secret here to leak
+    // through timing. It authorises nothing — `#assertProducer` above did that.
+    const digest = changeSetContentDigest(changeSet.operations);
+    if (body.contentDigest !== digest) {
+      throw new ForgeBridgeError(
+        'invalid_request',
+        'contentDigest does not match the operations stored for this changeset',
+        'Re-read GET /v1/changesets/:id/diff and approve the digest it reports. The set you reviewed is not the set on this id.',
+      );
+    }
 
     if (changeSet.status !== 'proposed' && changeSet.status !== 'validated') {
       throw new ForgeBridgeError(
@@ -1185,8 +1305,22 @@ function countOps(operations: readonly Operation[], kind: Operation['op']): numb
 
 function describeOperation(operation: Operation): string {
   switch (operation.op) {
-    case 'createInstance':
-      return `create ${operation.className} at ${operation.path}`;
+    case 'createInstance': {
+      // Not a bare "create Script at <path>". A `createInstance` carrying a
+      // `Source` property installs Luau exactly as `writeScript` does, and a
+      // one-line summary that does not say so is the line a reviewer skims
+      // before approving code they never saw.
+      const source = sourceTextOf(operation.properties.Source);
+      // A readable Source is reported as source, so it is not also counted as
+      // one of the properties; an unreadable one is, because that is where the
+      // diff shows it.
+      const others = Object.keys(operation.properties).length - (source !== null ? 1 : 0);
+      const parts: string[] = [];
+      if (source !== null) parts.push(`${Buffer.byteLength(source, 'utf8')} bytes of Source`);
+      if (others > 0) parts.push(`${others} propert${others === 1 ? 'y' : 'ies'}`);
+      const head = `create ${operation.className} at ${operation.path}`;
+      return parts.length > 0 ? `${head} with ${parts.join(' and ')}` : head;
+    }
     case 'setProperty':
       return `set ${operation.path}.${operation.property}`;
     case 'writeScript':
@@ -1198,8 +1332,44 @@ function describeOperation(operation: Operation): string {
   }
 }
 
-function afterValueOf(operation: Operation): { after?: string } {
-  if (operation.op === 'writeScript') return { after: operation.source };
-  if (operation.op === 'setProperty') return { after: JSON.stringify(operation.value) };
-  return {};
+/**
+ * The value an operation writes, rendered for a human.
+ *
+ * `createInstance` used to render as nothing at all: its property bag was
+ * dropped, so a Script created with `Source: print("pwned")` in that bag showed
+ * in the diff as one line naming a class and a path, with no code and no
+ * property on the page. ADR-012 makes approval the safety mechanism; a diff
+ * that omits the Luau being installed turns that mechanism into a formality.
+ *
+ * So `Source` comes back in `after`, as raw Luau, exactly the way `writeScript`
+ * renders it — a reviewer should not have to know which of two operations
+ * installed a script to read it — and everything else in the bag comes back in
+ * `properties`. A `Source` that is not a string has no source text to show, so
+ * it stays in `properties` as its JSON, where it is at least visible;
+ * `luau/source-not-readable` has already failed the verdict for it.
+ */
+function afterValueOf(operation: Operation): { after?: string; properties?: Record<string, string> } {
+  switch (operation.op) {
+    case 'writeScript':
+      return { after: operation.source };
+    case 'setProperty':
+      return { after: JSON.stringify(operation.value) };
+    case 'createInstance': {
+      const properties: Record<string, string> = {};
+      let after: string | undefined;
+      for (const [name, value] of Object.entries(operation.properties)) {
+        const source = name === 'Source' ? sourceTextOf(value) : null;
+        if (source !== null) after = source;
+        else properties[name] = JSON.stringify(value);
+      }
+      return {
+        ...(after !== undefined ? { after } : {}),
+        ...(Object.keys(properties).length > 0 ? { properties } : {}),
+      };
+    }
+    case 'moveInstance':
+    case 'deleteInstance':
+      // Both are fully described by their paths, which the diff already carries.
+      return {};
+  }
 }

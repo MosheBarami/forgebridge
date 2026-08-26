@@ -6,7 +6,7 @@ import {
   ProtocolError,
   type ChangeSet,
 } from '@forgebridge/protocol';
-import type { ApprovalGrant } from './approval.js';
+import type { ApplyApprovalGrant, RollbackApprovalGrant } from './approval.js';
 import {
   ApproveResponse,
   DiffResponse,
@@ -29,17 +29,18 @@ import {
  * the next connector would have to reimplement it and would get it slightly
  * wrong.
  *
- * `approve` and `rollback` take an `ApprovalGrant` rather than the fields the
- * daemon wants. That is not ergonomics: it means the two write endpoints are
+ * `approve` and `rollback` take a grant rather than the fields the daemon
+ * wants. That is not ergonomics: it means the two write endpoints are
  * unreachable without a grant, and TypeScript refuses to compile a call that
- * has not obtained one. See `approval.ts`.
+ * has not obtained one — including one whose grant names no reviewed content,
+ * because `ApplyApprovalGrant.contentDigest` is required. See `approval.ts`.
  */
 export interface ForgeBridgeBackend {
   propose(changeSet: ChangeSet): Promise<ProposeResponse>;
   diff(changeSetId: string): Promise<DiffResponse>;
-  approve(grant: ApprovalGrant): Promise<ApproveResponse>;
+  approve(grant: ApplyApprovalGrant): Promise<ApproveResponse>;
   rollback(
-    grant: ApprovalGrant,
+    grant: RollbackApprovalGrant,
     request: { journalId: string; expectedVersion: number; reason?: string },
   ): Promise<RollbackResponse>;
   models(): Promise<ModelsResponse>;
@@ -90,10 +91,14 @@ export class DaemonBackend implements ForgeBridgeBackend {
     return await this.#call('GET', `/v1/changesets/${encodeURIComponent(changeSetId)}/diff`, DiffResponse);
   }
 
-  async approve(grant: ApprovalGrant): Promise<ApproveResponse> {
+  async approve(grant: ApplyApprovalGrant): Promise<ApproveResponse> {
     // Every field of this body comes from the grant. None of it can come from
     // the A2A request, because the A2A request never reaches this function.
+    // `contentDigest` included: the daemon refuses an approve whose digest does
+    // not match the operations it holds, so what this sends is the human's
+    // reading of the set, not this connector's.
     return await this.#call('POST', `/v1/changesets/${encodeURIComponent(grant.subject)}/approve`, ApproveResponse, {
+      contentDigest: grant.contentDigest,
       approvedBy: grant.approvedBy,
       confirmBulkDelete: grant.confirmBulkDelete ?? false,
       ...(grant.note ? { note: grant.note } : {}),
@@ -101,7 +106,7 @@ export class DaemonBackend implements ForgeBridgeBackend {
   }
 
   async rollback(
-    grant: ApprovalGrant,
+    grant: RollbackApprovalGrant,
     request: { journalId: string; expectedVersion: number; reason?: string },
   ): Promise<RollbackResponse> {
     return await this.#call('POST', `/v1/journal/${encodeURIComponent(request.journalId)}/rollback`, RollbackResponse, {

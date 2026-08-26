@@ -16,7 +16,7 @@
       "description": "The local daemon. Loopback only, and it refuses any request whose Host header is not a loopback address.",
       "variables": {
         "port": {
-          "default": "8787"
+          "default": "7317"
         }
       }
     }
@@ -1386,6 +1386,11 @@
       "ApproveRequest": {
         "type": "object",
         "properties": {
+          "contentDigest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
           "approvedBy": {
             "type": "string",
             "maxLength": 120,
@@ -1400,6 +1405,9 @@
             "default": false
           }
         },
+        "required": [
+          "contentDigest"
+        ],
         "additionalProperties": true
       },
       "ApproveResponse": {
@@ -1673,6 +1681,11 @@
             ],
             "additionalProperties": true
           },
+          "contentDigest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
           "operations": {
             "type": "array",
             "items": {
@@ -1696,6 +1709,7 @@
           "currentVersion",
           "stale",
           "counts",
+          "contentDigest",
           "operations",
           "treeAware"
         ],
@@ -2708,6 +2722,12 @@
           },
           "after": {
             "type": "string"
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           }
         },
         "required": [

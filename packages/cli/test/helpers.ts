@@ -48,6 +48,9 @@ export function diffFixture(overrides: Partial<ChangeSetDiff> = {}): ChangeSetDi
     currentVersion: 3,
     stale: false,
     counts: { total: 1, creates: 1, setProperties: 0, scripts: 0, moves: 0, deletes: 0 },
+    // What an approver echoes back on approve. The daemon renders it on every
+    // diff, so a fixture without one is a diff no daemon would ever serve.
+    contentDigest: 'sha256:the-digest-this-diff-reported',
     operations: [
       {
         index: 0,
