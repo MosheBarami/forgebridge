@@ -1,0 +1,7 @@
+# Blank issues are disabled so that reports arrive with the context a maintainer
+# would otherwise have to ask for, one round trip at a time.
+#
+# TODO(M50): add `contact_links` here once the discussions board and docs site
+# have real URLs — a link to a chat room, and a link to the docs. No URL is
+# invented in this file, so the section is absent rather than wrong.
+blank_issues_enabled: false

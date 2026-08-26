@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Repository scripts are not a published package — they emit nothing and are run
+  // through tsx. They still need a project of their own: they import package sources
+  // directly, and without this the one place where a script and a package can disagree
+  // about a type is the one place nothing typechecks.
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"]
+}

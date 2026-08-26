@@ -1,0 +1,19 @@
+{
+  "name": "@forgebridge/model-registry",
+  "version": "0.1.0",
+  "description": "The synced model catalog and the queries over it. `free` is derived, never asserted (ADR-007).",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "files": ["dist", "data"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "echo 'lint: model-registry (configured in M04 follow-up)'"
+  },
+  "dependencies": { "zod": "^3.24.1" },
+  "devDependencies": { "@types/node": "^22.10.2", "typescript": "^5.7.2", "vitest": "^2.1.8" }
+}

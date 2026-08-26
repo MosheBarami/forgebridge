@@ -1,0 +1,107 @@
+name: Bug report
+description: Something behaves differently from how it is documented.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Not for security issues.** If this could let someone read a key, apply a ChangeSet
+        without approval, or reach a place they should not — close this and follow
+        `SECURITY.md` (repository root) instead. Private first, always.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+      placeholder: |
+        I ran `forgebridge apply` on a ChangeSet with 3 operations.
+        The second operation failed but the run reported success.
+        I expected a partial-apply result naming the operation that failed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >
+        Smallest sequence that shows it. A ChangeSet that triggers it is worth more than a
+        paragraph — but redact anything you would not publish.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part
+      description: Best guess is fine.
+      multiple: true
+      options:
+        - plugin (Roblox Studio)
+        - packages/daemon (local transport)
+        - packages/protocol
+        - packages/core (pipeline, router, validation)
+        - packages/mcp or another connector
+        - packages/cli
+        - packages/model-registry (model catalog)
+        - apps/web
+        - apps/relay
+        - CI, scripts, or the repository gates
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - Local daemon (default)
+        - Cloud relay
+        - Neither / not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Package version, plugin version, or the commit SHA you are on.
+      placeholder: "packages/cli 0.1.0 · plugin 0.1.0 · commit abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, and Roblox Studio version if the plugin is involved.
+      placeholder: "macOS 15.2 · Node 22.12.0 · Studio 0.6xx"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or run output
+      description: >
+        The run log names every model attempted and why it moved on — that is usually the
+        useful part. Rendered as a code block automatically.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Before you post
+      options:
+        - label: I have removed API keys, tokens, pairing codes, and anything else secret from the text above.
+          required: true
+        - label: I searched existing issues.
+          required: false

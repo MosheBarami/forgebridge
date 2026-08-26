@@ -1,0 +1,40 @@
+{
+  "$about": [
+    "Provenance manifest for third-party brand assets. Policy: docs/BRAND-ASSETS.md.",
+    "Every file under assets/brands/ must have an entry here or CI fails.",
+    "JSON has no comments, so the documentation lives in these $-prefixed keys.",
+    "scripts/verify-assets.ts ignores $-keys when checking coverage — they are notes,",
+    "not entries — but it still refuses any object anywhere in this file that sets",
+    "generated: true.",
+    "There are deliberately no real entries yet: no logo file has been retrieved from a",
+    "vendor's own brand page and reviewed. An empty manifest is the honest state."
+  ],
+
+  "$shape": {
+    "<vendor-slug>": {
+      "files": "string[] — paths relative to assets/brands/. Non-empty, no leading / and no '..'.",
+      "sourceUrl": "string — https:// URL of the vendor's OWN brand/press/media-kit page. Never guessed, never a CDN hotlink, never example.com.",
+      "retrievedAt": "string — YYYY-MM-DD, the day a human downloaded the file from sourceUrl.",
+      "licence": "string — the terms the asset is used under, in the vendor's own words where they state them.",
+      "constraints": "string — what the vendor forbids (recolouring, reproportioning, implying endorsement).",
+      "usage": "string[] — the product surfaces this mark appears on.",
+      "sha256": "object — one lowercase 64-char hex digest per listed file. Proves the byte content has not been swapped since review.",
+      "generated": "boolean — must be false. true is a hard CI failure; AI-drawn marks are forbidden (ADR-002)."
+    }
+  },
+
+  "$example": {
+    "$note": "A complete entry, shown for shape only. The values below are placeholders and this key is skipped by the coverage check; a real entry is named for its vendor and its sourceUrl points at that vendor's site.",
+    "files": ["<vendor-slug>/logo.svg", "<vendor-slug>/mark.svg"],
+    "sourceUrl": "https://<the vendor's own brand or press page>",
+    "retrievedAt": "2026-01-31",
+    "licence": "Trademark of <Vendor>, used nominatively to identify the service. Not covered by this repository's MIT licence.",
+    "constraints": "No modification of colour or proportion. Not an endorsement or affiliation.",
+    "usage": ["model-selector", "docs"],
+    "sha256": {
+      "<vendor-slug>/logo.svg": "0000000000000000000000000000000000000000000000000000000000000000",
+      "<vendor-slug>/mark.svg": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "generated": false
+  }
+}

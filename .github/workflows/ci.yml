@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default. A job that needs more asks for it explicitly.
+permissions:
+  contents: read
+
+# A force-push supersedes the run it interrupted; main is never cancelled so the
+# default branch always has a complete, attributable result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Turborepo phones home for remote caching unless told not to. Promise 3 is
+  # "no telemetry by default"; a project that leaks its own build metadata while
+  # saying that has not earned the sentence.
+  TURBO_TELEMETRY_DISABLED: 1
+  DO_NOT_TRACK: 1
+
+jobs:
+  # Runs first and fast. These gates turn written policy into a merge blocker,
+  # and they need no build output, so a boundary violation fails in seconds
+  # rather than after a full workspace build.
+  gates:
+    name: Repository gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: "Boundaries — protocol deps, no vendor SDK in core, neutral core, no app imports"
+        run: npm run verify:boundaries
+
+      - name: "Brand assets — provenance, checksums, nothing generated"
+        run: npm run verify:assets
+
+      # Promise 4 in README.md and GOVERNANCE.md says in as many words that this
+      # runs in CI. A gate that exists but is never invoked would make that
+      # sentence the same kind of unchecked claim the gate was written to stop,
+      # so `scripts/__tests__/docs-claims.test.ts` asserts this step is here.
+      - name: "Key custody — no credential-shaped field reaches storage (ADR-006, T1)"
+        run: npm run verify:no-key-storage
+
+      # ADR-013 is the one decision in this repository with no revisit trigger.
+      # Its stated mitigation was a secret scan on the first commit and every
+      # commit after; nothing ran until this step existed, which made the ADR's
+      # own safety net the same kind of unchecked claim the other gates were
+      # written to stop. `scripts/__tests__/docs-claims.test.ts` asserts this
+      # step is here, and ADR-013 now names the check that actually runs.
+      - name: "Publication — no secret-shaped or machine-local string in the tree (ADR-013)"
+        run: npm run verify:no-secrets
+
+      - name: Gate self-tests
+        # A gate that cannot fail is decoration. These tests assert each rule
+        # actually rejects a violating fixture.
+        run: npx vitest run --dir scripts
+
+      # TODO(M41): the Studio plugin has 118 Luau tests (`plugin/tests/run.luau`,
+      # documented in plugin/BUILD.md) and nothing in CI runs them, so a change to
+      # plugin/src is currently reviewed on a human's word that they still pass.
+      # Adding the step needs a pinned Luau toolchain — the version and its
+      # provenance are a decision for whoever owns the plugin's release, not
+      # something to guess at here. Owner: plugin + M41.
+
+  check:
+    # Deliberately not named for lint. `npm run lint` runs below and is a no-op —
+    # every package's script is an `echo` and no linter is configured (TODO(M04)).
+    # A job title that reads "lint" would make a reviewer count a gate this repo
+    # does not have.
+    name: typecheck · test · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - name: "lint (placeholder — no linter configured, TODO(M04))"
+        run: npm run lint
+
+      - run: npm run test
+
+      - run: npm run build
+
+      - name: Fail if the build wrote into the working tree
+        # No generated artefact is committed in this repository today — build
+        # output (`dist/`, `.turbo/`, `*.tsbuildinfo`) is gitignored, so a clean
+        # tree after `npm run build` is the expected state and this step should
+        # never fire. What it catches is the ways that quietly stops being true:
+        # a build step writing back into `src/`, a task mutating
+        # `package-lock.json`, or a new output path that nothing added to
+        # `.gitignore` and that would otherwise start arriving in unrelated PRs
+        # as noise.
+        #
+        # It becomes a staleness check when M08 lands and the OpenAPI, JSON
+        # Schema and Python projections of `packages/protocol` are generated and
+        # committed: from then on a diff here means the committed output no
+        # longer matches the schemas, and the regenerated files have to land in
+        # the PR rather than appear at release time.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::The build modified tracked files. Commit the regenerated output."
+            git status --porcelain
+            git diff
+            exit 1
+          fi

@@ -1,0 +1,39 @@
+ForgeBridge
+Copyright (c) 2026 ForgeBridge contributors
+
+This product is licensed under the MIT License (see LICENSE).
+
+────────────────────────────────────────────────────────────────────────────
+TRADEMARKS — NOT COVERED BY THE MIT LICENSE
+────────────────────────────────────────────────────────────────────────────
+
+The MIT License above covers this project's own source code. It does not, and
+cannot, grant any right in third-party trademarks, service marks, logos, or
+trade names.
+
+Third-party names and logos that appear in this repository (under
+`assets/brands/`) are the property of their respective owners and are used
+nominatively, to identify the services ForgeBridge connects to. Their presence
+is not an endorsement by, affiliation with, or sponsorship from those owners.
+
+Every such asset is recorded in `assets/brands/manifest.json` with its official
+source URL, the terms it is used under, the date it was retrieved, and its
+SHA-256 checksum. `scripts/verify-assets.ts` fails the build if any asset is
+present without a complete record. No brand asset in this repository is
+AI-generated, redrawn, or approximated; where an official asset cannot be used
+under acceptable terms, a plain text label is used instead.
+
+"apple.gg" — the name, the mark, and the associated visual identity — is
+reserved by the project owner and is NOT licensed under the MIT License. You
+may fork and redistribute this code freely; you may not present your fork as
+apple.gg. The "ForgeBridge" name carries no such reservation.
+
+────────────────────────────────────────────────────────────────────────────
+LINEAGE
+────────────────────────────────────────────────────────────────────────────
+
+This project has a private predecessor repository which is not published, and
+whose history was deliberately not carried forward; see
+docs/architecture/adr-013. No code from it is present in this repository yet.
+When the web application is ported (M32-M39) this notice will name what was
+carried over.

@@ -1,0 +1,92 @@
+name: Feature request
+description: Propose something the bridge should do and does not.
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things worth knowing before you write:
+
+        - **Check `docs/MILESTONES.md` first.** Fifty
+          milestones are already planned. If yours is one of them, say so here and we will
+          talk about sequence rather than scope.
+        - **Some changes need an RFC, not an issue.** Anything touching
+          `packages/protocol` or `plugin/` goes through the RFC process in
+          `CONTRIBUTING.md`. Open this issue first anyway —
+          it is the right place to find out whether the idea is wanted before you write one.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do that you cannot do today? Describe the situation, not the
+        solution — the best feature is often not the one first imagined.
+      placeholder: |
+        I want an agent in CI to propose changes, but I do not want it able to apply them,
+        and there is currently no way to express that.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Your proposed shape, if you have one. "I don't know yet" is a fine answer.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered
+      description: >
+        Workarounds you are using now, and approaches you rejected. Knowing what does not
+        work is often more useful than knowing what might.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part would change
+      multiple: true
+      options:
+        - packages/protocol (needs an RFC)
+        - plugin — Roblox Studio (needs an RFC)
+        - packages/core (pipeline, router, validation)
+        - packages/daemon or apps/relay (transports)
+        - a connector — MCP, A2A, CLI, SDK
+        - packages/model-registry (models and providers)
+        - apps/web
+        - docs, examples, or tooling
+        - not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Does this fit the constraints?
+      description: >
+        These are hard constraints, not preferences. A proposal that breaks one is not
+        rejected out of hand, but it needs to say so plainly and argue the case.
+      options:
+        - label: It does not require money to change hands — free forever, no credits, no paid tier.
+          required: false
+        - label: It does not require a user's API key to leave their machine.
+          required: false
+        - label: It works with no account, or degrades honestly without one.
+          required: false
+        - label: It does not tie the core to one vendor — self-hosting still works.
+          required: false
+        - label: It does not let a producer approve its own ChangeSet.
+          required: false
+
+  - type: textarea
+    id: constraint-conflict
+    attributes:
+      label: If you left a box unchecked, say why
+      description: An honest conflict is discussable. An unmentioned one is found in review.
+    validations:
+      required: false

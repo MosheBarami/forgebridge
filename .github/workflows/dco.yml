@@ -1,0 +1,91 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signoff:
+    name: Every commit signed off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history, so both ends of the PR range are reachable.
+          fetch-depth: 0
+
+      - name: Check Developer Certificate of Origin sign-off
+        # Implemented in shell rather than pulling a third-party action: this
+        # workflow gates every contribution, and the supply chain of the thing
+        # that guards the supply chain should be short enough to read.
+        #
+        # SHAs arrive via env, never interpolated into the script body.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          commits="$(git rev-list "${BASE_SHA}..${HEAD_SHA}")"
+
+          if [ -z "${commits}" ]; then
+            echo "No commits in range — nothing to check."
+            exit 0
+          fi
+
+          failed=0
+          checked=0
+
+          for sha in ${commits}; do
+            # A merge commit introduces no authored content of its own.
+            parents="$(git rev-list --parents -n 1 "${sha}" | wc -w)"
+            if [ "${parents}" -gt 2 ]; then
+              continue
+            fi
+
+            checked=$((checked + 1))
+            author_email="$(git show -s --format='%ae' "${sha}" | tr '[:upper:]' '[:lower:]')"
+            subject="$(git show -s --format='%s' "${sha}")"
+
+            # Compared as literal strings: an author email may contain regex
+            # metacharacters, and a '+' in an address must not become a quantifier.
+            signoff_emails="$(
+              git show -s --format='%B' "${sha}" \
+                | sed -n 's/^[Ss]igned-off-by:.*<\(.*\)>[[:space:]]*$/\1/p' \
+                | tr '[:upper:]' '[:lower:]'
+            )"
+
+            if printf '%s\n' "${signoff_emails}" | grep -Fxq "${author_email}"; then
+              echo "ok   ${sha:0:8}  ${subject}"
+            else
+              failed=$((failed + 1))
+              echo "::error::Commit ${sha:0:8} (\"${subject}\") has no 'Signed-off-by: ... <${author_email}>' line matching its author."
+            fi
+          done
+
+          echo ""
+          echo "Checked ${checked} commit(s); ${failed} missing a sign-off."
+
+          if [ "${failed}" -gt 0 ]; then
+            cat <<'HELP'
+
+          Every commit needs a Developer Certificate of Origin sign-off whose email
+          matches the commit author. See CONTRIBUTING.md.
+
+            Fix the most recent commit:   git commit --amend -s --no-edit
+            Fix a whole branch:           git rebase --signoff main
+            Then:                         git push --force-with-lease
+
+          Signing off certifies that you wrote the contribution or have the right to
+          submit it under the project's licence (https://developercertificate.org/).
+          It transfers nothing. This project has no CLA and never will.
+          HELP
+            exit 1
+          fi

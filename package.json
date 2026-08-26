@@ -1,0 +1,30 @@
+{
+  "name": "forgebridge-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A universal bridge between any AI model or agent and Roblox Studio",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "packageManager": "npm@10.9.2",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck && tsc -p scripts/tsconfig.json --noEmit",
+    "check": "turbo run typecheck lint test build",
+    "sync:catalog": "tsx scripts/sync-catalog.ts",
+    "verify:assets": "tsx scripts/verify-assets.ts",
+    "verify:boundaries": "tsx scripts/verify-boundaries.ts",
+    "verify:no-key-storage": "tsx scripts/verify-no-key-storage.ts",
+    "verify:no-secrets": "tsx scripts/verify-no-secrets.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

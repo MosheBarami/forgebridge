@@ -1,0 +1,115 @@
+name: Provider request
+description: Ask for a model provider, local runtime, or agent connector to be supported.
+labels: [provider, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The model catalog is **synced from live provider catalogs, never hand-written**
+        (`docs/architecture/adr-007-registry-as-synced-data.md`). So
+        this issue is not for adding a single model — if a provider is already supported, its
+        models arrive on their own through the weekly sync. This is for a provider, runtime,
+        or connector that has no adapter yet.
+
+        **On logos, before you ask:** we use the official asset from the vendor's own brand
+        page, with its source URL, licence, retrieval date, and checksum recorded — or we use
+        a plain text label. We will not draw, trace, or generate an approximation of anyone's
+        mark. An AI-drawn logo is wrong, unlicensed, and looks like an endorsement. If the
+        vendor publishes no usable asset, a text label is the finished answer, not a failure.
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider, runtime, or connector
+      placeholder: "e.g. a hosted inference API, a local runtime, or an agent framework"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind
+      options:
+        - Hosted model API (bring your own key)
+        - Model aggregator or router
+        - Local model runtime (runs on the user's machine)
+        - Agent, IDE, or framework that would connect as a producer
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: api-docs
+    attributes:
+      label: Link to their API documentation
+      description: The page describing authentication and the request format.
+    validations:
+      required: true
+
+  - type: input
+    id: models-endpoint
+    attributes:
+      label: Link to their model-catalog endpoint, if they publish one
+      description: >
+        The endpoint listing available models with context windows, capabilities and pricing.
+        Without one, the sync cannot derive anything and every fact would have to be asserted
+        by hand — which is exactly what ADR-007 forbids. Say "none that I can find" if so;
+        do not guess a URL.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: openai-compatible
+    attributes:
+      label: Is the API OpenAI-compatible?
+      description: Compatible endpoints are usually a thin adapter rather than a new one.
+      options:
+        - "Yes"
+        - "No"
+        - "Partially — some endpoints only"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: capabilities
+    attributes:
+      label: Which capabilities does it support?
+      description: >
+        The router filters on these before it picks a model. Tool calling is the one that
+        matters most — a model that cannot call tools cannot drive the pipeline.
+      options:
+        - label: Tool / function calling
+        - label: Structured output or JSON mode
+        - label: Streaming
+        - label: Vision (image input)
+        - label: Not sure
+
+  - type: input
+    id: brand-page
+    attributes:
+      label: Link to their official brand or press page
+      description: >
+        Their own domain — press kit, media kit, or brand guidelines. Not a logo aggregator,
+        not an image search result, not a CDN hotlink. Leave this blank if they do not publish
+        one; that is a real answer and we will use a text label. Please do not guess a URL.
+    validations:
+      required: false
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this one
+      description: >
+        What it gives users that supported providers do not — a free tier, a context window,
+        a licence, running locally, a region. "It is popular" is a reason too, just a weaker one.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: offer
+    attributes:
+      label: Would you like to build it?
+      options:
+        - label: I would like to open the PR for this. (The five-minute checklist is in CONTRIBUTING.md.)
+          required: false
