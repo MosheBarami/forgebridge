@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "FontValue.schema.json",
+  "title": "FontValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Font"
+    },
+    "family": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "weight": {
+      "type": "string",
+      "pattern": "^[A-Za-z]+$",
+      "default": "Regular"
+    },
+    "style": {
+      "type": "string",
+      "enum": [
+        "Normal",
+        "Italic"
+      ],
+      "default": "Normal"
+    }
+  },
+  "required": [
+    "t",
+    "family"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ChangeSetStatus.schema.json",
+  "title": "ChangeSetStatus",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "draft",
+    "proposed",
+    "validated",
+    "approved",
+    "applying",
+    "applied",
+    "partial",
+    "failed",
+    "rejected",
+    "stale"
+  ]
+}

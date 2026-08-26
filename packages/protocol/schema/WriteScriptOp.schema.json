@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "WriteScriptOp.schema.json",
+  "title": "WriteScriptOp",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "op": {
+      "type": "string",
+      "const": "writeScript"
+    },
+    "path": {
+      "$ref": "#/$defs/InstancePath"
+    },
+    "scriptType": {
+      "$ref": "#/$defs/ScriptType"
+    },
+    "source": {
+      "type": "string",
+      "maxLength": 1048576
+    }
+  },
+  "required": [
+    "op",
+    "path",
+    "scriptType",
+    "source"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "InstancePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:Workspace|ServerScriptService|ServerStorage|ReplicatedStorage|ReplicatedFirst|StarterGui|StarterPack|StarterPlayer|Lighting|SoundService|Teams|Chat|TextChatService)(?:\\.[A-Za-z_][A-Za-z0-9_]{0,99}){0,31}$"
+    },
+    "ScriptType": {
+      "type": "string",
+      "enum": [
+        "Script",
+        "LocalScript",
+        "ModuleScript"
+      ]
+    }
+  }
+}

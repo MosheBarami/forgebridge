@@ -15,10 +15,12 @@
     "typecheck": "turbo run typecheck && tsc -p scripts/tsconfig.json --noEmit",
     "check": "turbo run typecheck lint test build",
     "sync:catalog": "tsx scripts/sync-catalog.ts",
+    "generate:schemas": "tsx scripts/generate-schemas.ts",
     "verify:assets": "tsx scripts/verify-assets.ts",
     "verify:boundaries": "tsx scripts/verify-boundaries.ts",
     "verify:no-key-storage": "tsx scripts/verify-no-key-storage.ts",
-    "verify:no-secrets": "tsx scripts/verify-no-secrets.ts"
+    "verify:no-secrets": "tsx scripts/verify-no-secrets.ts",
+    "verify:schemas": "tsx scripts/generate-schemas.ts --check"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

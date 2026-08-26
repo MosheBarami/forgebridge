@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ScriptType.schema.json",
+  "title": "ScriptType",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "Script",
+    "LocalScript",
+    "ModuleScript"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "Vector3Value.schema.json",
+  "title": "Vector3Value",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Vector3"
+    },
+    "x": {
+      "type": "number"
+    },
+    "y": {
+      "type": "number"
+    },
+    "z": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "t",
+    "x",
+    "y",
+    "z"
+  ],
+  "additionalProperties": true
+}

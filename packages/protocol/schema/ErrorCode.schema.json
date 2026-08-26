@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ErrorCode.schema.json",
+  "title": "ErrorCode",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "invalid_request",
+    "stale_base",
+    "not_approved",
+    "policy_violation",
+    "link_unpaired",
+    "link_unauthenticated",
+    "replay_detected",
+    "too_large",
+    "rate_limited",
+    "budget_exhausted",
+    "provider_unconfigured",
+    "unsupported_version",
+    "not_found",
+    "internal"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ColorSequenceValue.schema.json",
+  "title": "ColorSequenceValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "ColorSequence"
+    },
+    "keypoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "r": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "g": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "b": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "time",
+          "r",
+          "g",
+          "b"
+        ],
+        "additionalProperties": true
+      },
+      "minItems": 2,
+      "maxItems": 20
+    }
+  },
+  "required": [
+    "t",
+    "keypoints"
+  ],
+  "additionalProperties": true
+}

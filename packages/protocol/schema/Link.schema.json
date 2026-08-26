@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "Link.schema.json",
+  "title": "Link",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "projectId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "transport": {
+      "$ref": "#/$defs/TransportKind"
+    },
+    "state": {
+      "$ref": "#/$defs/LinkState"
+    },
+    "sessionKeyId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 64,
+      "default": null
+    },
+    "pluginVersion": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40,
+      "default": null
+    },
+    "studioVersion": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 40,
+      "default": null
+    },
+    "placeId": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "default": null
+    },
+    "lastSeenAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "default": null
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    }
+  },
+  "required": [
+    "id",
+    "projectId",
+    "transport",
+    "state",
+    "createdAt"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "LinkState": {
+      "type": "string",
+      "enum": [
+        "unpaired",
+        "pairing",
+        "paired",
+        "expired",
+        "revoked"
+      ]
+    },
+    "TransportKind": {
+      "type": "string",
+      "enum": [
+        "local-daemon",
+        "relay-tls",
+        "relay-e2e"
+      ]
+    }
+  }
+}

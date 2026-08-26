@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "TransportKind.schema.json",
+  "title": "TransportKind",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "local-daemon",
+    "relay-tls",
+    "relay-e2e"
+  ]
+}

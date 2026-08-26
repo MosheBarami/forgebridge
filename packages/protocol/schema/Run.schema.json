@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "Run.schema.json",
+  "title": "Run",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "projectId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 50000
+    },
+    "stage": {
+      "$ref": "#/$defs/RunStage",
+      "default": "queued"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus",
+      "default": "running"
+    },
+    "attempts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ModelAttempt"
+      },
+      "default": []
+    },
+    "changeSetIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "default": []
+    },
+    "producer": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "web",
+            "mcp",
+            "a2a",
+            "cli",
+            "sdk",
+            "rest"
+          ]
+        },
+        "client": {
+          "type": "string",
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": true
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "finishedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$",
+      "default": null
+    }
+  },
+  "required": [
+    "id",
+    "projectId",
+    "prompt",
+    "startedAt"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "AttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "rate-limited",
+        "context-exceeded",
+        "capability-missing",
+        "provider-error",
+        "timeout",
+        "refused",
+        "invalid-output",
+        "cancelled"
+      ]
+    },
+    "ModelAttempt": {
+      "type": "object",
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "providerSlug": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "outcome": {
+          "$ref": "#/$defs/AttemptOutcome"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "promptTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "completionTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "modelId",
+        "outcome",
+        "startedAt",
+        "durationMs"
+      ],
+      "additionalProperties": true
+    },
+    "RunStage": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "planning",
+        "generating",
+        "validating",
+        "awaiting-approval",
+        "applying",
+        "testing",
+        "done",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "RunStatus": {
+      "type": "string",
+      "enum": [
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ModelAttempt.schema.json",
+  "title": "ModelAttempt",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "modelId": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "providerSlug": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "outcome": {
+      "$ref": "#/$defs/AttemptOutcome"
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "promptTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "completionTokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "costUsd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 500
+    }
+  },
+  "required": [
+    "modelId",
+    "outcome",
+    "startedAt",
+    "durationMs"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "AttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "rate-limited",
+        "context-exceeded",
+        "capability-missing",
+        "provider-error",
+        "timeout",
+        "refused",
+        "invalid-output",
+        "cancelled"
+      ]
+    }
+  }
+}

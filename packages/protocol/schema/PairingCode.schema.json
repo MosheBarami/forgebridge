@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "PairingCode.schema.json",
+  "title": "PairingCode",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "minLength": 8,
+  "maxLength": 8,
+  "pattern": "^[ABCDEFGHJKMNPQRSTVWXYZ23456789]{8}$"
+}

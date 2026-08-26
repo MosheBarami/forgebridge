@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "MoveInstanceOp.schema.json",
+  "title": "MoveInstanceOp",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "op": {
+      "type": "string",
+      "const": "moveInstance"
+    },
+    "path": {
+      "$ref": "#/$defs/InstancePath"
+    },
+    "to": {
+      "$ref": "#/$defs/InstancePath"
+    }
+  },
+  "required": [
+    "op",
+    "path",
+    "to"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "InstancePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:Workspace|ServerScriptService|ServerStorage|ReplicatedStorage|ReplicatedFirst|StarterGui|StarterPack|StarterPlayer|Lighting|SoundService|Teams|Chat|TextChatService)(?:\\.[A-Za-z_][A-Za-z0-9_]{0,99}){0,31}$"
+    }
+  }
+}

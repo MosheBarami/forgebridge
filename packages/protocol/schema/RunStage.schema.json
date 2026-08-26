@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "RunStage.schema.json",
+  "title": "RunStage",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "queued",
+    "planning",
+    "generating",
+    "validating",
+    "awaiting-approval",
+    "applying",
+    "testing",
+    "done",
+    "failed",
+    "cancelled"
+  ]
+}

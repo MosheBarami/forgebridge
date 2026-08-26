@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "StringValue.schema.json",
+  "title": "StringValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "String"
+    },
+    "v": {
+      "type": "string",
+      "maxLength": 200000
+    }
+  },
+  "required": [
+    "t",
+    "v"
+  ],
+  "additionalProperties": true
+}

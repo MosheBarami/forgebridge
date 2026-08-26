@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "NumberValue.schema.json",
+  "title": "NumberValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Number"
+    },
+    "v": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "t",
+    "v"
+  ],
+  "additionalProperties": true
+}

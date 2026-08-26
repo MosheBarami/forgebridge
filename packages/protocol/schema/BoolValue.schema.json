@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "BoolValue.schema.json",
+  "title": "BoolValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Bool"
+    },
+    "v": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "t",
+    "v"
+  ],
+  "additionalProperties": true
+}

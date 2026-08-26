@@ -38,7 +38,24 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - uses: actions/setup-python@v5
+        with:
+          # The generated pydantic models are the third leg of the cross-language
+          # drift proof, and `packages/sdk-python` supports 3.10+. Pinning the
+          # oldest supported version here means a model that only parses on a
+          # newer interpreter fails on the version the package claims to support.
+          python-version: '3.10'
+
+      - name: Install the Python SDK so the drift proof has all three legs
+        run: python -m pip install -e "packages/sdk-python[dev]"
+
+      - name: "Python SDK — lint and tests"
+        working-directory: packages/sdk-python
+        # Unlike `npm run lint`, this one is a real linter with a real config, so
+        # it is named as a gate rather than as a placeholder.
+        run: |
+          python -m ruff check .
+          python -m pytest
 
       - name: "Boundaries — protocol deps, no vendor SDK in core, neutral core, no app imports"
         run: npm run verify:boundaries
@@ -65,6 +82,11 @@ jobs:
       - name: Gate self-tests
         # A gate that cannot fail is decoration. These tests assert each rule
         # actually rejects a violating fixture.
+        #
+        # `scripts/__tests__/schema-projection.test.ts` runs here too, and its
+        # Python leg needs an interpreter with pydantic. The step below installs
+        # one so that leg is exercised rather than skipped — a skipped drift test
+        # is indistinguishable from a passing one in a log.
         run: npx vitest run --dir scripts
 
       # TODO(M41): the Studio plugin has 118 Luau tests (`plugin/tests/run.luau`,
@@ -97,6 +119,19 @@ jobs:
         run: npm run lint
 
       - run: npm run test
+
+      # The three cross-language projections of `packages/protocol` are generated
+      # and committed (M08), so a schema edit that was never projected has to fail
+      # somewhere. It fails here.
+      #
+      # Not in the **Repository gates** job with the other four `verify:*` scripts,
+      # for one concrete reason: the generator reads the daemon's wire module for
+      # the request and response shapes of the `/v1` surface, and that module
+      # resolves `@forgebridge/protocol` through the workspace symlink — which
+      # needs `packages/protocol/dist`. `npm run typecheck` above builds it, so
+      # this step is placed after that and not before.
+      - name: "Schema projection — JSON Schema, OpenAPI and pydantic models match the Zod contract"
+        run: npm run verify:schemas
 
       - run: npm run build
 

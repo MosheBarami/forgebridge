@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "Color3Value.schema.json",
+  "title": "Color3Value",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Color3"
+    },
+    "r": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "g": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "b": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "required": [
+    "t",
+    "r",
+    "g",
+    "b"
+  ],
+  "additionalProperties": true
+}

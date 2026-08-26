@@ -113,6 +113,7 @@ npm run verify:boundaries     # the four machine-checked boundary rules (B1–B4
 npm run verify:assets         # brand-asset provenance
 npm run verify:no-key-storage # no credential-shaped field reaches storage (ADR-006)
 npm run verify:no-secrets     # no secret-shaped or machine-local string in the tree (ADR-013)
+npm run verify:schemas        # the JSON Schema, OpenAPI and Python projections are current
 npx vitest run --dir scripts  # the gates' own tests — a gate that cannot fail is decoration
 ```
 
@@ -127,9 +128,18 @@ Two things `npm run check` does not give you, despite appearances:
   `lint` script is an `echo` — there is no linter configured in this repository (TODO(M04),
   and configuring one is its own row, M04b). A green `check` says nothing was linted. Match the
   surrounding code by hand until that lands.
-- **The four `verify:*` gates are not in it.** They are the list above, and CI runs them in
-  their own job (**Repository gates**), which needs no build output and so fails in seconds.
+- **The `verify:*` gates are not in it.** They are the list above. Four of them —
+  `verify:boundaries`, `verify:assets`, `verify:no-key-storage`, `verify:no-secrets` — run in
+  their own CI job (**Repository gates**), which needs no build output and so fails in seconds.
+  `verify:schemas` is the exception: it reads the daemon's wire module, which resolves
+  `@forgebridge/protocol` through the workspace symlink, so it runs after the build in the
+  **typecheck · test · build** job. Run `npm run check` first if you are running it by hand.
   A contributor who runs only `check` passes locally and fails in CI.
+
+If you change a Zod schema in `packages/protocol/src`, run `npm run generate:schemas` and commit
+what it writes. The generated files under `packages/protocol/schema/` and the generated
+`models.py` under `packages/sdk-python` are part of the same change as the schema edit (M08);
+landing one without the other is the drift `verify:schemas` exists to refuse.
 
 ### Where code goes
 

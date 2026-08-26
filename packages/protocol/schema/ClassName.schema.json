@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ClassName.schema.json",
+  "title": "ClassName",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "pattern": "^[A-Za-z][A-Za-z0-9]*$",
+  "maxLength": 100
+}

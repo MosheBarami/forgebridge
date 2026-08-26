@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forgebridge"
+version = "0.1.0"
+description = "Python models and a thin /v1 client for the ForgeBridge protocol."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "The ForgeBridge contributors" }]
+keywords = ["forgebridge", "roblox", "changeset", "protocol"]
+classifiers = [
+  # Not published anywhere. `pip install forgebridge` installs somebody else's
+  # package or nothing at all; install this one from a checkout instead.
+  "Private :: Do Not Upload",
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Typing :: Typed",
+]
+
+# pydantic v2 only. The models are generated against v2 semantics — discriminated
+# unions, `Annotated` constraints, `model_serializer` — and none of that exists in v1.
+dependencies = ["pydantic>=2.7,<3", "annotated-types>=0.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.urls]
+Repository = "https://github.com/MPROGAMING/forgebridge"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forgebridge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated from the Zod contract. Its line lengths, its naming and its import
+# order are the generator's business; reformatting it by hand would be reverted
+# by the next `npm run generate:schemas` and would fail `npm run verify:schemas`
+# in between.
+"src/forgebridge/models.py" = ["ALL"]

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "Finding.schema.json",
+  "title": "Finding",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "rule": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+\\/[a-z0-9-]+$"
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "operationIndex": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "column": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "severity",
+    "rule",
+    "message"
+  ],
+  "additionalProperties": true
+}

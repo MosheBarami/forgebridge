@@ -1,0 +1,320 @@
+"""A thin client for the ForgeBridge `/v1` surface.
+
+Thin is the whole design (ADR-009). Every method here translates a call into an
+HTTP request and a response back into a generated model, and does nothing else:
+no retries that hide a `stale_base`, no queueing, no "convenience" that decides
+something the daemon is supposed to decide. A connector that makes a policy
+decision has put that decision somewhere `@forgebridge/core` cannot see it.
+
+The one rule this file exists to keep visible:
+
+    **Proposing and approving are separate calls, and there is no method that
+    does both.** `propose_changeset` submits; `approve_changeset` clears the set
+    to be delivered. ADR-012 puts a human between those two steps, and a helper
+    that chained them — however convenient — would let a model approve its own
+    work. If you find yourself wanting one, that is the gate working.
+
+Only the standard library is used for transport. A client whose job is to be
+easy to drop into somebody else's agent should not drag an HTTP stack in with
+it, and `transport=` lets a caller supply their own (httpx, requests, a test
+double) without this module knowing about any of them.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from .errors import ForgeBridgeError, TransportError
+from .models import (
+    ApplyResultAck,
+    ApproveRequest,
+    ApproveResponse,
+    ChangeSet,
+    ChangeSetDiff,
+    DeliveryEnvelope,
+    HealthResponse,
+    LinkStatusResponse,
+    ModelsSnapshot,
+    OutputResponse,
+    PairRequest,
+    PairResponse,
+    ProtocolError,
+    RollbackRequest,
+    RollbackResponse,
+    SubmitChangeSetResponse,
+)
+
+__all__ = ["PROTOCOL_VERSION", "ForgeBridgeClient", "HttpResponse", "Transport"]
+
+#: Kept in step with `packages/protocol/src/version.ts` by
+#: `tests/test_generated_models.py`, which reads the generated OpenAPI document.
+PROTOCOL_VERSION = "1.0.0"
+
+PRODUCER_TOKEN_HEADER = "X-ForgeBridge-Token"
+LINK_HEADER = "X-ForgeBridge-Link"
+MAC_HEADER = "X-ForgeBridge-Mac"
+PROTOCOL_VERSION_HEADER = "X-ForgeBridge-Protocol"
+
+
+@dataclass(frozen=True)
+class HttpResponse:
+    status: int
+    body: bytes
+
+
+#: `(method, url, headers, body) -> HttpResponse`. A transport must return the
+#: response for any status the server produced, including 4xx and 5xx: this
+#: client turns those into `ForgeBridgeError`, and a transport that raises on
+#: them instead hides the protocol's error codes.
+Transport = Callable[[str, str, Mapping[str, str], "bytes | None"], HttpResponse]
+
+
+def urllib_transport(timeout: float = 30.0) -> Transport:
+    """The default transport: `urllib`, no third-party dependency."""
+
+    def send(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> HttpResponse:
+        request = urllib.request.Request(url, data=body, method=method)
+        for name, value in headers.items():
+            request.add_header(name, value)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return HttpResponse(status=response.status, body=response.read())
+        except urllib.error.HTTPError as error:  # a real answer, just not a 2xx
+            return HttpResponse(status=error.code, body=error.read())
+        except urllib.error.URLError as error:
+            raise TransportError(str(error)) from error
+
+    return send
+
+
+class ForgeBridgeClient:
+    """Producer-side and consumer-side calls against one `/v1` base address.
+
+    `producer_token` is the per-process secret the daemon prints at startup.
+    Loopback is not an authentication boundary — any process on the machine can
+    reach the port — so every producer route requires it, and the two that
+    matter most are `approve_changeset` and `request_rollback`.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        producer_token: str | None = None,
+        link_id: str | None = None,
+        transport: Transport | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.producer_token = producer_token
+        self.link_id = link_id
+        self._send = transport or urllib_transport(timeout)
+
+    # ── public surface, unauthenticated ────────────────────────────────────
+
+    def health(self) -> HealthResponse:
+        return HealthResponse.model_validate(self._call("GET", "/v1/health"))
+
+    def link_status(self) -> LinkStatusResponse:
+        return LinkStatusResponse.model_validate(self._call("GET", "/v1/link"))
+
+    def models(self) -> ModelsSnapshot:
+        return ModelsSnapshot.model_validate(self._call("GET", "/v1/models"))
+
+    def pair(self, request: PairRequest) -> PairResponse:
+        return PairResponse.model_validate(self._call("POST", "/v1/link/pair", body=request))
+
+    # ── producer surface ───────────────────────────────────────────────────
+
+    def propose_changeset(self, changeset: ChangeSet) -> SubmitChangeSetResponse:
+        """Submit a ChangeSet. This does not approve it and does not apply it.
+
+        The daemon recomputes `validation` and overwrites `status`, so whatever
+        this client sends in those two fields is discarded — a set cannot arrive
+        pre-approved or carrying its own verdict.
+        """
+        return SubmitChangeSetResponse.model_validate(
+            self._call("POST", "/v1/changesets", body=changeset, producer=True)
+        )
+
+    def get_diff(self, changeset_id: str) -> ChangeSetDiff:
+        return ChangeSetDiff.model_validate(
+            self._call("GET", f"/v1/changesets/{_segment(changeset_id)}/diff", producer=True)
+        )
+
+    def approve_changeset(self, changeset_id: str, request: ApproveRequest) -> ApproveResponse:
+        """Clear a ChangeSet to be delivered to the paired Studio session.
+
+        Deliberately not reachable from `propose_changeset`. Approval is the one
+        step ADR-012 reserves for a human, and a producer that could do both in
+        one call would be a model approving its own work.
+
+        The daemon refuses a set whose validation failed, a stale `baseVersion`,
+        and a bulk delete without `confirm_bulk_delete` — none of which this
+        client second-guesses.
+        """
+        return ApproveResponse.model_validate(
+            self._call(
+                "POST",
+                f"/v1/changesets/{_segment(changeset_id)}/approve",
+                body=request,
+                producer=True,
+            )
+        )
+
+    def request_rollback(self, journal_id: str, request: RollbackRequest) -> RollbackResponse:
+        """Dispatch a rollback. Dispatched is not done.
+
+        The inverse operations live on the consumer that captured them, so only
+        the consumer can say a rollback completed — and the protocol currently
+        has no way for it to say so (TODO(M11) in `packages/daemon`).
+        """
+        return RollbackResponse.model_validate(
+            self._call(
+                "POST",
+                f"/v1/journal/{_segment(journal_id)}/rollback",
+                body=request,
+                producer=True,
+            )
+        )
+
+    def read_output(self, link: str | None = None) -> OutputResponse:
+        query = f"?link={urllib.parse.quote(link)}" if link else ""
+        return OutputResponse.model_validate(
+            self._call("GET", f"/v1/output{query}", producer=True)
+        )
+
+    # ── consumer surface ───────────────────────────────────────────────────
+    #
+    # Every call below is authenticated by a MAC over the request under the
+    # session key derived at pairing, and this package cannot derive that key.
+    # The derivation and the MAC construction live in
+    # `packages/daemon/src/envelope.ts` and are not specified anywhere a second
+    # implementation could be written against without reading that file and
+    # guessing at the parts it leaves implicit — which is exactly the kind of
+    # guess `docs/PROTOCOL.md` forbids.
+    #
+    # So the MAC is a parameter. A caller that has one (a Studio plugin, a test
+    # harness, a relay) can drive these; a caller that does not cannot, and gets
+    # told so instead of sending something that will fail to verify.
+    #
+    # TODO(M30): a Python-side pairing and MAC implementation, once M18 has
+    # written the pairing handshake down as a specification rather than as one
+    # TypeScript file. Owner: whoever owns `packages/sdk-python` at M30.
+
+    def poll(self, *, mac: str, since: int = 0) -> DeliveryEnvelope | None:
+        """Long-poll for the next delivery. `None` means the poll timed out empty."""
+        payload = self._call(
+            "GET",
+            f"/v1/link/poll?since={int(since)}",
+            consumer_mac=mac,
+            allow_empty=True,
+        )
+        return None if payload is None else DeliveryEnvelope.model_validate(payload)
+
+    def report_apply_result(
+        self,
+        envelope: DeliveryEnvelope,
+        *,
+        changeset_id: str | None = None,
+    ) -> ApplyResultAck:
+        """Report an ApplyResult, sealed in an envelope this client did not seal.
+
+        A partial apply is a legal outcome and is reported as one; the consumer
+        never claims a clean apply it did not achieve.
+        """
+        path = (
+            f"/v1/changesets/{_segment(changeset_id)}/apply-result"
+            if changeset_id
+            else "/v1/apply-result"
+        )
+        return ApplyResultAck.model_validate(self._call("POST", path, body=envelope, link=True))
+
+    def mirror_output(self, envelope: DeliveryEnvelope) -> None:
+        """Mirror the Studio console up. The payload is an OutputBatch."""
+        self._call("POST", "/v1/output", body=envelope, link=True, allow_empty=True)
+
+    # ── plumbing ───────────────────────────────────────────────────────────
+
+    def _call(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Any = None,
+        producer: bool = False,
+        link: bool = False,
+        consumer_mac: str | None = None,
+        allow_empty: bool = False,
+    ) -> Any:
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION,
+        }
+        if producer:
+            if not self.producer_token:
+                raise TransportError(
+                    f"{path} is producer surface and needs the daemon's producer token; "
+                    "construct the client with producer_token=..."
+                )
+            headers[PRODUCER_TOKEN_HEADER] = self.producer_token
+        if link or consumer_mac is not None:
+            if not self.link_id:
+                raise TransportError(
+                    f"{path} is consumer surface and needs a paired link; "
+                    "construct the client with link_id=..."
+                )
+            headers[LINK_HEADER] = self.link_id
+        if consumer_mac is not None:
+            headers[MAC_HEADER] = consumer_mac
+
+        encoded: bytes | None = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            payload = (
+                body.model_dump(mode="json", by_alias=True)
+                if hasattr(body, "model_dump")
+                else body
+            )
+            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        response = self._send(method, f"{self.base_url}{path}", headers, encoded)
+
+        if response.status == 204 or not response.body:
+            if allow_empty or 200 <= response.status < 300:
+                return None
+            raise TransportError(f"{method} {path} returned {response.status} with no body")
+
+        try:
+            parsed = json.loads(response.body)
+        except json.JSONDecodeError as error:
+            raise TransportError(f"{method} {path} returned a body that is not JSON") from error
+
+        if 200 <= response.status < 300:
+            return parsed
+
+        # A protocol error is an answer. Anything else that failed is not, and
+        # pretending otherwise would invent an error code the server never sent.
+        try:
+            error = ProtocolError.model_validate(parsed)
+        except Exception as exc:
+            raise TransportError(
+                f"{method} {path} returned {response.status} "
+                "with a body that is not a ProtocolError"
+            ) from exc
+        raise ForgeBridgeError(error, response.status)
+
+
+def _segment(value: str) -> str:
+    """Percent-encode one path segment.
+
+    An id reaches this client from wherever the caller got it. Interpolating it
+    raw would let a `../` walk the caller into a different route.
+    """
+    return urllib.parse.quote(value, safe="")

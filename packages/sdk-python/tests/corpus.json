@@ -1,0 +1,690 @@
+{
+  "$comment": "Hand-written. Read by scripts/__tests__/schema-projection.test.ts and by tests/test_projection_agreement.py, which run every document through Zod, the JSON Schema and the pydantic models and require all three to agree.",
+  "cases": [
+    {
+      "name": "every-property-value-tag",
+      "type": "ChangeSet",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "Workspace.Showcase",
+            "className": "Part",
+            "properties": {
+              "String": {
+                "t": "String",
+                "v": "hello"
+              },
+              "Number": {
+                "t": "Number",
+                "v": 1.5
+              },
+              "Int": {
+                "t": "Int",
+                "v": 3
+              },
+              "Bool": {
+                "t": "Bool",
+                "v": true
+              },
+              "Nil": {
+                "t": "Nil"
+              },
+              "Vector3": {
+                "t": "Vector3",
+                "x": 1,
+                "y": 2,
+                "z": 3
+              },
+              "Vector2": {
+                "t": "Vector2",
+                "x": 1,
+                "y": 2
+              },
+              "Color3": {
+                "t": "Color3",
+                "r": 0.1,
+                "g": 0.2,
+                "b": 0.3
+              },
+              "UDim": {
+                "t": "UDim",
+                "scale": 0.5,
+                "offset": 4
+              },
+              "UDim2": {
+                "t": "UDim2",
+                "xScale": 0.5,
+                "xOffset": 4,
+                "yScale": 0.25,
+                "yOffset": 8
+              },
+              "Rect": {
+                "t": "Rect",
+                "minX": 0,
+                "minY": 0,
+                "maxX": 1,
+                "maxY": 1
+              },
+              "CFrame": {
+                "t": "CFrame",
+                "position": [
+                  1,
+                  2,
+                  3
+                ],
+                "rotation": [
+                  1,
+                  0,
+                  0,
+                  0,
+                  1,
+                  0,
+                  0,
+                  0,
+                  1
+                ]
+              },
+              "BrickColor": {
+                "t": "BrickColor",
+                "name": "Bright red"
+              },
+              "Enum": {
+                "t": "Enum",
+                "enum": "Material",
+                "value": "Neon"
+              },
+              "InstanceRef": {
+                "t": "InstanceRef",
+                "path": "ReplicatedStorage.Shared"
+              },
+              "ColorSequence": {
+                "t": "ColorSequence",
+                "keypoints": [
+                  {
+                    "time": 0,
+                    "r": 0,
+                    "g": 0,
+                    "b": 0
+                  },
+                  {
+                    "time": 1,
+                    "r": 1,
+                    "g": 1,
+                    "b": 1
+                  }
+                ]
+              },
+              "NumberSequence": {
+                "t": "NumberSequence",
+                "keypoints": [
+                  {
+                    "time": 0,
+                    "value": 0
+                  },
+                  {
+                    "time": 1,
+                    "value": 1,
+                    "envelope": 0.5
+                  }
+                ]
+              },
+              "NumberRange": {
+                "t": "NumberRange",
+                "min": 0,
+                "max": 10
+              },
+              "Font": {
+                "t": "Font",
+                "family": "Gotham"
+              }
+            }
+          }
+        ]
+      },
+      "note": "every tag in PROPERTY_VALUE_TAGS, including the two that carry nested defaults"
+    },
+    {
+      "name": "instance-ref-in-set-property",
+      "type": "ChangeSet",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Rig.Root",
+            "property": "PrimaryPart",
+            "value": {
+              "t": "InstanceRef",
+              "path": "Workspace.Rig.Torso"
+            }
+          }
+        ]
+      },
+      "note": "the reference target is an InstancePath, and pathsOf reports it"
+    },
+    {
+      "name": "every-operation-kind",
+      "type": "ChangeSet",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "ServerScriptService.Shop",
+            "className": "Folder",
+            "properties": {
+              "Archivable": {
+                "t": "Bool",
+                "v": false
+              }
+            }
+          },
+          {
+            "op": "setProperty",
+            "path": "Workspace.Baseplate",
+            "property": "Transparency",
+            "value": {
+              "t": "Number",
+              "v": 0.5
+            }
+          },
+          {
+            "op": "writeScript",
+            "path": "ServerScriptService.Shop.Handler",
+            "scriptType": "ModuleScript",
+            "source": "return {}\n"
+          },
+          {
+            "op": "moveInstance",
+            "path": "Workspace.Old",
+            "to": "ServerStorage.Archive"
+          },
+          {
+            "op": "deleteInstance",
+            "path": "Workspace.Scratch"
+          }
+        ],
+        "runId": "3f2504e0-4f89-41d3-9a0c-0305e82c3303",
+        "metadata": {
+          "producer": "sdk-python",
+          "nested": {
+            "anything": [
+              1,
+              2,
+              3
+            ]
+          }
+        },
+        "validation": {
+          "luau": {
+            "status": "warn",
+            "findings": [
+              {
+                "severity": "warning",
+                "rule": "luau/no-loadstring",
+                "message": "avoid loadstring",
+                "operationIndex": 2,
+                "line": 4,
+                "column": 9
+              }
+            ]
+          },
+          "policy": {
+            "status": "ok"
+          },
+          "computedAt": "2026-08-26T12:00:01Z",
+          "computedBy": "forgebridge-daemon@0.1.0"
+        }
+      }
+    },
+    {
+      "name": "deep-path-at-the-depth-bound",
+      "type": "ChangeSet",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "deleteInstance",
+            "path": "Workspace.n0.n1.n2.n3.n4.n5.n6.n7.n8.n9.n10.n11.n12.n13.n14.n15.n16.n17.n18.n19.n20.n21.n22.n23.n24.n25.n26.n27.n28.n29.n30"
+          }
+        ]
+      },
+      "note": "32 segments including the service root, which is exactly MAX_PATH_DEPTH"
+    },
+    {
+      "name": "duplicate-delete-ordering",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Doomed",
+            "property": "Transparency",
+            "value": {
+              "t": "Number",
+              "v": 1
+            }
+          },
+          {
+            "op": "deleteInstance",
+            "path": "Workspace.Doomed"
+          }
+        ]
+      },
+      "note": "the one constraint the projection cannot carry; forgebridge.checks re-implements it"
+    },
+    {
+      "name": "set-property-writes-parent",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Part",
+            "property": "Parent",
+            "value": {
+              "t": "InstanceRef",
+              "path": "ServerStorage.Hidden"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "set-property-writes-name",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Part",
+            "property": "Name",
+            "value": {
+              "t": "String",
+              "v": "Renamed"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "reserved-property-name",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "Workspace.Part",
+            "className": "Part",
+            "properties": {
+              "constructor": {
+                "t": "Bool",
+                "v": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "instance-ref-outside-a-service-root",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Part",
+            "property": "PrimaryPart",
+            "value": {
+              "t": "InstanceRef",
+              "path": "NotAService.Anything"
+            }
+          }
+        ]
+      },
+      "note": "the hole that pathsOf and InstanceRef.path were both fixed to close"
+    },
+    {
+      "name": "path-segment-with-a-separator",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "deleteInstance",
+            "path": "Workspace.Shop Admin"
+          }
+        ]
+      }
+    },
+    {
+      "name": "path-over-the-depth-bound",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "deleteInstance",
+            "path": "Workspace.n0.n1.n2.n3.n4.n5.n6.n7.n8.n9.n10.n11.n12.n13.n14.n15.n16.n17.n18.n19.n20.n21.n22.n23.n24.n25.n26.n27.n28.n29.n30.n31"
+          }
+        ]
+      }
+    },
+    {
+      "name": "no-operations",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": []
+      }
+    },
+    {
+      "name": "id-is-not-a-uuid",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "not-a-uuid",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "ServerScriptService.Shop",
+            "className": "Folder"
+          }
+        ]
+      }
+    },
+    {
+      "name": "class-name-with-an-underscore",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "Workspace.Thing",
+            "className": "My_Class"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown-property-value-tag",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00Z",
+        "operations": [
+          {
+            "op": "setProperty",
+            "path": "Workspace.Part",
+            "property": "Shape",
+            "value": {
+              "t": "Ray",
+              "origin": [
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "created-at-carries-an-offset",
+      "type": "ChangeSet",
+      "zodValid": false,
+      "schemaValid": false,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "baseVersion": 7,
+        "summary": "a representative set",
+        "createdAt": "2026-08-26T12:00:00+02:00",
+        "operations": [
+          {
+            "op": "createInstance",
+            "path": "ServerScriptService.Shop",
+            "className": "Folder"
+          }
+        ]
+      }
+    },
+    {
+      "name": "apply-result-partial",
+      "type": "ApplyResult",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "changeSetId": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "journalId": "3f2504e0-4f89-41d3-9a0c-0305e82c3304",
+        "newVersion": 8,
+        "appliedAt": "2026-08-26T12:00:02Z",
+        "pluginVersion": "0.1.0",
+        "outcomes": [
+          {
+            "index": 0,
+            "ok": true
+          },
+          {
+            "index": 1,
+            "ok": false,
+            "error": "instance not found"
+          }
+        ]
+      }
+    },
+    {
+      "name": "journal-entry-with-a-move-back-inverse",
+      "type": "JournalEntry",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3304",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "changeSetId": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "summary": "a move",
+        "applied": [
+          {
+            "index": 0,
+            "operation": {
+              "op": "moveInstance",
+              "path": "ServerStorage.Archive.Old",
+              "to": "Workspace.Old"
+            }
+          }
+        ],
+        "inverses": [
+          {
+            "inverse": "moveBack",
+            "path": "ServerStorage.Archive.Old",
+            "from": "Workspace.Old"
+          },
+          {
+            "inverse": "restoreSubtree",
+            "parentPath": "Workspace",
+            "serialised": "<opaque>"
+          },
+          {
+            "inverse": "restoreProperty",
+            "path": "Workspace.Part",
+            "property": "Transparency",
+            "previous": {
+              "t": "Number",
+              "v": 0
+            }
+          }
+        ],
+        "versionBefore": 7,
+        "versionAfter": 8,
+        "appliedAt": "2026-08-26T12:00:02Z"
+      },
+      "note": "`from` is a Python keyword; the projection aliases it and must still round-trip"
+    },
+    {
+      "name": "link-with-every-nullable-defaulted",
+      "type": "Link",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3305",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "transport": "local-daemon",
+        "state": "paired",
+        "createdAt": "2026-08-26T12:00:00Z"
+      }
+    },
+    {
+      "name": "run-with-attempts",
+      "type": "Run",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3306",
+        "projectId": "3f2504e0-4f89-41d3-9a0c-0305e82c3302",
+        "prompt": "build a shop",
+        "startedAt": "2026-08-26T12:00:00Z",
+        "attempts": [
+          {
+            "modelId": "a/b",
+            "outcome": "rate-limited",
+            "startedAt": "2026-08-26T12:00:00Z",
+            "durationMs": 12
+          }
+        ],
+        "producer": {
+          "kind": "sdk",
+          "client": "forgebridge-python"
+        }
+      }
+    },
+    {
+      "name": "protocol-error",
+      "type": "ProtocolError",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "code": "stale_base",
+        "message": "the project moved",
+        "remedy": "rebase and resubmit"
+      }
+    },
+    {
+      "name": "rollback-request",
+      "type": "RollbackRequest",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "journalId": "3f2504e0-4f89-41d3-9a0c-0305e82c3304",
+        "expectedVersion": 8
+      }
+    },
+    {
+      "name": "delivery-envelope",
+      "type": "DeliveryEnvelope",
+      "zodValid": true,
+      "schemaValid": true,
+      "document": {
+        "linkId": "3f2504e0-4f89-41d3-9a0c-0305e82c3305",
+        "nonce": 3,
+        "mac": "bWFj",
+        "payload": "{}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,605 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "PropertyValue.schema.json",
+  "title": "PropertyValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/StringValue"
+    },
+    {
+      "$ref": "#/$defs/NumberValue"
+    },
+    {
+      "$ref": "#/$defs/IntValue"
+    },
+    {
+      "$ref": "#/$defs/BoolValue"
+    },
+    {
+      "$ref": "#/$defs/NilValue"
+    },
+    {
+      "$ref": "#/$defs/Vector3Value"
+    },
+    {
+      "$ref": "#/$defs/Vector2Value"
+    },
+    {
+      "$ref": "#/$defs/Color3Value"
+    },
+    {
+      "$ref": "#/$defs/UDimValue"
+    },
+    {
+      "$ref": "#/$defs/UDim2Value"
+    },
+    {
+      "$ref": "#/$defs/RectValue"
+    },
+    {
+      "$ref": "#/$defs/CFrameValue"
+    },
+    {
+      "$ref": "#/$defs/BrickColorValue"
+    },
+    {
+      "$ref": "#/$defs/EnumValue"
+    },
+    {
+      "$ref": "#/$defs/InstanceRefValue"
+    },
+    {
+      "$ref": "#/$defs/ColorSequenceValue"
+    },
+    {
+      "$ref": "#/$defs/NumberSequenceValue"
+    },
+    {
+      "$ref": "#/$defs/NumberRangeValue"
+    },
+    {
+      "$ref": "#/$defs/FontValue"
+    }
+  ],
+  "discriminator": {
+    "propertyName": "t",
+    "mapping": {
+      "String": "#/$defs/StringValue",
+      "Number": "#/$defs/NumberValue",
+      "Int": "#/$defs/IntValue",
+      "Bool": "#/$defs/BoolValue",
+      "Nil": "#/$defs/NilValue",
+      "Vector3": "#/$defs/Vector3Value",
+      "Vector2": "#/$defs/Vector2Value",
+      "Color3": "#/$defs/Color3Value",
+      "UDim": "#/$defs/UDimValue",
+      "UDim2": "#/$defs/UDim2Value",
+      "Rect": "#/$defs/RectValue",
+      "CFrame": "#/$defs/CFrameValue",
+      "BrickColor": "#/$defs/BrickColorValue",
+      "Enum": "#/$defs/EnumValue",
+      "InstanceRef": "#/$defs/InstanceRefValue",
+      "ColorSequence": "#/$defs/ColorSequenceValue",
+      "NumberSequence": "#/$defs/NumberSequenceValue",
+      "NumberRange": "#/$defs/NumberRangeValue",
+      "Font": "#/$defs/FontValue"
+    }
+  },
+  "$defs": {
+    "BoolValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Bool"
+        },
+        "v": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "t",
+        "v"
+      ],
+      "additionalProperties": true
+    },
+    "BrickColorValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "BrickColor"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "t",
+        "name"
+      ],
+      "additionalProperties": true
+    },
+    "CFrameValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "CFrame"
+        },
+        "position": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "rotation": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "items": false,
+          "minItems": 9,
+          "maxItems": 9
+        }
+      },
+      "required": [
+        "t",
+        "position",
+        "rotation"
+      ],
+      "additionalProperties": true
+    },
+    "Color3Value": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Color3"
+        },
+        "r": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "g": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "b": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "t",
+        "r",
+        "g",
+        "b"
+      ],
+      "additionalProperties": true
+    },
+    "ColorSequenceValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "ColorSequence"
+        },
+        "keypoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "time": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "r": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "g": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "b": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "time",
+              "r",
+              "g",
+              "b"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 2,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "t",
+        "keypoints"
+      ],
+      "additionalProperties": true
+    },
+    "EnumValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Enum"
+        },
+        "enum": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*$"
+        }
+      },
+      "required": [
+        "t",
+        "enum",
+        "value"
+      ],
+      "additionalProperties": true
+    },
+    "FontValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Font"
+        },
+        "family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "weight": {
+          "type": "string",
+          "pattern": "^[A-Za-z]+$",
+          "default": "Regular"
+        },
+        "style": {
+          "type": "string",
+          "enum": [
+            "Normal",
+            "Italic"
+          ],
+          "default": "Normal"
+        }
+      },
+      "required": [
+        "t",
+        "family"
+      ],
+      "additionalProperties": true
+    },
+    "InstancePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:Workspace|ServerScriptService|ServerStorage|ReplicatedStorage|ReplicatedFirst|StarterGui|StarterPack|StarterPlayer|Lighting|SoundService|Teams|Chat|TextChatService)(?:\\.[A-Za-z_][A-Za-z0-9_]{0,99}){0,31}$"
+    },
+    "InstanceRefValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "InstanceRef"
+        },
+        "path": {
+          "$ref": "#/$defs/InstancePath"
+        }
+      },
+      "required": [
+        "t",
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    "IntValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Int"
+        },
+        "v": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t",
+        "v"
+      ],
+      "additionalProperties": true
+    },
+    "NilValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Nil"
+        }
+      },
+      "required": [
+        "t"
+      ],
+      "additionalProperties": true
+    },
+    "NumberRangeValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "NumberRange"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "t",
+        "min",
+        "max"
+      ],
+      "additionalProperties": true
+    },
+    "NumberSequenceValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "NumberSequence"
+        },
+        "keypoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "time": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "value": {
+                "type": "number"
+              },
+              "envelope": {
+                "type": "number",
+                "default": 0
+              }
+            },
+            "required": [
+              "time",
+              "value"
+            ],
+            "additionalProperties": true
+          },
+          "minItems": 2,
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "t",
+        "keypoints"
+      ],
+      "additionalProperties": true
+    },
+    "NumberValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Number"
+        },
+        "v": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "t",
+        "v"
+      ],
+      "additionalProperties": true
+    },
+    "RectValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Rect"
+        },
+        "minX": {
+          "type": "number"
+        },
+        "minY": {
+          "type": "number"
+        },
+        "maxX": {
+          "type": "number"
+        },
+        "maxY": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "t",
+        "minX",
+        "minY",
+        "maxX",
+        "maxY"
+      ],
+      "additionalProperties": true
+    },
+    "StringValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "String"
+        },
+        "v": {
+          "type": "string",
+          "maxLength": 200000
+        }
+      },
+      "required": [
+        "t",
+        "v"
+      ],
+      "additionalProperties": true
+    },
+    "UDim2Value": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "UDim2"
+        },
+        "xScale": {
+          "type": "number"
+        },
+        "xOffset": {
+          "type": "integer"
+        },
+        "yScale": {
+          "type": "number"
+        },
+        "yOffset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t",
+        "xScale",
+        "xOffset",
+        "yScale",
+        "yOffset"
+      ],
+      "additionalProperties": true
+    },
+    "UDimValue": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "UDim"
+        },
+        "scale": {
+          "type": "number"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t",
+        "scale",
+        "offset"
+      ],
+      "additionalProperties": true
+    },
+    "Vector2Value": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Vector2"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "t",
+        "x",
+        "y"
+      ],
+      "additionalProperties": true
+    },
+    "Vector3Value": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "string",
+          "const": "Vector3"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "z": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "t",
+        "x",
+        "y",
+        "z"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

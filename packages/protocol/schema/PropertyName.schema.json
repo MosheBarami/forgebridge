@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "PropertyName.schema.json",
+  "title": "PropertyName",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+  "maxLength": 100,
+  "not": {
+    "enum": [
+      "__index",
+      "__newindex",
+      "__metatable",
+      "constructor",
+      "prototype"
+    ]
+  }
+}

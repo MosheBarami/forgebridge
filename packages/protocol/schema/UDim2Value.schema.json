@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "UDim2Value.schema.json",
+  "title": "UDim2Value",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "UDim2"
+    },
+    "xScale": {
+      "type": "number"
+    },
+    "xOffset": {
+      "type": "integer"
+    },
+    "yScale": {
+      "type": "number"
+    },
+    "yOffset": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "t",
+    "xScale",
+    "xOffset",
+    "yScale",
+    "yOffset"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ApplyResult.schema.json",
+  "title": "ApplyResult",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "changeSetId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OperationOutcome"
+      }
+    },
+    "newVersion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "journalId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "appliedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "pluginVersion": {
+      "type": "string",
+      "maxLength": 40
+    }
+  },
+  "required": [
+    "changeSetId",
+    "outcomes",
+    "newVersion",
+    "journalId",
+    "appliedAt",
+    "pluginVersion"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "OperationOutcome": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "index",
+        "ok"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

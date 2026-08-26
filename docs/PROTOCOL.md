@@ -5,16 +5,41 @@ One contract, authored once in Zod, projected everywhere:
 ```
 packages/protocol/src/*.ts   (Zod, the source of truth)
         │
-        ├─▶ TypeScript types            (inferred, zero drift)          ── today
-        ├─▶ OpenAPI 3.1                 (zod-to-openapi) → Orval clients ── M08
-        ├─▶ JSON Schema                 (MCP tool schemas, A2A skills)   ── M08
-        └─▶ Python models               (datamodel-code-generator)       ── M08
+        │   scripts/generate-schemas.ts   one generator, no third-party converter
+        │
+        ├─▶ TypeScript types    `z.infer` — not generated, so it cannot drift  ── today
+        ├─▶ JSON Schema 2020-12  one self-contained file per top-level type    ── M08 ✅
+        ├─▶ OpenAPI 3.1          the /v1 surface, paths read off the daemon    ── M08 ✅
+        └─▶ pydantic v2 models   packages/sdk-python                           ── M08 ✅
 ```
 
-Only the TypeScript projection exists today, and it is not generated: the types are
-`z.infer` of the same schemas, which is why that arm cannot drift. The other three are
-M08 — there is no OpenAPI document, no JSON Schema and no Python package in this
-repository yet, so a client for those languages is hand-written or nothing.
+All four arms exist. The generated artefacts are committed under
+`packages/protocol/schema/`; `npm run verify:schemas` regenerates them into memory and
+fails on any difference, so a schema edit that was never projected cannot merge.
+
+Two things that projection does **not** carry, both stated in
+`packages/protocol/schema/README.md` rather than left for a consumer to discover from a
+`400`:
+
+- **`ChangeSet`'s cross-operation rule.** JSON Schema cannot compare two elements of the
+  same array, so a set whose `deleteInstance` targets a path an earlier operation also
+  touches validates against the schema and is refused by the protocol. The Python SDK
+  re-implements it in `forgebridge.checks.check_changeset_ordering`; every other consumer
+  has to re-check it itself.
+- **The byte bound on a script source.** `WriteScriptOp.source` is bounded in UTF-8 bytes
+  by Zod and in UTF-16 code units by `maxLength`, so the schema is the looser of the two
+  above the BMP.
+
+Everything else survives, and is *checked* rather than asserted: the few constraints that
+have to be restated in JSON Schema — the shape of an `InstancePath`, the reserved property
+names — carry probe values that are run through the real Zod schema and through the emitted
+JSON Schema on every generation, and a disagreement fails the build.
+
+The Python package is deliberately partial: the models are generated and complete, the
+producer half of the client is complete, and the three consumer routes take a MAC as a
+parameter because this repository has no specification of the pairing handshake a second
+implementation could be built against (TODO(M30), blocked on M18). It is not published to
+PyPI — `M30` — so install it from a checkout.
 
 If a field is not in the Zod schema it does not exist. No adapter is allowed a private
 field; extensions go through `metadata: Record<string, unknown>` and are ignored by
@@ -211,11 +236,20 @@ GET    /v1/link/poll?since=<cursor>   → long-poll: next ChangeSet for the plug
 POST   /v1/changesets                 → producer submits a ChangeSet
 GET    /v1/changesets/:id/diff        → rendered diff for review
 POST   /v1/changesets/:id/approve
-POST   /v1/changesets/:id/apply-result→ plugin reports ApplyResult
+POST   /v1/changesets/:id/apply-result → plugin reports ApplyResult
+POST   /v1/apply-result               → the same, unparameterised: an ApplyResult
+                                        already names its own changeSetId
 POST   /v1/journal/:id/rollback
 POST   /v1/output                     → plugin mirrors Studio console back
+GET    /v1/output?link=<linkId>       → producer reads that console back
 GET    /v1/models                     → registry snapshot + live health
 ```
+
+This table is not decorative: `scripts/generate-schemas.ts` parses it, compares it with the
+router in `packages/daemon/src/server.ts`, and fails if the two disagree — the code being
+the winner of any such disagreement, and this page the bug. `POST /v1/apply-result` and
+`GET /v1/output` are here because of exactly that: the daemon has served both since M14 and
+this table listed neither until the comparison existed to notice.
 
 The plugin only ever calls `poll`, `apply-result`, and `output` — and it calls them against a
 **single stable base address**, because Roblox grants plugin HTTP permission per web address and

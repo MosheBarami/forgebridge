@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "AttemptOutcome.schema.json",
+  "title": "AttemptOutcome",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "ok",
+    "rate-limited",
+    "context-exceeded",
+    "capability-missing",
+    "provider-error",
+    "timeout",
+    "refused",
+    "invalid-output",
+    "cancelled"
+  ]
+}

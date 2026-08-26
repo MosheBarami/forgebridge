@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "LinkState.schema.json",
+  "title": "LinkState",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "unpaired",
+    "pairing",
+    "paired",
+    "expired",
+    "revoked"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "RectValue.schema.json",
+  "title": "RectValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Rect"
+    },
+    "minX": {
+      "type": "number"
+    },
+    "minY": {
+      "type": "number"
+    },
+    "maxX": {
+      "type": "number"
+    },
+    "maxY": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "t",
+    "minX",
+    "minY",
+    "maxX",
+    "maxY"
+  ],
+  "additionalProperties": true
+}

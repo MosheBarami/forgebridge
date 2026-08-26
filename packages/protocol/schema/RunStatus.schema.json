@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "RunStatus.schema.json",
+  "title": "RunStatus",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "string",
+  "enum": [
+    "running",
+    "succeeded",
+    "failed",
+    "cancelled"
+  ]
+}

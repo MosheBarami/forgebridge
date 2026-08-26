@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "NumberSequenceValue.schema.json",
+  "title": "NumberSequenceValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "NumberSequence"
+    },
+    "keypoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "time": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "value": {
+            "type": "number"
+          },
+          "envelope": {
+            "type": "number",
+            "default": 0
+          }
+        },
+        "required": [
+          "time",
+          "value"
+        ],
+        "additionalProperties": true
+      },
+      "minItems": 2,
+      "maxItems": 20
+    }
+  },
+  "required": [
+    "t",
+    "keypoints"
+  ],
+  "additionalProperties": true
+}

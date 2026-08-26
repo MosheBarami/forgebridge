@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "InverseOperation.schema.json",
+  "title": "InverseOperation",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "inverse": {
+          "type": "string",
+          "const": "deleteCreated"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inverse",
+        "path"
+      ],
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "properties": {
+        "inverse": {
+          "type": "string",
+          "const": "restoreProperty"
+        },
+        "path": {
+          "type": "string"
+        },
+        "property": {
+          "type": "string"
+        },
+        "previous": {}
+      },
+      "required": [
+        "inverse",
+        "path",
+        "property",
+        "previous"
+      ],
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "properties": {
+        "inverse": {
+          "type": "string",
+          "const": "restoreSource"
+        },
+        "path": {
+          "type": "string"
+        },
+        "previousSource": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inverse",
+        "path",
+        "previousSource"
+      ],
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "properties": {
+        "inverse": {
+          "type": "string",
+          "const": "moveBack"
+        },
+        "path": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inverse",
+        "path",
+        "from"
+      ],
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "properties": {
+        "inverse": {
+          "type": "string",
+          "const": "restoreSubtree"
+        },
+        "parentPath": {
+          "type": "string"
+        },
+        "serialised": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "inverse",
+        "parentPath",
+        "serialised"
+      ],
+      "additionalProperties": true
+    }
+  ],
+  "discriminator": {
+    "propertyName": "inverse"
+  }
+}

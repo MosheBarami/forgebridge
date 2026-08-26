@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "IntValue.schema.json",
+  "title": "IntValue",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "t": {
+      "type": "string",
+      "const": "Int"
+    },
+    "v": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "t",
+    "v"
+  ],
+  "additionalProperties": true
+}
