@@ -105,18 +105,25 @@ export interface Harness {
  * delivered is a lie told to the approver. Without something on the consumer
  * end, the one case that proves the approval gate opens could not run.
  */
-export async function startHarness(): Promise<Harness> {
+export async function startHarness(options: { producerToken?: string } = {}): Promise<Harness> {
   // Port 0: the fixed default is a production concern, and binding it would
   // make this suite fight a daemon the developer already has running.
   //
   // The models are scripted rather than real for the reason the run case
   // states: without knowing what the router *was made to do*, the suite can
   // check the shape and order of the attempt list but not its completeness.
+  //
+  // `producerToken` is normally left to the daemon to mint. It is settable here
+  // for one test: a minted token is base64url, so about one in sixty-four
+  // begins with `-`, and a caller that puts one in an argv as `--token VALUE`
+  // has argparse read it as another option. See the leading-dash test in
+  // `python-sdk.test.ts`.
   const daemon = createDaemon({
     port: 0,
     policy: TEST_POLICY,
     models: modelsPort(),
     modelClient: new ScriptedModels(),
+    ...(options.producerToken === undefined ? {} : { producerToken: options.producerToken }),
   });
   await daemon.listen();
   const baseUrl = daemon.url;

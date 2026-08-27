@@ -40,14 +40,35 @@ afterEach(async () => {
   harness = null;
 });
 
-async function start(): Promise<{ harness: Harness; adapter: PythonSdkAdapter }> {
-  harness = await startHarness();
+async function start(producerToken?: string): Promise<{ harness: Harness; adapter: PythonSdkAdapter }> {
+  harness = await startHarness(producerToken === undefined ? {} : { producerToken });
   adapter = await startPythonSdkAdapter({
     baseUrl: harness.baseUrl,
     producerToken: harness.daemon.producerToken,
   });
   return { harness, adapter };
 }
+
+describe('the driver is started in a way a token cannot break', () => {
+  // This suite failed in CI, once, on a token that began with `-`: argparse read
+  // `--token -Xk9…` as two options and exited 2, and the bridge reported it as
+  // "could not be reached through python3", which sends the reader to install an
+  // interpreter that is already there. A producer token is
+  // `randomBytes(32).toString('base64url')`, and that alphabet has `-` in it, so
+  // this was roughly a one-in-sixty-four flake sitting in the one test that
+  // crosses a language boundary — the most expensive place to have an
+  // intermittent failure nobody can reproduce.
+  //
+  // The token below is fixed and starts with `-` on purpose. Under the old
+  // `--token VALUE` form this test fails; under `--token=VALUE` it passes, and
+  // the `classify` round trip that `startPythonSdkAdapter` performs before it
+  // returns is what proves the driver actually came up and answered.
+  it('starts with a token that begins with a dash', async () => {
+    const started = await start('-Xk9NotAnOptionButAValidProducerToken');
+    expect(started.harness.daemon.producerToken).toBe('-Xk9NotAnOptionButAValidProducerToken');
+    expect(started.adapter).toBeDefined();
+  });
+});
 
 describe('the Python SDK is a conformant connector', () => {
   it('passes every case it supports, against a live daemon', async () => {

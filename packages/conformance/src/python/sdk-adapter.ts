@@ -190,12 +190,25 @@ export async function startPythonSdkAdapter(options: PythonSdkAdapterOptions): P
   // Default stdio, which is three pipes. Named rather than passed so the type
   // stays `ChildProcessWithoutNullStreams` and the three streams below need no
   // non-null assertion to read.
+  // `--name=value`, not `--name value`. A producer token is
+  // `randomBytes(32).toString('base64url')` and that alphabet contains `-`, so
+  // roughly one token in sixty-four begins with one — and argparse reads a bare
+  // `-Xyz…` after `--token` as another option, not as the value. This suite
+  // failed in CI on exactly that: "argument --token: expected one argument",
+  // surfacing as `PythonDriverFault` telling the reader to install Python.
+  // Attached with `=` the value is never re-parsed, whatever it starts with.
+  //
+  // TODO(M30): the token is still an argv element, which every process on the
+  // machine can read out of `ps` for as long as this driver runs —
+  // `packages/daemon/src/secrets.ts` refuses to write a credential that way and
+  // says why. It is a test-only token against an ephemeral local daemon, so it
+  // is a smaller problem here than there; the fix is the driver taking it on
+  // stdin with the first request, and that is a change to the driver's own
+  // interface rather than to this bridge.
   const child: ChildProcessWithoutNullStreams = spawn(interpreter, [
     driverPath,
-    '--daemon',
-    options.baseUrl,
-    '--token',
-    options.producerToken,
+    `--daemon=${options.baseUrl}`,
+    `--token=${options.producerToken}`,
   ]);
 
   // Kept whole rather than sampled: when the driver dies, its traceback is the
@@ -306,10 +319,23 @@ export async function startPythonSdkAdapter(options: PythonSdkAdapterOptions): P
     // traceback, because the reader is usually somebody who has never installed
     // this package and the fix is two commands.
     await closeDriver();
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    // Two different failures used to share one sentence. An interpreter that
+    // cannot import pydantic and a driver that started fine and rejected its
+    // arguments both arrive here, and telling the second reader to install
+    // Python sends them to the one place the problem is not — which is what
+    // happened when a token beginning with `-` was read as an option.
+    // argparse exits 2 and prints `usage:`; nothing else here does.
+    if (/^usage:/m.test(detail) || /\berror: argument\b/.test(detail)) {
+      throw new PythonDriverFault(
+        `started under "${interpreter}" and refused the arguments it was given. This is not an ` +
+          `interpreter problem — the driver ran.\n\n${detail}`,
+      );
+    }
     throw new PythonDriverFault(
       `could not be reached through "${interpreter}". It needs Python 3.10+ with pydantic v2 ` +
         '(`python -m pip install -e "packages/sdk-python"`); name another interpreter with the ' +
-        `FORGEBRIDGE_PYTHON environment variable.\n\n${cause instanceof Error ? cause.message : String(cause)}`,
+        `FORGEBRIDGE_PYTHON environment variable.\n\n${detail}`,
     );
   }
   if (answers.length !== inputs.length) {
