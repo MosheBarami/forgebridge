@@ -10,22 +10,42 @@ name: CodeQL
 #
 # ── Why this job can fail, and how ───────────────────────────────────────────
 #
-# `github/codeql-action/analyze` uploads to the repository's Security tab and,
-# by itself, fails nothing: the step succeeds whether it found one alert or a
-# hundred, and the alerts sit in a tab that blocks no merge until somebody
-# configures branch protection to require the code-scanning check. A scanner in
-# that state is exactly the shape this repository keeps calling out — a control
-# in a list of controls that stops nothing.
+# `github/codeql-action/analyze`, by itself, fails nothing: the step succeeds
+# whether it found one alert or a hundred, and the alerts sit in a tab that
+# blocks no merge until somebody configures branch protection to require the
+# code-scanning check. A scanner in that state is exactly the shape this
+# repository keeps calling out — a control in a list of controls that stops
+# nothing.
 #
-# So the analysis also writes its SARIF to a file, and `scripts/check-sarif.ts`
+# So the analysis writes its SARIF to a file, and `scripts/check-sarif.ts`
 # decides the job. It blocks on a result whose rule carries a
 # `security-severity` at or above 7.0 (CVSS "high"), and — the fail-closed half
 # — on any result whose severity it could not resolve. Results below the
-# threshold are printed and do not block; they are in the Security tab, which is
-# where the upload put them. `scripts/__tests__/check-sarif.test.ts` plants a
-# high-severity report, an unresolvable one, a malformed one and an empty one
-# and proves each is refused, with a clean report and a genuinely low-severity
-# one as controls.
+# threshold are printed and do not block.
+# `scripts/__tests__/check-sarif.test.ts` plants a high-severity report, an
+# unresolvable one, a malformed one and an empty one and proves each is refused,
+# with a clean report and a genuinely low-severity one as controls.
+#
+# ── Why this job uploads nothing (`upload: never`) ───────────────────────────
+#
+# This repository has GitHub's CodeQL **default setup** enabled, and GitHub
+# refuses to accept results from both: the first run of this file failed with
+# "CodeQL analyses from advanced configurations cannot be processed when the
+# default setup is enabled" — after the analysis had succeeded and found
+# nothing. The two ways out are to turn default setup off in the repository's
+# settings, which is a click no file in this tree can make, or to stop
+# uploading from here.
+#
+# Stopping the upload costs nothing that matters, and saying why is the point:
+# default setup already populates the Security tab, over *more* languages than
+# this file analyses — `javascript-typescript`, `actions` and `python`. What it
+# does not do is fail anything, which is the half this job exists for. So the
+# tab keeps its alerts and this workflow keeps the gate, and neither is claimed
+# to be doing the other's work.
+#
+# If default setup is ever disabled, `upload: never` should come off in the same
+# change — `scripts/__tests__/security-workflows.test.ts` asserts it is here so
+# that removing it is a decision somebody makes rather than a line that rots.
 #
 # ── Action pins ──────────────────────────────────────────────────────────────
 #
@@ -101,10 +121,14 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           category: '/language:javascript-typescript'
-          # Written to a file as well as uploaded, so the step below can read
-          # it. `upload` keeps its default (`always`), so the Security tab still
-          # receives everything including the results that do not block.
+          # The file is the whole point: the step below reads it and is what
+          # fails the job.
           output: sarif-results
+          # Not the default (`always`). See "Why this job uploads nothing" at
+          # the top of this file — GitHub rejects an advanced configuration's
+          # results while default setup is enabled, and default setup is what
+          # feeds the Security tab here.
+          upload: never
 
       # tsx is a devDependency, so the gate below needs an install. It is placed
       # after the analysis so a dependency problem cannot be mistaken for a

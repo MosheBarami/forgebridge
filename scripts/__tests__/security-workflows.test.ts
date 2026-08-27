@@ -137,6 +137,23 @@ describe('the CodeQL job is a gate rather than a tab', () => {
     expect(codeql()).toMatch(/pull_request:/);
     expect(codeql()).toMatch(/schedule:/);
   });
+
+  it('does not upload, and says why', () => {
+    // The first run of this workflow on `main` failed — after analysing cleanly
+    // — with "CodeQL analyses from advanced configurations cannot be processed
+    // when the default setup is enabled". GitHub accepts one or the other, this
+    // repository has default setup on, and no file in this tree can turn a
+    // repository setting off.
+    //
+    // So the upload is off and the gate stays. Both halves are asserted: the
+    // input, so a green `upload: always` cannot come back and break `main`
+    // again, and the explanation, so whoever turns default setup off finds the
+    // sentence telling them this line should come off with it. A line whose
+    // reason is not written down is a line the next person deletes or keeps for
+    // the wrong reason.
+    expect(codeql()).toMatch(/^\s*upload: never$/m);
+    expect(codeql()).toContain('default setup is enabled');
+  });
 });
 
 // ──────────────────────── planted violations ────────────────────────
