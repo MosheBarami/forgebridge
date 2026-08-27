@@ -1,0 +1,6 @@
+{
+  "//": "The generator and its own typechecking. `tsconfig.json` covers only src/, because src/ is what ships; a generator left outside every project is a 600-line file nothing typechecks, which is how a generated tree comes to be produced by code no gate reads.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "noEmit": true, "types": ["node"], "resolveJsonModule": true },
+  "include": ["scripts/**/*.ts", "src/**/*.ts"]
+}

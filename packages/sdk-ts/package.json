@@ -1,0 +1,32 @@
+{
+  "name": "@forgebridge/sdk-ts",
+  "version": "0.1.0",
+  "description": "The TypeScript SDK: a typed client over the /v1 surface, with its route table and wire schemas generated from the protocol's own OpenAPI document.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json --noEmit",
+    "test": "vitest run",
+    "lint": "echo 'lint: sdk-ts (configured in M04 follow-up)'",
+    "generate": "tsx scripts/generate.ts",
+    "verify:generated": "tsx scripts/generate.ts --check"
+  },
+  "dependencies": {
+    "@forgebridge/protocol": "*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@forgebridge/conformance": "*",
+    "@forgebridge/daemon": "*",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  }
+}
