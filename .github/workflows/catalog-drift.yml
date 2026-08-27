@@ -3,7 +3,8 @@ name: Catalog drift
 # The model catalog is synced data, never hand-written truth (ADR-007). Providers
 # add models, drop models, and change prices without telling anyone, so a catalog
 # committed once is wrong within weeks — and a stale "free models" list is the
-# standard way a tool like this loses trust.
+# standard way a tool like this loses trust. It has already happened here: the
+# catalog total moved 417 -> 416 within a day of the first sync.
 #
 # This job re-syncs weekly and opens a PR when the result differs. Deliberately a
 # PR and not a push: drift must arrive as a reviewable diff, because "this model
@@ -11,9 +12,12 @@ name: Catalog drift
 #
 # TODO(M03): a PR opened with the default GITHUB_TOKEN needs "Allow GitHub Actions
 # to create and approve pull requests" enabled (Settings → Actions → General).
+#
 # Such a PR also does not trigger other workflows, so CI and DCO will not run on
-# it — which is why this job runs the repository gates itself below, and why the
-# commit is signed off here rather than relying on the DCO workflow to notice.
+# it. That is why this job runs the repository's own checks itself (see "Verify"
+# below) and why the commit is signed off here rather than relying on the DCO
+# workflow to notice. A gate that would have run on a human's PR and does not run
+# on this one is a gate this branch is exempt from, and nothing here should be.
 
 on:
   schedule:
@@ -22,19 +26,47 @@ on:
     - cron: '17 6 * * 1'
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
+# Read-only is not an option for this one: it commits a branch and opens a pull
+# request. Scoped to the single job that needs it rather than to the workflow, so
+# a second job added later starts from the default and has to ask.
+permissions: {}
 
 concurrency:
   group: catalog-drift
   cancel-in-progress: false
 
+env:
+  # Turborepo phones home for remote caching unless told not to, and this job now
+  # runs the test suite through it. Promise 3 is "no telemetry by default"; a
+  # project that leaks its own build metadata while saying that has not earned
+  # the sentence. Same two variables ci.yml sets, for the same reason.
+  TURBO_TELEMETRY_DISABLED: 1
+  DO_NOT_TRACK: 1
+
 jobs:
   sync:
     name: Re-sync the model catalog
     runs-on: ubuntu-latest
+    # A scheduled workflow runs on forks too, where it would try to open a pull
+    # request against somebody else's copy of the repository with a token that
+    # cannot. Nothing below is useful anywhere but here.
+    if: github.repository == 'MosheBarami/forgebridge'
+    permissions:
+      contents: write
+      pull-requests: write
+    # The sync pages a live catalog and then runs the whole test suite. Twenty
+    # minutes is generous for both; a job that hangs instead holds the
+    # concurrency group until somebody notices.
+    timeout-minutes: 20
+
     steps:
+      # Every `uses:` in this file is pinned to a major version tag, which is
+      # what the rest of this repository does (`ci.yml`, `dco.yml`) and is the
+      # weaker of the two available pins: a tag can be moved, a commit SHA
+      # cannot. THREAT-MODEL T6 records that choosing SHA pins and vouching for
+      # their provenance is a human decision that has not been made yet
+      # (ADR-013), so this file matches its neighbours rather than inventing a
+      # different standard for itself.
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -44,15 +76,38 @@ jobs:
 
       - run: npm ci
 
+      - uses: actions/setup-python@v5
+        with:
+          # The same oldest-supported version ci.yml pins. `npm run test` below
+          # includes the connector conformance suite, whose fourth leg shells out
+          # to `packages/sdk-python`; without an interpreter that test fails, and
+          # a red drift job that nobody can act on is worse than no drift job.
+          python-version: '3.10'
+
+      - name: Install the Python SDK so the whole suite can run
+        run: python -m pip install -e "packages/sdk-python"
+
       - name: Sync catalog from live provider catalogs
-        # scripts/sync-catalog.ts reads OPENROUTER_API_KEY and treats it as
+        # `scripts/sync-catalog.ts` reads OPENROUTER_API_KEY and treats it as
         # optional — it only adds an Authorization header when the value is set.
         # Passed through here because an authenticated read is less likely to be
-        # rate-limited than an anonymous weekly one; an unset secret arrives as an
-        # empty string and the sync still works.
+        # rate-limited than an anonymous weekly one; an unset secret arrives as
+        # an empty string and the sync still works.
         #
-        # TODO(M21): set OPENROUTER_API_KEY as a repository secret. Without it this
-        # job depends on anonymous rate limits holding, which is a silent
+        # The write form, not `--check`. `--check` answers "is the committed file
+        # stale" without producing the new one, so using it here would mean
+        # fetching the whole catalog twice — once to learn there is drift and
+        # again to write it. This fetches once and lets git answer the same
+        # question from the result.
+        #
+        # The script refuses to publish a catalog that lost a fifth of its models
+        # without `--allow-shrink`, which is deliberately not passed: a sudden
+        # shrink is far more likely to be a truncated read than a real event, and
+        # that is the incident ADR-007 exists because of. Such a run fails here
+        # rather than opening a PR that deletes models.
+        #
+        # TODO(M21): set OPENROUTER_API_KEY as a repository secret. Without it
+        # this job depends on anonymous rate limits holding, which is a silent
         # dependency rather than a chosen one.
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -60,21 +115,48 @@ jobs:
 
       - name: Detect drift
         id: drift
+        # The whole working tree, not just the catalog path. A sync that also
+        # wrote somewhere else is a bug in the sync, and the failure mode of
+        # looking at one path is the quiet one: the unexpected file is left
+        # behind, never committed, never reviewed, and reappears in whichever
+        # unrelated pull request touches that tree next.
         run: |
           set -euo pipefail
-          if git diff --quiet -- packages/model-registry/data/catalog.json; then
+          changed="$(git status --porcelain)"
+          if [ -z "${changed}" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Catalog unchanged."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            git --no-pager diff --stat -- packages/model-registry/data/catalog.json
+            exit 0
           fi
 
-      - name: Verify the synced catalog still passes the repository gates
+          echo "${changed}"
+          unexpected="$(git status --porcelain -- . ':!packages/model-registry/data/catalog.json')"
+          if [ -n "${unexpected}" ]; then
+            echo "::error::The sync wrote outside packages/model-registry/data/catalog.json."
+            echo "${unexpected}"
+            exit 1
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git --no-pager diff --stat -- packages/model-registry/data/catalog.json
+
+      - name: Verify — the checks the pull request itself will not run
         if: steps.drift.outputs.changed == 'true'
+        # The new catalog is a file that arrived from a third party and is about
+        # to be committed, so the publication gate runs over it: ADR-013's
+        # mitigation is a secret scan on every commit, and this is a commit.
+        #
+        # Then the test suite, in full. A catalog change is data, and the things
+        # it can break are the things that read it — `packages/model-registry`
+        # validates it on load, `apps/web` renders it, `packages/daemon`
+        # projects it onto router candidates. Naming those three here instead
+        # would be a list that goes stale the first time a fourth consumer
+        # appears, and the staleness would be silent. `npm run test` is the same
+        # gate a human's pull request would face, which is the standard this
+        # branch has to meet precisely because CI will not run on it.
         run: |
-          npm run verify:boundaries
-          npm run verify:assets
+          npm run verify:no-secrets
+          npm run test
 
       - name: Open a pull request
         if: steps.drift.outputs.changed == 'true'
@@ -83,17 +165,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          branch="catalog-drift/$(date -u +%Y-%m-%d)"
+          # Computed once. Two `date` calls a few milliseconds apart can straddle
+          # midnight UTC, and a branch named for one day carrying a commit named
+          # for another is the kind of small lie that costs an hour to explain.
+          today="$(date -u +%Y-%m-%d)"
+          branch="catalog-drift/${today}"
 
           # A fixed bot identity whose address matches the sign-off below, so the
-          # DCO workflow passes on this PR the same way it does on a human's.
+          # DCO check passes on this PR the same way it does on a human's.
           git config user.name "forgebridge-bot"
           git config user.email "forgebridge-bot@users.noreply.github.com"
 
           git checkout -b "${branch}"
           git add packages/model-registry/data/catalog.json
-          git commit -s -m "model-registry: sync catalog $(date -u +%Y-%m-%d)" \
+          git commit -s -m "model-registry: sync catalog ${today}" \
             -m "Automated weekly re-sync. Generated by scripts/sync-catalog.ts from live provider catalogs; every 'free' flag in the diff is derived from an observed price, not asserted."
+
+          # Nothing may be left behind. The drift step already refused a sync
+          # that wrote outside the catalog, so a dirty tree here means the commit
+          # did not take everything it was given — which would produce a pull
+          # request that reads as complete and is not.
+          leftover="$(git status --porcelain)"
+          if [ -n "${leftover}" ]; then
+            echo "::error::Files remain uncommitted after the drift commit."
+            echo "${leftover}"
+            exit 1
+          fi
 
           # Force is safe here and nowhere else: this branch namespace is written
           # only by this workflow, and the concurrency group above prevents two
@@ -110,7 +207,7 @@ jobs:
           gh pr create \
             --base main \
             --head "${branch}" \
-            --title "model-registry: weekly catalog drift ($(date -u +%Y-%m-%d))" \
+            --title "model-registry: weekly catalog drift (${today})" \
             --body "$(cat <<'BODY'
           Automated weekly re-sync of `packages/model-registry/data/catalog.json`.
 
@@ -126,6 +223,10 @@ jobs:
           - Capability changes (`tools`, `structured_outputs`, context window): the
             router filters on these, so a shrunk context window silently changes which
             runs succeed.
+
+          `npm run verify:no-secrets` and `npm run test` were run against this catalog
+          inside the job that opened this pull request, because a PR opened by Actions
+          does not trigger CI.
 
           Generated by `.github/workflows/catalog-drift.yml`. Do not hand-edit the
           catalog on this branch — fix `scripts/sync-catalog.ts` and re-run the

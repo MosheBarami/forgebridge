@@ -221,6 +221,29 @@ and tells the model to ask you instead. And **no editor on that list has actuall
 what has been verified is a run against the reference MCP SDK's own client. M31 is the
 conformance suite that would make the editor list a claim rather than an intention.
 
+### Self-hosting, when Studio and the producer are not on one machine
+
+The Quickstart above needs no server: `packages/daemon` binds `127.0.0.1`, your key stays on
+your machine, and there is no relay in the path. That is the default and most people want
+nothing else.
+
+When the producer is somewhere Studio cannot reach — CI, a shared box, a teammate — you need
+the second transport, and you can run it yourself:
+
+```sh
+git clone https://github.com/MosheBarami/forgebridge.git && cd forgebridge && \
+  cp .env.example .env && RELAY_DOMAIN=localhost docker compose up -d
+```
+
+Three containers: Caddy terminating TLS, the relay behind it publishing no port of its own, and
+an OpenTelemetry collector. `RELAY_DOMAIN=localhost` gets you a certificate from Caddy's own CA
+and a genuinely end-to-end run of the whole path; swap in a real hostname when you mean it.
+
+Read the posture before you do: **on this transport the relay operator can read your changes**
+(ADR-014), which is a good reason for the operator to be you. What the stack contains, what it
+deliberately does not, and every way it fails are in
+[`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
+
 ## The promises
 
 Written down so they can be held against us. The long form is in
@@ -296,10 +319,12 @@ plugin/                  Roblox Studio plugin (Luau) + its own tests      M15
 packages/mcp/            MCP server (stdio + streamable HTTP)             M26
 packages/a2a/            A2A agent card + task endpoints                  M27
 packages/cli/            the `forgebridge` binary                         M28
+packages/sdk-ts/         generated /v1 client + ergonomic wrapper         M29
 packages/sdk-python/     generated pydantic models + a thin client        M30
 packages/conformance/    the connector conformance matrix + its cheats    M31
 packages/storage-sqlite/ SQLite adapters over `node:sqlite`               M40
-examples/                SDK examples                                     M29/M30 — empty
+packages/opencloud/      Roblox Open Cloud — places, DataStore, messaging M48
+examples/                one runnable walk-through per connector          M50
 apps/relay/              the cloud transport — a pipe, not a brain        M17
 apps/web/                apple.gg — the official instance                 M32–M39
 assets/brands/           official third-party marks + provenance manifest
@@ -308,14 +333,18 @@ scripts/                 sync-catalog · generate-schemas · verify-assets
                          · verify-no-secrets
                          · docs-claims-rules (read by the gate self-tests)
 docs/                    architecture, protocol, threat model, milestones, ADRs
+docker-compose.yml       the self-hosting stack — relay, TLS, OTel collector M47
+deploy/                  Caddyfile, collector config, the lite daemon image  M47
 ```
 
 Every `packages/*` row, both `apps/*` rows and `plugin/` has code and its own tests in it. The
 remaining rows are not packages and do not pretend to be: `assets/brands/` holds third-party
 marks and their provenance manifest, `scripts/` holds the gates and their self-tests, `docs/`
-holds prose, and a row whose right-hand column says *empty* or *absent* — `examples/` — names a
-directory that stays that way until its milestone lands. A milestone on a row that has code is
-the milestone the row is still working through, not a promise that the directory will appear.
+holds prose, `examples/` holds one runnable walk-through per connector, and `deploy/` holds the
+configuration `docker-compose.yml` mounts. No row here says *empty* or *absent* any more —
+`examples/` was the last one, and it filled up as M29, M30 and M50 landed their walk-throughs. A
+milestone on a row that has code is the milestone the row is still working through, not a
+promise that the directory will appear.
 
 The table is checked in both directions. `scripts/__tests__/docs-claims.test.ts` asserts that
 every directory carrying a `package.json` has a row here and that no such row calls itself empty
@@ -327,8 +356,10 @@ A milestone number is not a claim of completeness: `packages/mcp` has not been t
 the editors M26 names, and no connector can read a tree snapshot, because no `/v1` route serves
 one. Each row in [`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
 
-`packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and do not exist as
-directories at all — M29 and M48 respectively.
+Two directories that this section listed as absent for most of the project's life now have
+code: `packages/sdk-ts/` (M29) and `packages/opencloud/` (M48). Both have rows above. The
+sentences that named them as missing are gone rather than annotated, because a layout table is
+the one document where a stale absence reads exactly like a correct one.
 
 The boundary rules that keep this shape honest are in
 [`docs/REPO-LAYOUT.md`](docs/REPO-LAYOUT.md) and enforced by `scripts/verify-boundaries.ts`.
@@ -345,6 +376,10 @@ The boundary rules that keep this shape honest are in
 | [REPO-LAYOUT.md](docs/REPO-LAYOUT.md) | Where code goes and which boundaries are enforced |
 | [BRAND-ASSETS.md](docs/BRAND-ASSETS.md) | The official-assets-only rule and its CI gate |
 | [GOVERNANCE.md](docs/GOVERNANCE.md) | Who decides, how, and what we promised |
+| [ROADMAP.md](docs/ROADMAP.md) | What is shipped and what is not — generated from MILESTONES.md |
+| [SELF-HOSTING.md](docs/SELF-HOSTING.md) | Running your own relay, and what the stack deliberately lacks |
+| [DEPLOYMENT.md](docs/DEPLOYMENT.md) | One command from a clean clone, and the Vercel settings for `apps/web` |
+| [COMMUNITY.md](docs/COMMUNITY.md) | Labels, triage, and how a first patch becomes a maintainer |
 
 ## Contributing
 

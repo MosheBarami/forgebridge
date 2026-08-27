@@ -3,8 +3,8 @@
 This is the *target* shape. A line with no marker is a directory that has code in it
 today; a line marked `M__` is a directory this repository does not have yet, and the marker
 names the row in [`MILESTONES.md`](MILESTONES.md) that creates it. Nothing here is a
-placeholder pretending to be a package — `ls packages/` returns exactly `a2a cli conformance
-core daemon luau-analysis mcp model-registry protocol sdk-python storage-sqlite`.
+placeholder pretending to be a package — `ls packages/` returns exactly
+`a2a cli conformance core daemon luau-analysis mcp model-registry opencloud protocol sdk-python sdk-ts storage-sqlite`.
 
 ```
 forgebridge/
@@ -26,16 +26,17 @@ forgebridge/
 │   ├── a2a/                    A2A agent card + task endpoints              M27
 │   ├── cli/                    the `forgebridge` binary                     M28
 │   ├── sdk-python/             pydantic models + client (uv + hatch)        M30 — unpublished
-│   ├── sdk-ts/                 generated client + ergonomics → npm          M29 — absent
-│   ├── opencloud/              Roblox Open Cloud: publish, DataStore, msg   M48 — absent
+│   ├── sdk-ts/                 generated /v1 client + ergonomics            M29 — unpublished
+│   ├── opencloud/              Roblox Open Cloud: publish, DataStore, msg   M48
+│   │                             zero runtime deps; bin `forgebridge-opencloud`
 │   ├── storage-sqlite/         DaemonStore + StoragePort over node:sqlite — no account needed
 │   ├── storage-supabase/       Storage port adapter — apple.gg / self-host  M40 — absent
 │   └── ui/                     shared React primitives (used only by apps/) M32–M39 absent
 │
-├── apps/                                                                    absent entirely
+├── apps/
 │   ├── web/                    ⭐ apple.gg — Next.js 15, official instance  M32–M39
 │   ├── relay/                  cloud transport service                      M17
-│   └── docs/                   documentation site                           M50
+│   └── docs/                   documentation site                           M50 — absent
 │
 ├── plugin/                     ⭐ Roblox Studio plugin (Luau) + build to .rbxm
 │   ├── src/                    modules: transport, diff, approve, apply, journal
@@ -45,12 +46,17 @@ forgebridge/
 │   ├── manifest.json           source URL · licence · retrieved-at · constraints
 │   └── <slug>/logo.svg         none committed yet — the manifest is the only file here
 │
-├── examples/                   one runnable example per connector       M29/M30 — empty dir
+├── examples/                   one runnable example per connector           M50
+│                               typescript · python · cli · mcp · a2a · opencloud
+├── deploy/                     Caddyfile · otel-collector.yaml · daemon image M47
+├── docker-compose.yml          relay + TLS + OTel collector; `.env.example`    M47
+├── .changes/                   one file per user-visible change → CHANGELOG.md M49
 ├── scripts/                    sync-catalog · generate-schemas · verify-assets
 │                               · verify-boundaries · verify-no-key-storage
 │                               · verify-no-secrets · __tests__
-└── .github/workflows/          ci · catalog-drift · dco
-                                (sbom: M42 · release: M49 — neither exists)
+└── .github/workflows/          ci · catalog-drift · dco · release
+                                (M42 adds four more; `release` is manual-only
+                                 and has never published anything)
 ```
 
 ## Boundary rules (enforced by `scripts/verify-boundaries.ts`, run in CI)
@@ -91,4 +97,4 @@ The identifiers `B1`–`B4` are the ones the script reports.
 | everything TypeScript | TS 5.x strict | Node 22+, Turborepo, Vitest (Playwright arrives with M41) |
 | Studio plugin | Luau | Rojo-compatible layout, `.rbxm` build artefact |
 | Python SDK | Python 3.10+ | uv, hatch, pytest, pydantic v2 |
-| infra | Docker / Compose | one `docker compose up` for the full stack |
+| infra | Docker / Compose | `docker compose up` for the relay stack; `deploy/daemon.Dockerfile` for the lite image ([`SELF-HOSTING.md`](SELF-HOSTING.md)) |

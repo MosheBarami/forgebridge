@@ -94,7 +94,7 @@ jobs:
         # is indistinguishable from a passing one in a log.
         run: npx vitest run --dir scripts
 
-      # TODO(M41): the Studio plugin has 208 Luau tests (`plugin/tests/run.luau`,
+      # TODO(M41): the Studio plugin has 230 Luau tests (`plugin/tests/run.luau`,
       # documented in plugin/BUILD.md) and nothing in CI runs them, so a change to
       # plugin/src is currently reviewed on a human's word that they still pass.
       # Adding the step needs a pinned Luau toolchain — the version and its
