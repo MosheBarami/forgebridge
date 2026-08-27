@@ -74,6 +74,35 @@ describe('forgebridge-conformance', () => {
     expect(out.text()).toContain('source:');
   });
 
+  it('leaves the run case unsupported unless --run is passed, and passes it when it is', async () => {
+    harness = await startHarness();
+
+    // Without the flag there is no run surface to test, and the report says so
+    // rather than reporting a case it never ran as green. The flag is opt-in
+    // because a run against a real daemon calls a language model and spends
+    // whoever configured it's credit — every other call this command makes is a
+    // read or a proposal that costs nothing.
+    const quiet = captureStdout();
+    await main(
+      ['--daemon', harness.baseUrl, '--token', harness.daemon.producerToken, '--only', 'run-reports-every-attempt'],
+      {},
+    );
+    expect(quiet.text()).toContain('SKIP  run-reports-every-attempt');
+    expect(quiet.text()).toContain('declares no startRun()');
+    vi.restoreAllMocks();
+
+    const loud = captureStdout();
+    const code = await main(
+      ['--daemon', harness.baseUrl, '--token', harness.daemon.producerToken, '--only', 'run-reports-every-attempt', '--run'],
+      {},
+    );
+    expect(code, loud.text()).toBe(0);
+    expect(loud.text()).toContain('PASS  run-reports-every-attempt');
+    // The models this harness scripts, named in the notes: the run really fell
+    // back, so the case checked a list with something in it to check.
+    expect(loud.text()).toContain('conformance/down→provider-error');
+  });
+
   it('emits the report as JSON when asked', async () => {
     harness = await startHarness();
     const out = captureStdout();

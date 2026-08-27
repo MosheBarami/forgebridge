@@ -17,8 +17,10 @@ import type {
   ConnectorLinkStatus,
   ConnectorProject,
   ConnectorProposal,
+  ConnectorRun,
   ConnectorTree,
   ProposeInput,
+  RunInput,
 } from '../adapter.js';
 
 /**
@@ -32,11 +34,12 @@ import type {
  * 2. To give a connector author a worked example short enough to read in one
  *    sitting: this file is the whole of what MCP, A2A, the CLI and the SDKs are
  *    each doing behind their own vocabulary.
- * 3. To pin the daemon. When `/v1` grows the tree read and the run route that
- *    `TODO(M31)` and `TODO(M09)` promise, the two cases that report
- *    `unsupported` here start passing without anyone editing the suite — and if
- *    the shapes arrive different from the ones the protocol describes, these
- *    cases fail instead of quietly going along with it.
+ * 3. To pin the daemon. `POST /v1/runs` has since landed, and `startRun` below
+ *    is what that looked like from here: the case stopped being `unsupported`
+ *    the day the route arrived, and it would have failed rather than gone along
+ *    with it had the shape differed from the one the protocol describes. The
+ *    tree read is the same bet still outstanding — `readTree` refuses in the
+ *    protocol's own words today and returns a snapshot the day `/v1` serves one.
  *
  * ── The absence that matters ─────────────────────────────────────────────────
  *
@@ -58,6 +61,18 @@ export interface DaemonRestAdapterOptions {
   timeoutMs?: number;
   newId?: () => string;
   now?: () => Date;
+  /**
+   * Whether this adapter offers a run surface at all.
+   *
+   * Off by default, and the default is the point. `POST /v1/runs` calls a
+   * language model: pointed at a daemon holding somebody's OpenRouter key it
+   * spends their credit, and every other call this adapter makes is a read or a
+   * proposal that changes nothing anyone has to pay for. So a run is something
+   * the operator asks for — `forgebridge-conformance --run` — and when they have
+   * not, `run-reports-every-attempt` is reported `unsupported` because this
+   * adapter genuinely declares no `startRun`, not because the route is missing.
+   */
+  runs?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -83,6 +98,15 @@ interface RawDiff {
 export class DaemonRestAdapter implements ConnectorAdapter {
   readonly name = '@forgebridge/conformance reference adapter (daemon /v1 REST)';
 
+  /**
+   * Present only when the adapter was constructed with `runs: true`.
+   *
+   * Declared as an optional property rather than a method so that its absence
+   * is a real absence: the suite asks `adapter.startRun?` and gets nothing,
+   * which is a different fact from a method that exists and refuses.
+   */
+  readonly startRun?: (input: RunInput) => Promise<ConnectorRun>;
+
   readonly #baseUrl: string;
   readonly #producerToken: string;
   readonly #fetch: FetchLike;
@@ -97,6 +121,7 @@ export class DaemonRestAdapter implements ConnectorAdapter {
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#newId = options.newId ?? randomUUID;
     this.#now = options.now ?? ((): Date => new Date());
+    if (options.runs) this.startRun = (input): Promise<ConnectorRun> => this.#startRun(input);
   }
 
   async linkStatus(): Promise<ConnectorLinkStatus> {
@@ -256,6 +281,51 @@ export class DaemonRestAdapter implements ConnectorAdapter {
           'Ask the user to review the diff and approve it in Roblox Studio or in their ForgeBridge client. Approval is a human action; no call on this adapter can perform it (ADR-012).',
         );
     }
+  }
+
+  /**
+   * `POST /v1/runs` — a prompt in, a proposed ChangeSet out, nothing applied.
+   *
+   * The whole attempt list is forwarded, in the order the router tried the
+   * models, because that list is the reason the route answers 201 with a
+   * `failure` field instead of an HTTP error: a `ProtocolError` body has
+   * nowhere to put it (ADR-008). An adapter that reported only
+   * `resolvedModelId` would be discarding the record of who actually wrote the
+   * code.
+   *
+   * A run that never started — no model client, no candidate — refuses with
+   * `provider_unconfigured`, and the suite reads that as a gap in the
+   * deployment rather than a breach by the connector. A run that started and
+   * then failed is not a refusal: it answers 201 with every attempt listed, and
+   * lands here as a run whose status is `failed`.
+   *
+   * `timeoutMs` applies to this call as it does to every other, and a real run
+   * against a real provider can outlast the 30s default. An operator pointing
+   * this at a live daemon should raise it rather than read the abort as the
+   * daemon being down.
+   */
+  async #startRun(input: RunInput): Promise<ConnectorRun> {
+    const response = (await this.#request('POST', '/v1/runs', {
+      prompt: input.prompt,
+      projectId: input.projectId,
+      producer: { kind: 'rest', client: 'forgebridge conformance reference adapter' },
+    })) as {
+      run: {
+        id: string;
+        stage: string;
+        status: string;
+        attempts: ConnectorRun['attempts'];
+        changeSetIds?: string[];
+      };
+    };
+
+    return {
+      runId: response.run.id,
+      stage: response.run.stage,
+      status: response.run.status,
+      attempts: response.run.attempts,
+      changeSetIds: response.run.changeSetIds ?? [],
+    };
   }
 
   /**

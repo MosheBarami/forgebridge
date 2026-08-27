@@ -16,12 +16,13 @@ import { connectStudioDouble, daemonHumanApproval } from './reference/harness.js
  * conformant" should be checkable by whoever is holding the machine and not
  * only inside this repository's own test run.
  *
- * Two flags write to the daemon, and both are opt-in because this command can
- * be pointed at a real place: `--approve` records a real approval for the
- * fixture ChangeSet, which a paired Studio session will then apply, and
- * `--pair` attaches a stand-in consumer to a link. Without them the suite only
- * proposes — which changes nothing in the place — and reports the
- * apply-after-approval case as unsupported.
+ * Three flags reach past a read, and all three are opt-in because this command
+ * can be pointed at a real place: `--approve` records a real approval for the
+ * fixture ChangeSet, which a paired Studio session will then apply, `--pair`
+ * attaches a stand-in consumer to a link, and `--run` starts a real run, which
+ * calls a language model and spends whatever that costs. Without them the suite
+ * only proposes — which changes nothing in the place and costs nothing — and
+ * reports the apply-after-approval and run cases as unsupported.
  */
 
 const USAGE = [
@@ -39,6 +40,9 @@ const USAGE = [
   '  --approve           WRITES. Perform the out-of-band human approval, so the',
   '                      apply-after-approval case can run. A paired Studio',
   '                      session will apply the fixture ChangeSet for real.',
+  '  --run               SPENDS. Start a real run, so the run case can check the',
+  '                      attempt list. This calls a language model through the',
+  '                      daemon and costs whatever that provider charges.',
   '  --json              print the report as JSON instead of as text',
   '  --list              list the case ids and exit',
   '  --help',
@@ -54,6 +58,7 @@ export interface Flags {
   only: string[] | null;
   pair: string | null;
   approve: boolean;
+  run: boolean;
   json: boolean;
 }
 
@@ -66,6 +71,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     only: null,
     pair: null,
     approve: false,
+    run: false,
     json: false,
   };
 
@@ -101,6 +107,9 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         break;
       case '--approve':
         flags.approve = true;
+        break;
+      case '--run':
+        flags.run = true;
         break;
       case '--json':
         flags.json = true;
@@ -138,7 +147,7 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
     return 2;
   }
 
-  const adapter = new DaemonRestAdapter({ baseUrl: flags.daemon, producerToken: flags.token });
+  const adapter = new DaemonRestAdapter({ baseUrl: flags.daemon, producerToken: flags.token, runs: flags.run });
 
   if (flags.pair) {
     const studio = await connectStudioDouble({ baseUrl: flags.daemon, pairingCode: flags.pair });
@@ -148,6 +157,12 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
   if (flags.approve) {
     process.stderr.write(
       'note: --approve records a real approval for the fixture ChangeSet. A paired Studio session will apply it.\n',
+    );
+  }
+
+  if (flags.run) {
+    process.stderr.write(
+      'note: --run starts a real run. The daemon will call a language model, and whatever that costs is charged to whoever configured it.\n',
     );
   }
 

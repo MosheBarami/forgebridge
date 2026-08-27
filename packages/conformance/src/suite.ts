@@ -604,17 +604,40 @@ const runReportsEveryAttempt: Case = {
     const startRun = t.adapter.startRun?.bind(t.adapter);
     if (!startRun) {
       throw t.unsupported(
-        'this connector exposes no run surface. Nothing can produce a ChangeSet from a prompt yet: there is no POST /v1/runs on the daemon (TODO(M09) in packages/cli/src/commands/run.ts), so this case is waiting on the route rather than on the connector.',
+        'this connector declares no startRun(), so it offers no path from a prompt to a ChangeSet for this case to examine. The gap is the connector\u2019s: the daemon serves POST /v1/runs.',
       );
     }
 
     const projectId = await ensureProject(t);
-    const run = await startRun({
-      projectId,
-      prompt: 'conformance: add a marker script to ServerScriptService',
-      ...(t.options.run?.input ?? {}),
-    });
+    const outcome = await rejection(() =>
+      startRun({
+        projectId,
+        prompt: 'conformance: add a marker script to ServerScriptService',
+        ...(t.options.run?.input ?? {}),
+      }),
+    );
 
+    if (isRejection(outcome)) {
+      const view = t.classify(outcome.error, 'startRun');
+      if (!view) return;
+      if (!t.check(view.recognised, `startRun() failed with something this connector could not classify (reported as "${view.code}")`)) return;
+      // One code is a gap rather than a breach, and only one. A deployment with
+      // no model wired in cannot run anything, and that is a fact about the
+      // deployment; every other refusal is this connector failing to do the one
+      // thing the case is about. Widening this to "any protocol error means
+      // unsupported" would turn the case into a formality, which is the same
+      // outcome as deleting it.
+      if (view.code !== 'provider_unconfigured') {
+        t.fail(
+          `startRun() refused with "${view.code}"${view.message ? `: ${view.message}` : ''}. A run that cannot start is not a run whose attempt list can be checked.`,
+        );
+        return;
+      }
+      if (!t.check(Boolean(view.remedy && view.remedy.length > 0), 'startRun() refused with "provider_unconfigured" and no remedy; the protocol requires a refusal to say what to do next')) return;
+      throw t.unsupported(`this deployment has no model client to route between: ${view.remedy ?? view.message ?? ''}`);
+    }
+
+    const run = outcome.value;
     const parsed = ConnectorRunShape.safeParse(run);
     if (!parsed.success) {
       for (const line of issueLines(parsed.error, 'run')) t.fail(line);

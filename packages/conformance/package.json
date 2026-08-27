@@ -8,7 +8,8 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./reference": { "types": "./dist/reference/index.d.ts", "default": "./dist/reference/index.js" }
+    "./reference": { "types": "./dist/reference/index.d.ts", "default": "./dist/reference/index.js" },
+    "./python": { "types": "./dist/python/index.d.ts", "default": "./dist/python/index.js" }
   },
   "bin": { "forgebridge-conformance": "./dist/bin.js" },
   "files": ["dist"],

@@ -19,9 +19,12 @@ classifier, and inherits every case.
 |---|---|
 | The twelve cases, the runner, the report | written, tested |
 | Reference adapter over the daemon's `/v1` REST surface | written, run against a live daemon in `test/reference-adapter.test.ts` |
-| Proof the suite can fail | twelve cheating adapters in `test/cheating-adapters.test.ts` |
+| Proof the suite can fail | twelve cheating adapters in `test/cheating-adapters.test.ts`, three more against the Python SDK in `test/python-sdk.test.ts` |
 | `forgebridge-conformance` binary | written, exercised end to end in `test/bin.test.ts` |
-| Adapters for `@forgebridge/mcp`, `@forgebridge/a2a`, the CLI, the SDKs | not written — see [Wiring a connector in](#wiring-a-connector-in) |
+| `@forgebridge/mcp` | passes, against a live daemon — `packages/mcp/test/conformance.test.ts` |
+| `@forgebridge/a2a` | passes, against a live daemon — `packages/a2a/test/conformance.test.ts` |
+| `@forgebridge/cli` | passes, against a live daemon — `packages/cli/test/conformance.test.ts` |
+| The Python SDK (`packages/sdk-python`, unpublished until M30) | passes, against a live daemon — `test/python-sdk.test.ts`, over the driver in that package's `tests/conformance_driver.py` |
 
 ## The cases
 
@@ -97,11 +100,13 @@ Against a daemon that is already running:
 forgebridge-conformance --daemon http://127.0.0.1:7317 --token "$FORGEBRIDGE_PRODUCER_TOKEN"
 ```
 
-`--approve` and `--pair <code>` are opt-in because they **write**: `--approve` records a real
-approval for the fixture ChangeSet, and a paired Studio session will apply it. Without them
-the suite only proposes — which changes nothing in the place — and reports
-`apply-after-human-approval` as unsupported. `--only`, `--json`, `--list` and `--help` do
-what they look like. Exit code 1 when any case fails.
+`--approve`, `--pair <code>` and `--run` are opt-in because each reaches past a read.
+`--approve` records a real approval for the fixture ChangeSet, and a paired Studio session
+will apply it. `--run` starts a real run, which calls a language model through the daemon and
+costs whatever that provider charges. Without them the suite only proposes — which changes
+nothing in the place and costs nothing — and reports `apply-after-human-approval` and
+`run-reports-every-attempt` as unsupported. `--only`, `--json`, `--list` and `--help` do what
+they look like. Exit code 1 when any case fails.
 
 From a test:
 
@@ -125,27 +130,44 @@ import this package to run the suite, which is the direction the dependency actu
 to go.
 
 A connector adapter is a shim over calls that already exist. For `@forgebridge/mcp` it is the
-eleven tool handlers with their `textResult` payloads parsed back out; for `@forgebridge/a2a`
-it is `ForgeBridgeBackend` plus the skill invocations; for the CLI it is the command
-functions; for an SDK it is the client methods. Sketch:
+tool handlers with their `textResult` payloads parsed back out; for `@forgebridge/a2a` it is
+`ForgeBridgeBackend` plus the skill invocations; for the CLI it is the command functions under
+`--json`; for an SDK it is the client methods. All four are written, and each one is the
+shortest worked example of its own connector:
 
-```ts
-// packages/mcp/test/conformance.test.ts (not written yet — owner: the MCP author)
-const adapter: ConnectorAdapter = {
-  name: '@forgebridge/mcp',
-  linkStatus: () => callTool('forge.link_status').then(asJson),
-  listProjects: () => callTool('forge.list_projects').then((r) => asJson(r).projects),
-  readTree: (projectId) => callTool('forge.read_tree', { projectId }).then(asJson),
-  propose: (input) => callTool('forge.propose_changeset', input).then(asJson),
-  diff: (changeSetId) => callTool('forge.diff_changeset', { changeSetId }).then(asJson),
-  apply: (changeSetId) => callTool('forge.apply_changeset', { changeSetId }).then(asJson),
-  describeError: (error) => mapToolError(error),
-  describeSurface: () => ({ name: '@forgebridge/mcp', protocolVersion: PROTOCOL_VERSION, operations: TOOL_NAMES.map((id) => ({ id })) }),
-};
-```
+| Connector | Its adapter | What it drives |
+|---|---|---|
+| `@forgebridge/mcp` | `packages/mcp/test/conformance.test.ts` | tool calls through `registerForgeBridgeTools`, so a refusal arrives as the `isError` result a model actually receives |
+| `@forgebridge/a2a` | `packages/a2a/test/conformance.test.ts` | skill invocations over the JSON-RPC surface |
+| `@forgebridge/cli` | `packages/cli/test/conformance.test.ts` | the command functions under `--json`, reading the document a `\| jq` would have received |
+| The Python SDK (`packages/sdk-python`, unpublished until M30) | `src/python/sdk-adapter.ts` | `ForgeBridgeClient`, one process over — see below |
 
 The reference adapter in `src/reference/daemon-adapter.ts` is the worked version of the same
 thing over plain REST, short enough to read in one sitting.
+
+### The Python SDK is the exception, and why
+
+`src/python/sdk-adapter.ts` is the one adapter that lives here rather than in the connector's
+own tree, and the reason is structural rather than a judgement about where it belongs. This
+suite needs a built npm workspace and a live daemon; the workflow job that lints and tests the
+Python SDK has neither, and hosting a TypeScript adapter inside a package whose registry is
+PyPI (M30 owns publishing it) would make that directory an npm workspace and change
+`package-lock.json`.
+
+So the split follows the language. The Python half is that package's
+`tests/conformance_driver.py` — a subprocess entry point in the same shape as its
+`tests/roundtrip.py`, which the cross-language schema drift proof already shells out to.
+The TypeScript half is a bridge that speaks JSON lines to it and decides nothing: every value
+it returns came from `ForgeBridgeClient`, and every error code came from
+`forgebridge.describe_error`. `describeError` is synchronous and the classifier is in another
+process, so the bridge asks for every classification it will need in one batch at startup, and
+**throws** for an input it never showed the SDK rather than defaulting one to `internal` — a
+bridge that guessed there would pass `error-codes-total` without asking Python anything.
+
+This is the only connector that runs the matrix in another language, and that is most of its
+value: three TypeScript connectors passing a TypeScript suite share the same zod schemas, the
+same `ForgeBridgeError` and the same idea of what a ChangeSet is in memory, so their agreement
+is weaker evidence than it looks. The Python SDK shares none of it.
 
 ## Proving the suite can fail
 
@@ -153,6 +175,9 @@ A conformance suite nobody has watched fail is decoration: every case is a claim
 it would catch, and an untested claim about a safety check is the kind of thing discovered to
 have been false on the day it mattered. `test/cheating-adapters.test.ts` therefore wraps the
 reference adapter — one behaviour changed at a time — and asserts on the case that goes red.
+`test/python-sdk.test.ts` does the same to the Python adapter for the three approval cheats,
+because "the suite catches this" is a claim about each connector's adapter and not only about
+the reference one.
 
 | The cheat | The case that catches it |
 |---|---|
@@ -182,10 +207,18 @@ was not checked. It does not claim more than it verified.
 
 ## Known gaps
 
-- **`tree-read` and `run-reports-every-attempt` report `unsupported` against today's daemon.**
-  `/v1` serves no tree snapshot and has no `POST /v1/runs`. Both refusals are honest ones, so
-  the suite records the gap and stays green — and both cases start passing the day the
-  endpoints land, with no edit here. That is the point of writing them now.
+- **`tree-read` reports `unsupported` against today's daemon.** `/v1` serves no tree snapshot,
+  so every connector refuses the read with `not_found` and a remedy. That is an honest
+  refusal, so the suite records the gap and stays green — and the case starts passing the day
+  the endpoint lands, with no edit here. That is the point of having written it early:
+  `run-reports-every-attempt` was on this list until `POST /v1/runs` landed, and it started
+  passing without the suite being touched.
+- **`run-reports-every-attempt` reports `unsupported` where there is no model to route
+  between.** Two shapes qualify and only two: a connector that declares no `startRun`, and a
+  deployment whose `POST /v1/runs` refuses with `provider_unconfigured` and a remedy. Every
+  other refusal fails the case, because "unsupported" as the answer to any failure is the same
+  as having no case at all — `test/reference-adapter.test.ts` plants a `stale_base` refusal and
+  watches it go red.
 - **`TODO(M31)` in `packages/a2a/src/card.ts` asked this suite to validate the Agent Card
   against the published A2A JSON Schema.** It does not. `surface-portable` checks what is
   connector-neutral — unique, portable ids on a compatible protocol major — because
@@ -205,6 +238,7 @@ was not checked. It does not claim more than it verified.
 - **The suite reads no per-operation `ApplyResult`.** `/v1` records one and exposes no
   producer route that returns it, so `ConnectorApplyReport.outcomes` is optional and unchecked.
   When the additive read lands, the case to extend is `apply-after-human-approval`.
-- **No connector has an adapter yet.** The suite is proved against the reference adapter and
-  against twelve deliberate cheats; the day MCP and A2A each add one is the day the
-  divergences this package was built to catch actually get caught.
+- **`surface-portable` reports `unsupported` for the reference adapter and the Python SDK.**
+  Neither advertises a tool list, a skill list or an Agent Card: one is plain REST and the
+  other is a library. There is nothing there to be portable or not, and inventing a surface so
+  the case had something to check would be the suite grading its own fixture.

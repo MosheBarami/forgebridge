@@ -280,10 +280,14 @@ describe('an adapter that hides a model fallback is caught', () => {
   const expectedAttempts = attempts.map((attempt) => ({ modelId: attempt.modelId, outcome: attempt.outcome }));
 
   /**
-   * A connector with a run surface, standing in for the one `/v1` does not have
-   * yet. The run is scripted rather than real because the case under test is
-   * "does the connector report the whole attempt list", and a scripted router
-   * is the only way to know what the whole list *is*.
+   * A connector whose run surface answers from a script rather than from the
+   * daemon.
+   *
+   * Scripted rather than real, because the case under test is "does the
+   * connector report the whole attempt list" and a scripted router is the only
+   * way to know what the whole list *is*. `test/reference-adapter.test.ts` runs
+   * the same case against the daemon's own `POST /v1/runs`; this file is where
+   * the list is deliberately wrong.
    */
   class WithRuns extends Wrapping {
     constructor(inner: ConnectorAdapter, name: string, readonly reported: ModelAttempt[]) {
