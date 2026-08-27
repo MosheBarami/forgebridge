@@ -165,7 +165,9 @@ function appPackageNames(repoRoot: string): string[] {
   for (const dirent of readdirSync(appsDir, { withFileTypes: true })) {
     if (!dirent.isDirectory()) continue;
     const manifest = path.join(appsDir, dirent.name, 'package.json');
-    if (!existsSync(manifest) || !statSync(manifest).isFile()) continue;
+    // No `existsSync`/`statSync` precheck: the `catch` below already covers a
+    // manifest that is missing, is a directory, or is unreadable, and asking
+    // first only adds a check-then-use race (`js/file-system-race`).
     try {
       const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: unknown };
       if (typeof parsed.name === 'string' && parsed.name.length > 0) names.push(parsed.name);

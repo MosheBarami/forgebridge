@@ -1210,7 +1210,7 @@ function routerBody(source: string): string {
 }
 
 function literalsComparedTo(body: string, variable: string): Set<string> {
-  const pattern = new RegExp(`${variable.replace(/[[\]]/g, '\\$&')}\\s*===\\s*'([^']+)'`, 'g');
+  const pattern = new RegExp(`${variable.replace(/[\\[\]]/g, '\\$&')}\\s*===\\s*'([^']+)'`, 'g');
   return new Set([...body.matchAll(pattern)].map((match) => match[1] as string));
 }
 

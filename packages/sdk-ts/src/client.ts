@@ -66,6 +66,25 @@ import {
   type WireSchemaName,
 } from './generated/wire.js';
 
+/**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
@@ -129,7 +148,7 @@ export class ForgeBridgeClient {
   readonly #runIdleTimeoutMs: number;
 
   constructor(options: ForgeBridgeClientOptions) {
-    this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.#baseUrl = withoutTrailingSlashes(options.baseUrl);
     this.#producerToken = options.producerToken;
     this.#linkId = options.linkId;
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
@@ -671,10 +690,15 @@ export function buildPath(
     path = path.replace(`{${parameter.name}}`, encodeURIComponent(value));
   }
 
-  const unresolved = /\{([^}]+)\}/.exec(path);
-  if (unresolved) {
+  // Two `indexOf` calls rather than `/\{([^}]+)\}/`. The regex is the textbook
+  // polynomial-ReDoS shape CodeQL's `js/polynomial-redos` fires on, and the path
+  // it reads is built here from caller-supplied ids — so this is a scan, and the
+  // reported name is the same one the regex would have captured.
+  const open = path.indexOf('{');
+  if (open !== -1) {
+    const close = path.indexOf('}', open + 1);
     throw new RouteContractError(
-      `${route.operationId} has an unresolved path parameter "${unresolved[1]}" that the route table does not declare`,
+      `${route.operationId} has an unresolved path parameter "${close === -1 ? path.slice(open + 1) : path.slice(open + 1, close)}" that the route table does not declare`,
     );
   }
   for (const name of Object.keys(supplied)) {

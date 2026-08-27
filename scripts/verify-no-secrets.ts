@@ -47,7 +47,7 @@
  * Run:  npm run verify:no-secrets
  * Exit: 0 clean, 1 with one line per finding.
  */
-import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -281,8 +281,24 @@ export function verifyNoSecrets(repoRoot: string): SecretFinding[] {
     if (exempt.has(rel)) continue;
 
     const abs = path.join(repoRoot, rel);
-    if (statSync(abs).size > 2 * 1024 * 1024) continue;
-    const buffer = readFileSync(abs);
+    // One descriptor, opened once, for both the size and the bytes. `statSync`
+    // on a path followed by `readFileSync` on the same path is a check-then-use
+    // race (`js/file-system-race`) — and here the check decides whether the
+    // gate scans a file at all, so losing that race is a file that skipped the
+    // secret scan. `fstatSync` and `readFileSync` on the descriptor are the
+    // same file by construction.
+    let buffer: Buffer;
+    // A path this walk found and cannot now open is not a file with no secrets
+    // in it — it is a file this gate did not read. Throwing stops the run with
+    // the path named; `continue` would report clean over a gap. There is no
+    // `S5` for it on purpose: this is the gate failing, not the tree.
+    const handle = openSync(abs, 'r');
+    try {
+      if (fstatSync(handle).size > 2 * 1024 * 1024) continue;
+      buffer = readFileSync(handle);
+    } finally {
+      closeSync(handle);
+    }
     if (isProbablyBinary(buffer)) continue;
 
     findings.push(...scanText(rel, buffer.toString('utf8')));

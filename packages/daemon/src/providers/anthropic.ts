@@ -25,6 +25,25 @@ import {
 } from './openai-compatible.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * The Anthropic adapter (M22) — and the reason it is a file of its own.
  *
  * **The Messages API is not OpenAI-compatible, and this does not pretend it is.**
@@ -132,7 +151,7 @@ export class AnthropicClient implements RunModelClient {
 
   constructor(options: AnthropicOptions) {
     this.#secrets = options.secrets;
-    this.#baseUrl = (options.baseUrl ?? ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+    this.#baseUrl = withoutTrailingSlashes(options.baseUrl ?? ANTHROPIC_BASE_URL);
     this.#fetch = options.fetch ?? ((url, init) => fetch(url, init));
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#apiVersion = options.apiVersion ?? ANTHROPIC_VERSION;

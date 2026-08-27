@@ -21,6 +21,25 @@ import {
 import type { RunModelClient } from '../wire.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * One adapter for every provider that serves OpenAI's `/chat/completions` shape
  * (M22), and the reasons it is written this way.
  *
@@ -214,7 +233,7 @@ export class OpenAICompatibleClient implements RunModelClient {
     this.spec = options.spec;
     this.providers = [options.spec.provider];
     this.#secrets = options.secrets;
-    this.#baseUrl = (options.baseUrl ?? options.spec.baseUrl).replace(/\/+$/, '');
+    this.#baseUrl = withoutTrailingSlashes(options.baseUrl ?? options.spec.baseUrl);
     this.#fetch = options.fetch ?? ((url, init) => fetch(url, init));
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#credential = options.credential ?? 'required';

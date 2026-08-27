@@ -1084,8 +1084,15 @@ export function checkSurfaceCounts(docs: readonly Doc[], facts: RepoFacts): Viol
 
 export function checkAll(docs: readonly Doc[], facts: RepoFacts, root: string): Violation[] {
   const readOr = (rel: string): string => {
-    const abs = path.join(root, rel);
-    return existsSync(abs) && statSync(abs).isFile() ? readFileSync(abs, 'utf8') : '';
+    // Read and catch, rather than `existsSync` + `statSync` + read: three calls
+    // where one will do, and a check-then-use race (`js/file-system-race`) in
+    // between. A directory throws `EISDIR` and lands in the same branch as a
+    // missing file, which is the branch it belonged in.
+    try {
+      return readFileSync(path.join(root, rel), 'utf8');
+    } catch {
+      return '';
+    }
   };
   return [
     ...checkPackageExistence(docs, facts),

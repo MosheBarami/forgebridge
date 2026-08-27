@@ -21,6 +21,25 @@ import { ProtocolError, PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER, type Rollback
 import { daemonUnreachable, operationFailed, usageError } from './exit.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * The transport, spoken over HTTP.
  *
  * This file is the whole of the CLI's knowledge of the wire, and it holds no
@@ -147,7 +166,7 @@ export class DaemonClient implements Transport {
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(options: ClientOptions) {
-    this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.#baseUrl = withoutTrailingSlashes(options.baseUrl);
     this.#token = options.token;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#fetch = options.fetch ?? globalThis.fetch;

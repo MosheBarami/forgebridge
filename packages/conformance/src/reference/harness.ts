@@ -12,6 +12,25 @@ import type { HumanApproval } from '../adapter.js';
 import type { FetchLike } from './daemon-adapter.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * The two things the suite needs that a connector must never be able to do:
  * approve a ChangeSet, and be the Roblox Studio session on the other end.
  *
@@ -39,7 +58,7 @@ export interface DaemonHarnessOptions {
  * own idea of the set rather than the one the daemon is holding.
  */
 export function daemonHumanApproval(options: DaemonHarnessOptions): HumanApproval {
-  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const baseUrl = withoutTrailingSlashes(options.baseUrl);
   const doFetch = options.fetch ?? ((input: string, init?: RequestInit) => globalThis.fetch(input, init));
   const headers = (withBody: boolean): Record<string, string> => ({
     accept: 'application/json',
@@ -132,7 +151,7 @@ export interface StudioDouble {
 }
 
 export async function connectStudioDouble(options: StudioDoubleOptions): Promise<StudioDouble> {
-  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const baseUrl = withoutTrailingSlashes(options.baseUrl);
   const doFetch = options.fetch ?? ((input: string, init?: RequestInit) => globalThis.fetch(input, init));
 
   const paired = await doFetch(`${baseUrl}/v1/link/pair`, {

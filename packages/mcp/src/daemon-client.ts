@@ -10,6 +10,25 @@ import { PRODUCER_TOKEN_HEADER } from '@forgebridge/daemon';
 import { DaemonRequestError } from './errors.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * A client for the daemon's `/v1` surface, and nothing more.
  *
  * This is the whole of the connector's contact with ForgeBridge. Every decision
@@ -72,7 +91,7 @@ export class DaemonClient {
   readonly #timeoutMs: number;
 
   constructor(options: DaemonClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = withoutTrailingSlashes(options.baseUrl);
     this.#producerToken = options.producerToken;
     this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;

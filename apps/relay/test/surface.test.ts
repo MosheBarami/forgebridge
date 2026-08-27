@@ -73,7 +73,7 @@ export interface RouterLiterals {
 export function daemonRouterLiterals(body: string): RouterLiterals {
   const literals = (variable: string): Set<string> =>
     new Set(
-      [...body.matchAll(new RegExp(`${variable.replace(/[[\]]/g, '\\$&')}\\s*===\\s*'([^']+)'`, 'g'))].map(
+      [...body.matchAll(new RegExp(`${variable.replace(/[\\[\]]/g, '\\$&')}\\s*===\\s*'([^']+)'`, 'g'))].map(
         (match) => match[1] as string,
       ),
     );

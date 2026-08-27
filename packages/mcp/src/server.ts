@@ -210,6 +210,29 @@ export function startHttp(options: StartOptions): Promise<Server> {
   const http = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async (): Promise<void> => {
       try {
+        // First, before the Host and Origin checks and before the path and the
+        // method, so an unauthenticated caller learns nothing here about what
+        // this binding serves or which headers it would have accepted — and,
+        // more to the point, so there is no route that reaches a registered
+        // tool without it.
+        //
+        // The Host and Origin checks used to run ahead of this one, and CodeQL's
+        // `js/user-controlled-bypass` was right about the shape: two conditions
+        // a request controls stood between a request and the authorization
+        // check. Nothing was bypassable — omitting `Origin` only got a caller
+        // *to* the token — but an unauthenticated caller could tell a rejected
+        // Host from a rejected Origin from a served endpoint, which is exactly
+        // what the comment above this check already said must not happen.
+        if (!authorizationMatches(req.headers.authorization, config.httpToken)) {
+          rejectRequest(res, 401, 'a bearer token is required to call this MCP endpoint', {
+            // The standard challenge, and the one line that tells an operator
+            // which of the two ForgeBridge secrets this endpoint wants.
+            'www-authenticate': 'Bearer',
+          });
+          return;
+        }
+        // Both checks are defence in depth behind the token, and both stay:
+        // a browser that somehow held the token still cannot use it from a page.
         if (!hostIsAllowed(req.headers.host, config.httpHost)) {
           rejectRequest(res, 400, 'Host is not permitted');
           return;
@@ -218,17 +241,6 @@ export function startHttp(options: StartOptions): Promise<Server> {
         // carrying an Origin is a browser saying so.
         if (req.headers.origin !== undefined) {
           rejectRequest(res, 403, 'cross-origin requests are not permitted');
-          return;
-        }
-        // Before the path and the method, so an unauthenticated caller learns
-        // nothing here about what this binding serves — and, more to the point,
-        // so there is no route that reaches a registered tool without it.
-        if (!authorizationMatches(req.headers.authorization, config.httpToken)) {
-          rejectRequest(res, 401, 'a bearer token is required to call this MCP endpoint', {
-            // The standard challenge, and the one line that tells an operator
-            // which of the two ForgeBridge secrets this endpoint wants.
-            'www-authenticate': 'Bearer',
-          });
           return;
         }
         const path = (req.url ?? '/').split('?')[0];

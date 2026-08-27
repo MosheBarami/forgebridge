@@ -12,6 +12,25 @@ import {
 import type { RunModelClient } from './wire.js';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * The OpenRouter adapter — one vendor's HTTP, held outside the engine.
  *
  * It lives in the daemon rather than in `packages/core` because B2 in
@@ -94,7 +113,7 @@ export class OpenRouterClient implements RunModelClient {
 
   constructor(options: OpenRouterOptions) {
     this.#secrets = options.secrets;
-    this.#baseUrl = (options.baseUrl ?? OPENROUTER_BASE_URL).replace(/\/+$/, '');
+    this.#baseUrl = withoutTrailingSlashes(options.baseUrl ?? OPENROUTER_BASE_URL);
     this.#fetch = options.fetch ?? ((url, init) => fetch(url, init));
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#appUrl = options.appUrl;

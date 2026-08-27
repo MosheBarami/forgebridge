@@ -116,6 +116,17 @@ jobs:
           # security gate that also blocks on style is a gate people learn to
           # override.
           queries: security-extended
+          # `scripts/semgrep/tests/forgebridge.ts` is a planted violation of
+          # every Semgrep rule in `scripts/semgrep/rules` — it logs an API key
+          # on purpose, because a rule with no failing fixture is decoration.
+          # CodeQL found exactly what was planted there and blocked on it. The
+          # Semgrep job already excludes the same directory from its own scan
+          # for the same reason (rule W5), so this is that decision applied to
+          # the second scanner rather than a new one. Nothing else is excluded:
+          # `scripts/` holds the gates and is analysed.
+          config: |
+            paths-ignore:
+              - scripts/semgrep/tests
 
       - name: Analyse
         uses: github/codeql-action/analyze@v4

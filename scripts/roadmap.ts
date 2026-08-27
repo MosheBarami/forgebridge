@@ -217,7 +217,16 @@ const invokedDirectly =
 if (invokedDirectly) {
   const rendered = generate();
   const target = path.join(ROOT, TARGET);
-  const existing = existsSync(target) ? readFileSync(target, 'utf8') : '';
+  // Read and handle the failure, rather than `existsSync` then read: the two
+  // calls are a check-then-use race (`js/file-system-race`), and "absent" and
+  // "unreadable" want the same answer here anyway — there is nothing to compare
+  // against, so the file is stale.
+  let existing = '';
+  try {
+    existing = readFileSync(target, 'utf8');
+  } catch {
+    existing = '';
+  }
   if (process.argv.includes('--check')) {
     if (existing !== rendered) {
       process.stderr.write(`roadmap: ${TARGET} is stale. Run \`npm run generate:roadmap\`.\n`);

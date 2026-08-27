@@ -39,6 +39,25 @@ import {
 } from '../ports/telemetry.js';
 import { SAMPLED, newSpanId, newTraceId } from './ids.js';
 
+/**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
 /** OTLP `Status.StatusCode`. */
 const STATUS_UNSET = 0;
 const STATUS_OK = 1;
@@ -174,7 +193,7 @@ class OtlpExporter implements TelemetryPort {
   #inFlight: Promise<void> = Promise.resolve();
 
   constructor(options: OtlpTelemetryOptions) {
-    this.#endpoint = options.endpoint.replace(/\/+$/, '');
+    this.#endpoint = withoutTrailingSlashes(options.endpoint);
     this.#maxBatchSize = options.maxBatchSize ?? 128;
     this.#maxQueueSize = options.maxQueueSize ?? 2048;
     this.#headers = { 'content-type': 'application/json', ...(options.headers ?? {}) };

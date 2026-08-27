@@ -139,6 +139,33 @@ describe('the HTTP binding requires a bearer token', () => {
     expect((await fetch(url, { method: 'GET' })).status).toBe(401);
   });
 
+  it('refuses before it checks Host or Origin, for the same reason', async () => {
+    const url = await listen();
+
+    // These answer 400 and 403 once authenticated, and they used to answer them
+    // unauthenticated too, because both checks ran ahead of the token. That let
+    // a stranger tell a rejected Host from a rejected Origin from a served
+    // endpoint — three different answers to "is something listening here, and
+    // what will it take?" — which is the thing the test above exists to stop.
+    //
+    // The control is the line after each: with the token, the same request
+    // still gets the specific refusal. Moving the checks behind the token did
+    // not delete them.
+    const withOrigin = { ...initialize(), headers: { ...initialize().headers, origin: 'https://evil.example' } };
+    expect((await fetch(url, withOrigin)).status).toBe(401);
+    expect(
+      (await fetch(url, { ...withOrigin, headers: { ...withOrigin.headers, authorization: `Bearer ${TOKEN}` } }))
+        .status,
+    ).toBe(403);
+
+    // `Host` gets only the unauthenticated half here: `fetch` will not let a
+    // caller set that header — undici writes the one it derived from the URL —
+    // so there is no way from this side to present a bad Host with a good
+    // token. `hostIsAllowed` is covered directly in `transport.test.ts`; what
+    // this line pins is the ordering, which is the part that changed.
+    expect((await fetch(url, initialize())).status).toBe(401);
+  });
+
   it('accepts the token and answers a real initialize', async () => {
     const url = await listen();
     const response = await fetch(url, initialize(`Bearer ${TOKEN}`));

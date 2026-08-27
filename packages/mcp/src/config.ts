@@ -2,6 +2,25 @@ import { randomBytes } from 'node:crypto';
 import { DEFAULT_DAEMON_PORT, LOOPBACK_HOST, PRODUCER_TOKEN_ENV } from '@forgebridge/daemon';
 
 /**
+ * Strip trailing `/` in linear time.
+ *
+ * `replace(/\/+$/, '')` stood here and reads better, but `\/+$` is the textbook
+ * polynomial-ReDoS shape — on a long run of slashes the engine backtracks
+ * O(n^2), which is what CodeQL's `js/polynomial-redos` fires on. A base URL is a
+ * caller-supplied string, so the loop is the honest answer rather than an
+ * argument about who would ever pass one. Local to this file on purpose: it is
+ * three lines, and a shared utility package for it would cross a boundary
+ * `verify-boundaries.ts` is right to keep closed.
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  // 47 is `/`. charCodeAt keeps this a scan, with no allocation per character.
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return value.slice(0, end);
+}
+
+
+/**
  * How this server was asked to run, resolved once from flags and environment.
  *
  * `DEFAULT_DAEMON_PORT` and `PRODUCER_TOKEN_ENV` are imported from the daemon
@@ -138,7 +157,7 @@ function normaliseUrl(raw: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new ConfigError(`the daemon URL must be http or https, not "${url.protocol}"`);
   }
-  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  return `${url.origin}${withoutTrailingSlashes(url.pathname)}`;
 }
 
 export function resolveConfig(argv: readonly string[], env: NodeJS.ProcessEnv): ServerConfig {
