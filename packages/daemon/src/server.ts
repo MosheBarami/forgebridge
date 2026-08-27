@@ -22,6 +22,7 @@ import {
   withinSizeLimit,
   type ChangeSetStatus,
   type Operation,
+  carriesLuauSource,
 } from '@forgebridge/protocol';
 import {
   CircuitBreaker,
@@ -1769,12 +1770,6 @@ function parseCursor(raw: string | null): number {
  * same act by another route — the protocol allows it, and an analyser gate that
  * only looked at `writeScript` would be a gate with a door beside it.
  */
-function carriesLuauSource(operation: Operation): boolean {
-  if (operation.op === 'writeScript') return true;
-  if (operation.op === 'setProperty') return operation.property === 'Source';
-  if (operation.op === 'createInstance') return 'Source' in operation.properties;
-  return false;
-}
 
 /**
  * One Luau source a ChangeSet carries, and the operation that carries it.

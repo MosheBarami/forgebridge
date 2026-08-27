@@ -130,6 +130,84 @@ export function pathsOf(operation: Operation): string[] {
   return paths;
 }
 
+/**
+ * Every Luau source an operation would install, with the path it lands at.
+ *
+ * THE REASON THIS LIVES HERE. A Script arrives three ways and only one of them
+ * is named `writeScript`: `createInstance` can carry `Source` in its property
+ * bag, and `setProperty` can write `Source` on an instance that already exists.
+ * Code that checks `op === 'writeScript'` is therefore blind to two thirds of
+ * the ways code gets into a place — and that exact blindness has now been found
+ * three separate times, in three separate components, each written by someone
+ * who knew the rule and still reached for the obvious check:
+ *
+ *   - the daemon's diff reported `scripts: 0` over a set that installed one
+ *   - the Studio approval panel showed no code for the same sets
+ *   - the core's analyser input skipped them, so an auto-apply gate resting on
+ *     that verdict would have applied Luau nobody analysed
+ *
+ * Three independent fixes is a sign the fact belongs in one place. It is a fact
+ * about the operation vocabulary, and the vocabulary is defined here.
+ */
+export function luauSourcesOf(operation: Operation): Array<{ path: string; source: string }> {
+  if (operation.op === 'writeScript') {
+    return [{ path: operation.path, source: operation.source }];
+  }
+  if (operation.op === 'setProperty') {
+    return operation.property === 'Source' && operation.value.t === 'String'
+      ? [{ path: operation.path, source: operation.value.v }]
+      : [];
+  }
+  if (operation.op === 'createInstance') {
+    const source = operation.properties['Source'];
+    return source !== undefined && source.t === 'String'
+      ? [{ path: operation.path, source: source.v }]
+      : [];
+  }
+  return [];
+}
+
+/**
+ * True when this operation TARGETS Luau source, whether or not the source can
+ * be read.
+ *
+ * Deliberately not `luauSourcesOf(op).length > 0`. That was the first shape of
+ * this helper and a daemon test caught it being less safe than the code it
+ * replaced: a `setProperty` of `Source` whose value is not a readable string
+ * still installs something at a script's Source, and answering "no Luau here"
+ * lets it past every check that asks. Unreadable is not absent.
+ *
+ * So: this is the FAIL-CLOSED question — should this operation be treated as
+ * code? `luauSourcesOf` is the narrower one — which sources can actually be
+ * handed to an analyser. A caller that needs to refuse what it cannot read
+ * compares the two.
+ */
+export function carriesLuauSource(operation: Operation): boolean {
+  if (operation.op === 'writeScript') return true;
+  if (operation.op === 'setProperty') return operation.property === 'Source';
+  if (operation.op === 'createInstance') return 'Source' in operation.properties;
+  return false;
+}
+
+/** Targets Luau source, but the source is not readable as a string literal. */
+export function carriesUnreadableLuau(operation: Operation): boolean {
+  return carriesLuauSource(operation) && luauSourcesOf(operation).length === 0;
+}
+
+/**
+ * Operations that can cause code ALREADY in the place to start running, without
+ * carrying any source themselves. A dormant Script switched on is as
+ * consequential as one installed, and it passes every check that looks for Luau.
+ */
+export const ACTIVATING_PROPERTIES = ['Disabled', 'RunContext', 'Enabled'] as const;
+
+export function activatesExistingCode(operation: Operation): boolean {
+  return (
+    operation.op === 'setProperty' &&
+    (ACTIVATING_PROPERTIES as readonly string[]).includes(operation.property)
+  );
+}
+
 /** Operations that can destroy work the user did not ask to lose. */
 export function isDestructive(operation: Operation): boolean {
   return operation.op === 'deleteInstance' || operation.op === 'moveInstance';

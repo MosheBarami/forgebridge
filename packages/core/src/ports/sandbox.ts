@@ -18,7 +18,14 @@ export interface ResourceBudget {
 export interface SourceUnderAnalysis {
   /** The instance path the source will live at. Used to attribute findings. */
   path: string;
-  scriptType: ScriptType;
+  /**
+   * Absent when the ChangeSet does not state one. Only `writeScript` declares a
+   * script type; Luau arriving as `createInstance` with a `Source` property, or
+   * as `setProperty` of `Source`, lands on whatever class already sits at the
+   * path, which this layer cannot see. Optional rather than guessed: a wrong
+   * class in a finding a human reads is worse than an absent one.
+   */
+  scriptType?: ScriptType | undefined;
   source: string;
 }
 

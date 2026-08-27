@@ -1,3 +1,4 @@
+import { luauSourcesOf } from '@forgebridge/protocol';
 import type { ChangeSet, Finding, Validation } from '@forgebridge/protocol';
 import type { ResourceBudget, SandboxPort, SourceUnderAnalysis } from './ports/index.js';
 
@@ -34,12 +35,31 @@ export interface LuauAnalysisOptions {
   budget: ResourceBudget;
 }
 
-/** Every script this ChangeSet would write, in operation order. */
+/**
+ * Every script this ChangeSet would write, in operation order.
+ *
+ * Reads through `luauSourcesOf`, which knows all three spellings — a Script
+ * arrives as `writeScript`, as `createInstance` carrying `Source`, or as
+ * `setProperty` of `Source`. This function used to match `op === 'writeScript'`
+ * alone, so a ChangeSet whose Luau came the other two ways was handed to the
+ * analyser as an empty list and came back `ok` having analysed nothing.
+ *
+ * That mattered here more than anywhere else it was found: `pipeline.ts`'s
+ * auto-apply gate — the one documented path that skips a human — turns on
+ * `luau.status === 'ok'`. A verdict blind to two thirds of the ways code enters
+ * a place is not a gate.
+ */
 export function scriptsUnderAnalysis(set: ChangeSet): SourceUnderAnalysis[] {
   return set.operations.flatMap((operation) =>
-    operation.op === 'writeScript'
-      ? [{ path: operation.path as string, scriptType: operation.scriptType, source: operation.source }]
-      : [],
+    luauSourcesOf(operation).map(({ path, source }) => ({
+      path,
+      // Only `writeScript` states a script type. For the other two the class is
+      // whatever already sits at the path, which this layer cannot see — the
+      // analyser does not branch on it, and guessing would put a wrong class in
+      // a finding a human reads.
+      scriptType: operation.op === 'writeScript' ? operation.scriptType : undefined,
+      source,
+    })),
   );
 }
 

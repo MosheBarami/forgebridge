@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ChangeSet, deletionCount, withinSizeLimit } from '../src/changeset.js';
-import { Operation, isDestructive, pathsOf } from '../src/operation.js';
+import { Operation, isDestructive, pathsOf, luauSourcesOf, carriesLuauSource, carriesUnreadableLuau, activatesExistingCode } from '../src/operation.js';
 import { LIMITS } from '../src/limits.js';
 
 const base = {
@@ -130,5 +130,84 @@ describe('pathsOf sees paths hidden inside property values', () => {
       value: { t: 'InstanceRef', path: 'game.Players.Someone' },
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe('luauSourcesOf sees every way code gets into a place', () => {
+  // Found three times in three components before this helper existed: the
+  // daemon's diff, the Studio approval panel, and the core's analyser input all
+  // checked `op === 'writeScript'` and were blind to the other two spellings.
+  const source = 'print("hi")';
+
+  it('reads a writeScript', () => {
+    const op = Operation.parse({ op: 'writeScript', path: 'ServerScriptService.A', scriptType: 'Script', source });
+    expect(luauSourcesOf(op)).toEqual([{ path: 'ServerScriptService.A', source }]);
+    expect(carriesLuauSource(op)).toBe(true);
+  });
+
+  it('reads Source out of a createInstance property bag', () => {
+    const op = Operation.parse({
+      op: 'createInstance', path: 'ServerScriptService.A', className: 'Script',
+      properties: { Source: { t: 'String', v: source } },
+    });
+    expect(luauSourcesOf(op)).toEqual([{ path: 'ServerScriptService.A', source }]);
+  });
+
+  it('reads a setProperty of Source', () => {
+    const op = Operation.parse({
+      op: 'setProperty', path: 'ServerScriptService.A', property: 'Source', value: { t: 'String', v: source },
+    });
+    expect(luauSourcesOf(op)).toEqual([{ path: 'ServerScriptService.A', source }]);
+  });
+
+  it('does not see code where there is none', () => {
+    for (const raw of [
+      { op: 'setProperty', path: 'Workspace.P', property: 'Transparency', value: { t: 'Number', v: 0.5 } },
+      { op: 'createInstance', path: 'Workspace.P', className: 'Part', properties: {} },
+      { op: 'deleteInstance', path: 'Workspace.P' },
+      { op: 'moveInstance', path: 'Workspace.P', to: 'ServerStorage.P' },
+    ]) {
+      expect(carriesLuauSource(Operation.parse(raw))).toBe(false);
+    }
+  });
+
+  it('flags an operation that starts code already sitting in the place', () => {
+    // Carries no source, so every Luau check passes it — and it switches on a
+    // Script that was sitting there disabled.
+    const op = Operation.parse({
+      op: 'setProperty', path: 'ServerScriptService.Dormant', property: 'Disabled', value: { t: 'Bool', v: false },
+    });
+    expect(carriesLuauSource(op)).toBe(false);
+    expect(activatesExistingCode(op)).toBe(true);
+    const benign = Operation.parse({
+      op: 'setProperty', path: 'Workspace.P', property: 'Transparency', value: { t: 'Number', v: 0.5 },
+    });
+    expect(activatesExistingCode(benign)).toBe(false);
+  });
+});
+
+describe('unreadable Luau is not absent Luau', () => {
+  // A daemon test caught the first version of carriesLuauSource being less safe
+  // than the code it replaced: it answered "no Luau here" for a Source whose
+  // value was not a readable string, which is precisely the case that must be
+  // refused rather than waved through.
+  const op = Operation.parse({
+    op: 'setProperty', path: 'ServerScriptService.A', property: 'Source', value: { t: 'Nil' },
+  });
+
+  it('still counts as carrying Luau', () => {
+    expect(carriesLuauSource(op)).toBe(true);
+  });
+
+  it('yields no source for the analyser, and says so', () => {
+    expect(luauSourcesOf(op)).toHaveLength(0);
+    expect(carriesUnreadableLuau(op)).toBe(true);
+  });
+
+  it('a readable Source is not flagged unreadable', () => {
+    const readable = Operation.parse({
+      op: 'setProperty', path: 'ServerScriptService.A', property: 'Source', value: { t: 'String', v: 'print(1)' },
+    });
+    expect(carriesUnreadableLuau(readable)).toBe(false);
   });
 });

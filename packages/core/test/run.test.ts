@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { scriptsUnderAnalysis } from '../src/validate.js';
+import { ChangeSet } from '@forgebridge/protocol';
 import { ForgeBridgeError, isWithin, Validation } from '@forgebridge/protocol';
 import type { Run } from '@forgebridge/protocol';
 import { canTransition, assertTransition } from '../src/pipeline.js';
@@ -553,5 +555,59 @@ describe('the prompt', () => {
   it('tells the model its verdict will be discarded, and offers the tool by name', () => {
     expect(systemPrompt(context)).toContain('validation verdict');
     expect(changeSetTool(context).name).toBe(CHANGE_SET_TOOL_NAME);
+  });
+});
+
+describe('the analyser sees Luau however it is spelled', () => {
+  // Found by review after M09 landed, and the third time this exact blindness
+  // appeared: `scriptsUnderAnalysis` matched `op === 'writeScript'` alone, so a
+  // ChangeSet whose code arrived the other two ways was handed to the analyser
+  // as an empty list and came back `ok` having analysed nothing. It matters
+  // most here because pipeline.ts's auto-apply gate — the one documented path
+  // that skips a human — turns on `luau.status === 'ok'`.
+  const evil = 'loadstring(script.Parent.Payload.Value)()';
+
+  const setWith = (operation: Record<string, unknown>) =>
+    ChangeSet.parse({
+      id: '33333333-3333-4333-8333-333333333333',
+      projectId: '44444444-4444-4444-8444-444444444444',
+      baseVersion: 0,
+      summary: 'probe',
+      operations: [operation],
+      createdAt: '2026-08-27T00:00:00.000Z',
+    });
+
+  it('collects the source from all three spellings', () => {
+    const write = setWith({ op: 'writeScript', path: 'ServerScriptService.A', scriptType: 'Script', source: evil });
+    const create = setWith({
+      op: 'createInstance', path: 'ServerScriptService.B', className: 'Script',
+      properties: { Source: { t: 'String', v: evil } },
+    });
+    const assign = setWith({
+      op: 'setProperty', path: 'ServerScriptService.C', property: 'Source', value: { t: 'String', v: evil },
+    });
+
+    for (const [label, set] of [['writeScript', write], ['createInstance', create], ['setProperty', assign]] as const) {
+      const sources = scriptsUnderAnalysis(set);
+      expect(sources, `${label} must reach the analyser`).toHaveLength(1);
+      expect(sources[0]?.source).toBe(evil);
+    }
+  });
+
+  it('states a script type only where the ChangeSet stated one', () => {
+    expect(scriptsUnderAnalysis(setWith({
+      op: 'writeScript', path: 'ServerScriptService.A', scriptType: 'ModuleScript', source: evil,
+    }))[0]?.scriptType).toBe('ModuleScript');
+
+    // Not guessed. The class is whatever already sits at the path.
+    expect(scriptsUnderAnalysis(setWith({
+      op: 'setProperty', path: 'ServerScriptService.C', property: 'Source', value: { t: 'String', v: evil },
+    }))[0]?.scriptType).toBeUndefined();
+  });
+
+  it('collects nothing from operations that install no code', () => {
+    expect(scriptsUnderAnalysis(setWith({
+      op: 'setProperty', path: 'Workspace.P', property: 'Transparency', value: { t: 'Number', v: 0.5 },
+    }))).toHaveLength(0);
   });
 });
