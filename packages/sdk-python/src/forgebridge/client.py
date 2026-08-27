@@ -31,7 +31,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,8 +59,18 @@ from .models import (
     StartRunRequest,
     SubmitChangeSetResponse,
 )
+from .stream import RunEvent, iter_event_frames
 
-__all__ = ["PROTOCOL_VERSION", "ForgeBridgeClient", "HttpResponse", "Transport"]
+__all__ = [
+    "PROTOCOL_VERSION",
+    "ForgeBridgeClient",
+    "HttpResponse",
+    "StreamResponse",
+    "StreamTransport",
+    "Transport",
+    "urllib_stream_transport",
+    "urllib_transport",
+]
 
 #: Kept in step with `packages/protocol/src/version.ts` by
 #: `tests/test_generated_models.py`, which reads the generated OpenAPI document.
@@ -103,6 +113,83 @@ def urllib_transport(timeout: float = 30.0) -> Transport:
     return send
 
 
+@dataclass(frozen=True)
+class StreamResponse:
+    """An answer being read as it arrives.
+
+    `chunks` is consumed once. A non-2xx answer is still a `StreamResponse` — the
+    body is the `ProtocolError` the daemon sent, and a transport that raised on
+    it instead would hide the one thing the caller needs to branch on.
+    """
+
+    status: int
+    content_type: str
+    chunks: Iterator[bytes]
+
+
+#: `(method, url, headers, body) -> StreamResponse`. Separate from `Transport`
+#: because the two have genuinely different shapes: one answer read whole, or one
+#: read as it arrives. Folding them together would mean every ordinary call
+#: carrying an iterator nobody iterates.
+StreamTransport = Callable[[str, str, Mapping[str, str], "bytes | None"], StreamResponse]
+
+
+def urllib_stream_transport(idle_timeout: float = 120.0) -> StreamTransport:
+    """The default stream transport: `urllib`, no third-party dependency.
+
+    `idle_timeout` is `urllib`'s socket timeout, which is already a per-read
+    ceiling rather than a deadline for the whole response — so it measures
+    *silence*, which is the only thing that separates a dropped connection from a
+    model that is still thinking. The daemon writes a keep-alive comment frame on
+    an idle stream, so silence for this long is a dead socket rather than a slow
+    run.
+    """
+
+    def send(
+        method: str, url: str, headers: Mapping[str, str], body: bytes | None
+    ) -> StreamResponse:
+        request = urllib.request.Request(url, data=body, method=method)
+        for name, value in headers.items():
+            request.add_header(name, value)
+
+        def chunks(response: Any) -> Iterator[bytes]:
+            try:
+                while True:
+                    chunk = response.read(_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        return
+                    yield chunk
+            finally:
+                response.close()
+
+        try:
+            response = urllib.request.urlopen(request, timeout=idle_timeout)
+        except urllib.error.HTTPError as error:  # a real answer, just not a 2xx
+            payload = error.read()
+            error.close()
+            return StreamResponse(
+                status=error.code,
+                content_type=error.headers.get("content-type", ""),
+                chunks=iter([payload]),
+            )
+        except urllib.error.URLError as error:
+            raise TransportError(str(error)) from error
+
+        return StreamResponse(
+            status=response.status,
+            content_type=response.headers.get("content-type", ""),
+            chunks=chunks(response),
+        )
+
+    return send
+
+
+#: Small enough that a frame is handed on as soon as it completes rather than
+#: when a buffer happens to fill. A run stream is a handful of bytes every few
+#: seconds, and the point of reading it at all is that it is live.
+_STREAM_CHUNK_BYTES = 1024
+
+
 class ForgeBridgeClient:
     """Producer-side and consumer-side calls against one `/v1` base address.
 
@@ -119,12 +206,19 @@ class ForgeBridgeClient:
         producer_token: str | None = None,
         link_id: str | None = None,
         transport: Transport | None = None,
+        stream_transport: StreamTransport | None = None,
         timeout: float = 30.0,
+        run_idle_timeout: float = 120.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.producer_token = producer_token
         self.link_id = link_id
         self._send = transport or urllib_transport(timeout)
+        # Separate from `_send`, and separately overridable, because the two
+        # answer different questions: `timeout` bounds one whole exchange, while
+        # `run_idle_timeout` bounds a *silence* on a stream that may legitimately
+        # take minutes. A single number cannot mean both.
+        self._stream = stream_transport or urllib_stream_transport(run_idle_timeout)
 
     # ── public surface, unauthenticated ────────────────────────────────────
 
@@ -153,7 +247,11 @@ class ForgeBridgeClient:
             self._call("POST", "/v1/changesets", body=changeset, producer=True)
         )
 
-    def start_run(self, request: StartRunRequest) -> RunResponse:
+    def start_run(
+        self,
+        request: StartRunRequest,
+        on_event: Callable[[RunEvent], None] | None = None,
+    ) -> RunResponse:
         """Turn a prompt into a proposed ChangeSet. Nothing is applied.
 
         The run stops at the human gate: the ChangeSet it produces is stored
@@ -174,20 +272,35 @@ class ForgeBridgeClient:
         construct the client with one sized for a run — or pass a `transport` of
         your own that knows the difference.
 
-        `stream` is refused rather than ignored. This client reads one JSON
-        answer, so a `text/event-stream` body is one it cannot parse; the
-        streamed form of a run is `GET /v1/runs/{id}/events`, and a Python
-        reader for it is TODO(M30). Accepting the flag and quietly sending
-        `stream=false` would be the client overruling the caller in silence.
+        Pass `on_event` to follow the run as it happens. The answer is the same
+        `RunResponse` either way, because the streamed form's last `run` frame
+        *is* the JSON body — a client that reconstructed the result from the
+        events it happened to catch would be a client whose answer depended on
+        how fast it was reading. With a listener the wall-clock `timeout` is
+        replaced by `run_idle_timeout`, which measures silence.
+
+        `stream` is not a field a caller sets. This client sets it from whether
+        it was given a listener, so the request and the way the answer is read
+        cannot disagree; a caller that asked for a stream and then did not read
+        one would hold a socket open until the daemon gave up on it. A
+        caller-supplied `stream=True` is refused rather than quietly downgraded.
         """
         if request.stream:
             raise TransportError(
-                "start_run reads a single JSON answer and cannot parse a "
-                "text/event-stream body; leave stream at its default of False. "
-                "The attempt list is on the JSON answer in full."
+                "start_run sets stream itself, from whether it was given a listener. "
+                "Pass on_event=... to follow the run as it happens, or leave stream at "
+                "its default of False for the single JSON answer, which carries the "
+                "attempt list in full."
             )
-        return RunResponse.model_validate(
-            self._call("POST", "/v1/runs", body=request, producer=True)
+        if on_event is None:
+            return RunResponse.model_validate(
+                self._call("POST", "/v1/runs", body=request, producer=True)
+            )
+        return self._follow_run(
+            "POST",
+            "/v1/runs",
+            body=request.model_copy(update={"stream": True}),
+            on_event=on_event,
         )
 
     def get_run(self, run_id: str) -> RunResponse:
@@ -201,6 +314,45 @@ class ForgeBridgeClient:
         return RunResponse.model_validate(
             self._call("GET", f"/v1/runs/{_segment(run_id)}", producer=True)
         )
+
+    def watch_run(
+        self,
+        run_id: str,
+        *,
+        since: int | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
+    ) -> RunResponse:
+        """Replay and follow a run as it happens, and return what it settled on.
+
+        Opens with a `run` frame so a caller that arrives late knows what the
+        events are about, replays the retained events from `since`, then follows
+        until the run ends. The log is in memory and capped: `output-delta`
+        frames are never retained, and a run old enough to have been evicted
+        answers with the run record and a `closed` frame rather than stopping
+        quietly. Nothing the stream can lose is missing from the record — the
+        attempt list is on the `run` frame.
+
+        Use `iter_run_events` instead when the frames themselves are the point
+        and the final record is not.
+        """
+        query = "" if since is None else f"?since={int(since)}"
+        return self._follow_run(
+            "GET",
+            f"/v1/runs/{_segment(run_id)}/events{query}",
+            body=None,
+            on_event=on_event,
+        )
+
+    def iter_run_events(self, run_id: str, *, since: int | None = None) -> Iterator[RunEvent]:
+        """Every frame of a run's event stream, as it arrives.
+
+        The generator holds the socket open, so a caller that stops iterating
+        should close it (`gen.close()`, or leaving the `for` loop, which does).
+        An `error` frame is yielded rather than raised here: this is the raw
+        reader, and deciding that a frame ends the call is `watch_run`'s job.
+        """
+        response = self._open_stream("GET", f"/v1/runs/{_segment(run_id)}/events", since=since)
+        yield from iter_event_frames(response.chunks)
 
     def get_diff(self, changeset_id: str) -> ChangeSetDiff:
         return ChangeSetDiff.model_validate(
@@ -366,6 +518,92 @@ class ForgeBridgeClient:
 
     # ── plumbing ───────────────────────────────────────────────────────────
 
+    def _open_stream(self, method: str, path: str, *, since: int | None = None) -> StreamResponse:
+        """One request whose answer is read as it arrives, not whole."""
+        if not self.producer_token:
+            raise TransportError(
+                f"{path} is producer surface and needs the daemon's producer token; "
+                "construct the client with producer_token=..."
+            )
+        query = "" if since is None else f"?since={int(since)}"
+        return self._stream(
+            method,
+            f"{self.base_url}{path}{query}",
+            {
+                "Accept": "text/event-stream",
+                PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION,
+                PRODUCER_TOKEN_HEADER: self.producer_token,
+            },
+            None,
+        )
+
+    def _follow_run(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Any,
+        on_event: Callable[[RunEvent], None] | None,
+    ) -> RunResponse:
+        """Read a run stream to its end and return the run it settled on.
+
+        The `run` frame is the answer; every other frame goes to the listener. A
+        stream that ends without one is a failure rather than an empty success —
+        "no model was tried" and "I did not see which models were tried" are
+        different facts, and only one of them is something this client observed.
+        """
+        headers: dict[str, str] = {
+            "Accept": "text/event-stream, application/json",
+            PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION,
+        }
+        if not self.producer_token:
+            raise TransportError(
+                f"{path} is producer surface and needs the daemon's producer token; "
+                "construct the client with producer_token=..."
+            )
+        headers[PRODUCER_TOKEN_HEADER] = self.producer_token
+
+        encoded: bytes | None = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            encoded = json.dumps(
+                body.model_dump(mode="json", by_alias=True), separators=(",", ":")
+            ).encode("utf-8")
+
+        response = self._stream(method, f"{self.base_url}{path}", headers, encoded)
+
+        # The daemon refuses some runs before it opens the stream — no model
+        # client, a stale base version, `pinned` with nothing pinned — and those
+        # arrive as an ordinary JSON error with a status on it. So the content
+        # type decides how the body is read, never the flag that was sent.
+        if "text/event-stream" not in response.content_type:
+            payload = b"".join(response.chunks)
+            parsed = _json_or_transport_error(payload, method, path, response.status)
+            if 200 <= response.status < 300:
+                return _run_or_transport_error(parsed, method, path)
+            raise _protocol_error(parsed, method, path, response.status)
+
+        latest: Any = None
+        saw_run = False
+        for frame in iter_event_frames(response.chunks):
+            if frame.name == "error":
+                # The headers went out with the first frame, so the daemon had no
+                # status left to set and said what happened in the stream instead.
+                raise _protocol_error(frame.data, method, path, response.status)
+            if frame.name == "run":
+                latest = frame.data
+                saw_run = True
+                continue
+            if on_event is not None:
+                on_event(frame)
+
+        if not saw_run:
+            raise TransportError(
+                f"{method} {path} ended without a run frame, so nothing can be said about "
+                "which models were tried. Read the record with get_run(run_id)."
+            )
+        return _run_or_transport_error(latest, method, path)
+
     def _call(
         self,
         method: str,
@@ -433,6 +671,48 @@ class ForgeBridgeClient:
                 "with a body that is not a ProtocolError"
             ) from exc
         raise ForgeBridgeError(error, response.status)
+
+
+def _run_or_transport_error(payload: Any, method: str, path: str) -> RunResponse:
+    """A `run` frame this build cannot read is a transport failure, not a run.
+
+    A truncated frame, or one carrying a shape a newer daemon sends, would
+    otherwise escape as a pydantic `ValidationError` — which is neither of the
+    two failures this package promises a caller, and which `describe_error`
+    would have to default. Naming it here keeps the classifier's answer honest.
+    """
+    try:
+        return RunResponse.model_validate(payload)
+    except Exception as error:
+        raise TransportError(
+            f"{method} {path} answered with a run record this build does not recognise. "
+            "The transport may be running a different protocol version."
+        ) from error
+
+
+def _json_or_transport_error(payload: bytes, method: str, path: str, status: int) -> Any:
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise TransportError(
+            f"{method} {path} returned {status} with a body that is not JSON"
+        ) from error
+
+
+def _protocol_error(payload: Any, method: str, path: str, status: int) -> Exception:
+    """The refusal the daemon meant, or a transport error if it was not one.
+
+    Inventing an `ErrorCode` for a body that is not a `ProtocolError` would hand
+    the caller a refusal the daemon never made, so that case stays a transport
+    error.
+    """
+    try:
+        error = ProtocolError.model_validate(payload)
+    except Exception:  # any validation failure means "this is not a protocol error"
+        return TransportError(
+            f"{method} {path} failed with {status} and a body that is not a ProtocolError"
+        )
+    return ForgeBridgeError(error, status)
 
 
 def _segment(value: str) -> str:

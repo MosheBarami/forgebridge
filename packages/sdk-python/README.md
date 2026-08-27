@@ -5,13 +5,18 @@ Pydantic v2 models for the ForgeBridge wire protocol, and a thin client for the
 
 **Not published.** There is no `pip install forgebridge` that installs this
 package — writing that command here would send a reader to somebody else's
-project or to a 404. Publishing to PyPI with a worked example is `M30` in
-`docs/MILESTONES.md`. Until then, install it from a checkout of the repository:
+project or to a 404. `pyproject.toml` carries the `Private :: Do Not Upload`
+classifier, which an index refuses, so an accidental upload fails rather than
+succeeds; whether that marker comes off is `M49`'s to decide, because that
+milestone owns how everything in this repository is released together. Install it
+from a checkout:
 
 ```bash
-# M30 owns publishing this; until then it installs from a checkout only.
+# Not published (M49 owns that call); until then it installs from a checkout only.
 pip install -e packages/sdk-python
 ```
+
+A worked example lives in [`examples/python`](../../examples/python).
 
 ## The models are generated
 
@@ -95,13 +100,38 @@ that was asked for, so a caller that reports only the winner is misreporting who
 wrote it.
 
 **A run waits on a language model**, and on the router's fallback through
-however many models the policy allows. The client's `timeout` applies to it like
-any other call, so construct the client with one sized for a run:
-`ForgeBridgeClient(url, producer_token=token, timeout=600)`.
+however many models the policy allows. Without a listener the client's `timeout`
+applies to it like any other call, so construct the client with one sized for a
+run: `ForgeBridgeClient(url, producer_token=token, timeout=600)` — or pass a
+listener and let the idle ceiling below do the job instead.
 
-`stream=True` is refused rather than quietly downgraded: this client reads one
-JSON answer and cannot parse a `text/event-stream` body. The streamed form of a
-run is `GET /v1/runs/{id}/events`, and a Python reader for it is TODO(M30).
+## Following a run while it happens
+
+```python
+from forgebridge import RunEvent
+
+def show(event: RunEvent) -> None:
+    print(event.name, event.data)
+
+run = client.start_run(StartRunRequest(prompt="add a respawn handler"), on_event=show)
+```
+
+The answer is the same `RunResponse` either way, because the streamed form's last
+`run` frame *is* the JSON body — a client that reassembled the result from the
+frames it happened to catch would be a client whose answer depended on how fast
+it was reading. `watch_run(run_id, since=…)` joins a run already in flight and
+returns the same record; `iter_run_events(run_id)` is the raw reader, for a
+caller that wants the frames and not the record.
+
+`stream` is not a field a caller sets. The client sets it from whether it was
+given a listener, so the request and the way the answer is read cannot disagree;
+a caller-supplied `stream=True` is refused rather than quietly downgraded.
+
+With a listener the wall-clock `timeout` is replaced by `run_idle_timeout`, which
+measures **silence**. A model that thinks for four minutes and then answers is a
+run that worked, so no wall-clock ceiling separates a slow run from a dead
+socket; the daemon writes a keep-alive frame on an idle stream, which is what
+makes silence readable.
 
 ## Every failure reduces to a code you can branch on
 
