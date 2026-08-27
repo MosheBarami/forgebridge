@@ -5,9 +5,14 @@
   "description": "A universal bridge between any AI model or agent and Roblox Studio",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "npm@10.9.2",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",

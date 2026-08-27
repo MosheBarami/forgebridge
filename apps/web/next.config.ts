@@ -23,13 +23,15 @@ const config: NextConfig = {
   transpilePackages: ['@forgebridge/protocol'],
 
   /**
-   * TODO(M04b): the repository has no linter yet — every package's `lint`
-   * script is an `echo`. `next build` would otherwise stop and offer to install
-   * and configure ESLint for this app alone, which would give one package a
-   * linter the other eight do not have and pre-empt the decision M04b exists to
-   * make. Delete this block when a real linter lands.
+   * TODO(M04b): the repository still has no linter — every package's `lint`
+   * script is an `echo`. Next 15 needed `eslint: { ignoreDuringBuilds: true }`
+   * here to stop `next build` offering to install and configure ESLint for this
+   * app alone, which would give one package a linter the other nine do not have
+   * and pre-empt the decision M04b exists to make. Next 16 dropped that key from
+   * NextConfig and no longer runs ESLint during a build at all, so the block is
+   * gone rather than relocated. When a real linter lands it is wired for the
+   * whole workspace, not here.
    */
-  eslint: { ignoreDuringBuilds: true },
 
   /** Nothing gained by announcing the framework on every response. */
   poweredByHeader: false,

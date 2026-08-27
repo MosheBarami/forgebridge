@@ -1,7 +1,7 @@
 {
   "name": "@forgebridge/web",
   "version": "0.1.0",
-  "description": "apple.gg — the ForgeBridge web surface. Works signed out, against a local daemon.",
+  "description": "apple.gg \u2014 the ForgeBridge web surface. Works signed out, against a local daemon.",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "@forgebridge/core": "*",
     "@forgebridge/model-registry": "*",
     "@forgebridge/protocol": "*",
-    "next": "^15.5.4",
+    "next": "^16.3.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "zod": "^3.24.1"
