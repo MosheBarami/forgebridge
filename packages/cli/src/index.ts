@@ -16,6 +16,7 @@ import { runCommand } from './commands/run.js';
 import { statusCommand } from './commands/status.js';
 
 export { CLI_VERSION };
+export * from './approve.js';
 export * from './args.js';
 export * from './exit.js';
 export * from './posture.js';

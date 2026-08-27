@@ -55,6 +55,7 @@ const PLAUSIBLE_ARGS: Record<string, unknown> = {
   'forge.list_projects': {},
   'forge.read_tree': { path: 'ServerScriptService' },
   'forge.read_script': { path: 'ServerScriptService.Shop' },
+  'forge.start_run': { prompt: 'add a purchase handler to the shop' },
   'forge.propose_changeset': proposalArgs(),
   'forge.diff_changeset': { changeSetId: '33333333-3333-4333-8333-333333333333' },
   'forge.apply_changeset': { changeSetId: '33333333-3333-4333-8333-333333333333' },
@@ -152,7 +153,7 @@ describe('no tool reaches an approve path', () => {
     const { server, handlers } = recordingServer();
     const names = registerForgeBridgeTools(server, contextFor(daemon));
 
-    expect(names).toHaveLength(11);
+    expect(names).toHaveLength(12);
     for (const name of names) {
       await handlers.get(name)!(PLAUSIBLE_ARGS[name]);
     }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { attemptSummary, type ModelAttempt } from '@forgebridge/protocol';
 import type { ApprovalGate, ApprovalGrant, GrantFor } from './approval.js';
 import type { ForgeBridgeBackend } from './backend.js';
 import { renderFailure, type ErrorDetail } from './errors.js';
@@ -72,6 +73,28 @@ export class SkillExecutor {
 
   async #dispatch(invocation: ParsedInvocation): Promise<Outcome> {
     switch (invocation.skill) {
+      case 'start-run': {
+        const result = await this.#backend.startRun(invocation.input);
+        const { run } = result;
+        // The whole attempt list, collapsed into the one sentence the calling
+        // agent is most likely to read. `attemptSummary` is the protocol's own
+        // renderer, so every ForgeBridge surface says this the same way — and
+        // the artifact beside it carries the attempts in full, because a
+        // summary is not a record (ADR-008).
+        const models = attemptSummary(run.attempts as ModelAttempt[]);
+        return {
+          kind: 'done',
+          payload: result,
+          summary:
+            result.changeSetId === null
+              ? `Run ${run.id} produced no ChangeSet (stage "${run.stage}", status "${run.status}"). Models tried: ${models}. ` +
+                'Nothing was written to the place.'
+              : `Run ${run.id} proposed ChangeSet ${result.changeSetId} at status "${result.changeSetStatus ?? 'unknown'}". ` +
+                `Models tried: ${models}. Nothing has been written to the place; a human must approve before it can be ` +
+                'applied, and this caller cannot approve it.',
+        };
+      }
+
       case 'propose-changeset': {
         const result = await this.#backend.propose(invocation.input.changeSet);
         const luau = result.validation.luau.status;

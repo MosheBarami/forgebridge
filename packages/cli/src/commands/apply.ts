@@ -1,5 +1,6 @@
 import { LIMITS } from '@forgebridge/protocol';
 import type { ChangeSetDiff } from '@forgebridge/daemon';
+import { approveCurl } from '../approve.js';
 import type { Invocation } from '../args.js';
 import { EXIT, operationFailed, type ExitCode } from '../exit.js';
 import { emitJson, paint, type Io } from '../output.js';
@@ -189,20 +190,21 @@ function refusal(diff: ChangeSetDiff, baseUrl: string): Error {
     ? ` It was built against version ${diff.baseVersion} and the project is at ${diff.currentVersion}; it must be rebased and resubmitted.`
     : '';
 
-  const body = JSON.stringify({
-    contentDigest: diff.contentDigest,
-    approvedBy: 'your-name',
-    ...(diff.counts.deletes > LIMITS.BULK_DELETE_CONFIRM_THRESHOLD ? { confirmBulkDelete: true } : {}),
-  });
-
   return operationFailed(
     `changeset ${diff.changeSetId} is "${diff.status}", not approved — nothing was applied.${stale}${validation}${bulk}`,
     [
       'Approval is a human gate: a model must never clear its own work (ADR-012), so this command will not do it for you.',
       'Approve it in the Studio plugin diff view, or from a shell with the producer token:',
-      `  curl -fsS -X POST ${baseUrl}/v1/changesets/${diff.changeSetId}/approve \\`,
-      `    -H "X-ForgeBridge-Token: $FORGEBRIDGE_PRODUCER_TOKEN" \\`,
-      `    -H 'content-type: application/json' -d '${body}'`,
+      approveCurl({
+        baseUrl,
+        changeSetId: diff.changeSetId,
+        contentDigest: diff.contentDigest,
+        deletes: diff.counts.deletes,
+      }),
     ].join('\n'),
+    // Named so a caller embedding this package can branch on the refusal rather
+    // than on the sentence. `stale_base` for a set the tree moved under, because
+    // that is a different next move: rebuild, not "go and approve it".
+    diff.stale ? 'stale_base' : 'not_approved',
   );
 }

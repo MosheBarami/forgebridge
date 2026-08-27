@@ -6,10 +6,22 @@ import { linkCommand } from '../src/commands/link.js';
 import { modelsCommand } from '../src/commands/models.js';
 import { runCommand } from '../src/commands/run.js';
 import { dispatch } from '../src/index.js';
-import { captureIo, linkStatusFixture, modelsFixture, stubTransport, testDeps } from './helpers.js';
+import { captureIo, linkStatusFixture, modelsFixture, runResponseFixture, stubTransport, testDeps } from './helpers.js';
 
 const BASE = 'http://127.0.0.1:7317';
 const GLOBAL = { json: false, baseUrl: BASE, token: 'test-token' };
+
+const RUN_INVOCATION = {
+  command: 'run',
+  global: GLOBAL,
+  prompt: 'build a shop',
+  projectId: null,
+  policy: null,
+  pinnedModel: null,
+  baseVersion: null,
+  maxAttempts: null,
+  verbose: false,
+} as const;
 
 describe('the exit-code contract', () => {
   it('assigns each code exactly once', () => {
@@ -130,20 +142,40 @@ describe('2 is reserved for a command line that was never attempted', () => {
 });
 
 describe('1 is reserved for an operation the transport could not do', () => {
-  it('fails when no run endpoint exists to submit a prompt to', async () => {
+  it('fails when a run tried every model and produced nothing', async () => {
+    // The daemon answers 201 for this: a run that got five refusals still has
+    // an attempt list, and a ProtocolError body has nowhere to put one. So the
+    // outcome is read off `failure`, and a CLI that branched on the HTTP status
+    // would report success for a run that produced nothing.
     const io = captureIo();
-    const transport = stubTransport({ linkStatus: async () => linkStatusFixture() });
+    const transport = stubTransport({
+      linkStatus: async () => linkStatusFixture(),
+      startRun: async () =>
+        runResponseFixture({
+          run: {
+            ...runResponseFixture().run,
+            stage: 'failed',
+            status: 'failed',
+            attempts: [
+              { modelId: 'glm-5.2:free', outcome: 'rate-limited', startedAt: '2026-01-01T00:00:00.000Z', durationMs: 900 },
+              { modelId: 'minimax-m3:free', outcome: 'rate-limited', startedAt: '2026-01-01T00:00:01.000Z', durationMs: 800 },
+            ],
+            changeSetIds: [],
+          },
+          changeSetId: null,
+          changeSetStatus: null,
+          contentDigest: null,
+          validation: null,
+          failure: { code: 'provider_unconfigured', message: 'every candidate refused this run' },
+        }),
+    });
 
-    const error = (await runCommand(
-      { command: 'run', global: GLOBAL, prompt: 'build a shop' },
-      testDeps(io, transport),
-    ).catch((thrown: unknown) => thrown)) as CliError;
+    const code = await runCommand(RUN_INVOCATION, testDeps(io, transport));
 
-    expect(error.exitCode).toBe(EXIT.FAILED);
-    expect(error.message).toMatch(/nothing was sent/);
-    expect(error.remedy).toMatch(/M09/);
-    // The link was read so the posture could be printed; nothing was submitted.
-    expect(transport.calls).toEqual(['linkStatus']);
+    expect(code).toBe(EXIT.FAILED);
+    expect(transport.calls).toEqual(['linkStatus', 'startRun']);
+    // Both models are named, in order, with why the router moved on.
+    expect(io.outText()).toContain('glm-5.2:free → rate-limited → minimax-m3:free');
   });
 
   it('fails when no registry is configured, rather than reporting zero models', async () => {

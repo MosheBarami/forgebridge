@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ChangeSet, ForgeBridgeError, type Validation } from '@forgebridge/protocol';
 import type { ApplyApprovalGrant, ApprovalGrant, RollbackApprovalGrant } from '../src/approval.js';
-import type { ForgeBridgeBackend } from '../src/backend.js';
+import type { ForgeBridgeBackend, StartRunRequest } from '../src/backend.js';
 import type {
   ApproveResponse,
   DiffResponse,
@@ -9,6 +9,7 @@ import type {
   ModelsResponse,
   ProposeResponse,
   RollbackResponse,
+  RunResponse,
 } from '../src/daemon-wire.js';
 import { SKILL_INVOCATION_EXTENSION_URI, type SkillId } from '../src/skills.js';
 import { A2A_EXTENSIONS_HEADER, A2A_PROTOCOL_VERSION, A2A_VERSION_HEADER, type Message } from '../src/spec.js';
@@ -61,6 +62,36 @@ export class FakeBackend implements ForgeBridgeBackend {
   readonly calls: BackendCall[] = [];
   /** Set to make the next call of that method throw instead of returning. */
   failures = new Map<keyof ForgeBridgeBackend, unknown>();
+
+  async startRun(request: StartRunRequest): Promise<RunResponse> {
+    this.#record('startRun', request);
+    const changeSetId = randomUUID();
+    return {
+      run: {
+        id: randomUUID(),
+        projectId: request.projectId ?? randomUUID(),
+        stage: 'awaiting-approval',
+        status: 'running',
+        // Two attempts, never one: a fake whose run only tried the model that
+        // worked would let a connector reporting the winner alone pass every
+        // assertion about the attempt list (ADR-008).
+        attempts: [
+          { modelId: 'glm-5.2:free', outcome: 'rate-limited', startedAt: '2026-01-01T00:00:00.000Z', durationMs: 900 },
+          { modelId: 'minimax-m3:free', outcome: 'ok', startedAt: '2026-01-01T00:00:01.000Z', durationMs: 4200 },
+        ],
+        changeSetIds: [changeSetId],
+      },
+      plan: { steps: ['write one script'] },
+      changeSetId,
+      // `validated`, never `approved`: a run stops at the human gate.
+      changeSetStatus: 'validated',
+      contentDigest: FAKE_CONTENT_DIGEST,
+      validation: okValidation,
+      skipped: [],
+      ordering: null,
+      failure: null,
+    };
+  }
 
   async propose(changeSet: ChangeSet): Promise<ProposeResponse> {
     this.#record('propose', changeSet);

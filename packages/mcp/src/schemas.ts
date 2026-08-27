@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ChangeSet, InstancePath, LIMITS, Link, RollbackRequest } from '@forgebridge/protocol';
+import { MAX_RUN_ATTEMPTS, StartRunRequest } from '@forgebridge/daemon';
 
 /**
  * Tool input schemas, taken apart from the frozen contract rather than written
@@ -17,6 +18,17 @@ import { ChangeSet, InstancePath, LIMITS, Link, RollbackRequest } from '@forgebr
  */
 const changeSetShape = ChangeSet.innerType().shape;
 const rollbackShape = RollbackRequest.shape;
+
+/**
+ * The run request, taken apart the same way.
+ *
+ * `StartRunRequest` lives in `@forgebridge/daemon` rather than in the frozen
+ * protocol — its own TODO(M31) says it belongs in `@forgebridge/protocol` and
+ * names the conformance suite as the forcing function — so this is the same
+ * projection as above, from wherever the shape currently lives. Two of its
+ * fields are deliberately not offered to the calling model, below.
+ */
+const runShape = StartRunRequest.shape;
 
 /** Optional everywhere: the daemon knows its own default project. */
 export const projectIdArg = changeSetShape.projectId
@@ -74,6 +86,43 @@ export const readScriptInput = {
 export const runTestsInput = {
   projectId: projectIdArg,
   changeSetId: changeSetIdArg.optional().describe('Test the state after this changeset, when one has been applied.'),
+} satisfies z.ZodRawShape;
+
+/**
+ * `forge.start_run`.
+ *
+ * Two fields of `StartRunRequest` are missing on purpose, and neither is an
+ * oversight:
+ *
+ *   - **`stream`.** An MCP tool call answers once. A tool that asked for a
+ *     `text/event-stream` would have nowhere to put the frames, so this
+ *     connector always asks for JSON and the field is not the model's to set.
+ *   - **`producer`.** It records *which* connector asked, and a field the
+ *     caller could set would let a model describe itself as the web app. It is
+ *     stamped by `forge.start_run` as `{ kind: 'mcp' }`.
+ *
+ * There is no approval field, and there is nowhere one could go: `/v1/runs`
+ * takes none, so a model cannot ask for its own work to be cleared even by
+ * accident (ADR-012).
+ */
+export const startRunInput = {
+  prompt: runShape.prompt.describe(
+    'What you want built or changed, in plain language. A model behind the daemon plans it and writes the operations; this is the prompt that model is given, so say what should be true afterwards rather than naming instance paths you have not read.',
+  ),
+  projectId: projectIdArg,
+  policy: runShape.policy
+    .describe(
+      'How the daemon orders the models it may use and falls back between them. free-first (the default) is the only one that cannot surprise the user with a bill. pinned disables fallback entirely and requires pinnedModel.',
+    ),
+  pinnedModel: runShape.pinnedModel.describe(
+    'Pin one model id, from forge.list_models. Only meaningful with policy "pinned"; pinning means that model or nothing, and a failure fails the run rather than reaching for the next model.',
+  ),
+  baseVersion: runShape.baseVersion.describe(
+    'The tree version this run must build against. Omit for "whatever the project is at now". A mismatch is refused with stale_base before a single token is spent.',
+  ),
+  maxAttempts: runShape.maxAttempts.describe(
+    `How many models this run may try, at most ${MAX_RUN_ATTEMPTS}. Omit to let the router try every eligible candidate in order.`,
+  ),
 } satisfies z.ZodRawShape;
 
 export const rollbackInput = {

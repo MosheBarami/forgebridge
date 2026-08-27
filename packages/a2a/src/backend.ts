@@ -14,6 +14,7 @@ import {
   ModelsResponse,
   ProposeResponse,
   RollbackResponse,
+  RunResponse,
 } from './daemon-wire.js';
 
 /**
@@ -35,7 +36,31 @@ import {
  * has not obtained one — including one whose grant names no reviewed content,
  * because `ApplyApprovalGrant.contentDigest` is required. See `approval.ts`.
  */
+/**
+ * Named for the daemon's own request shape rather than for the skill that
+ * invokes it: this is the port's vocabulary, and the skill's `StartRunInput` in
+ * `skills.ts` is the A2A one. They agree field for field today and are allowed
+ * to diverge — that is what a port is for.
+ */
+export interface StartRunRequest {
+  prompt: string;
+  projectId?: string;
+  policy?: string;
+  pinnedModel?: string;
+  baseVersion?: number;
+  maxAttempts?: number;
+}
+
 export interface ForgeBridgeBackend {
+  /**
+   * A prompt in, a proposed ChangeSet out — and never an applied one.
+   *
+   * It sits beside `propose` rather than above it: both end at a ChangeSet the
+   * daemon has validated and nobody has approved, and the only difference is who
+   * wrote the operations. A run is not a shortcut past the gate, and there is no
+   * argument to this method that reaches one (ADR-012).
+   */
+  startRun(request: StartRunRequest): Promise<RunResponse>;
   propose(changeSet: ChangeSet): Promise<ProposeResponse>;
   diff(changeSetId: string): Promise<DiffResponse>;
   approve(grant: ApplyApprovalGrant): Promise<ApproveResponse>;
@@ -70,6 +95,13 @@ export interface DaemonBackendOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The ceiling on a run, which is a different kind of request from every other
+ * one on this surface: it waits on a model, and on the router's fallback
+ * through however many models the policy allows.
+ */
+const RUN_TIMEOUT_MS = 10 * 60_000;
+
 export class DaemonBackend implements ForgeBridgeBackend {
   readonly #baseUrl: string;
   readonly #producerToken: string;
@@ -81,6 +113,27 @@ export class DaemonBackend implements ForgeBridgeBackend {
     this.#producerToken = options.producerToken;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#fetch = options.fetch ?? globalThis.fetch;
+  }
+
+  /**
+   * `POST /v1/runs`, with a ceiling of its own.
+   *
+   * The daemon calls a language model here, possibly several as the router
+   * falls back, so the thirty seconds every other call gets would abandon a run
+   * that was working. `stream` is false and `producer` is stamped by this
+   * connector: the first because an A2A task carries one artifact rather than a
+   * frame sequence, and the second because a field the caller could set would
+   * let a remote agent describe itself as the web app in the daemon's own run
+   * log.
+   */
+  async startRun(request: StartRunRequest): Promise<RunResponse> {
+    return await this.#call(
+      'POST',
+      '/v1/runs',
+      RunResponse,
+      { ...request, stream: false, producer: { kind: 'a2a' } },
+      RUN_TIMEOUT_MS,
+    );
   }
 
   async propose(changeSet: ChangeSet): Promise<ProposeResponse> {
@@ -129,9 +182,10 @@ export class DaemonBackend implements ForgeBridgeBackend {
     path: string,
     schema: T,
     body?: unknown,
+    timeoutMs: number = this.#timeoutMs,
   ): Promise<z.infer<T>> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response: Response;
     try {
       response = await this.#fetch(`${this.#baseUrl}${path}`, {
@@ -152,7 +206,7 @@ export class DaemonBackend implements ForgeBridgeBackend {
       throw new ForgeBridgeError(
         'provider_unconfigured',
         aborted
-          ? `the ForgeBridge daemon did not answer within ${this.#timeoutMs}ms`
+          ? `the ForgeBridge daemon did not answer within ${timeoutMs}ms`
           : 'the ForgeBridge daemon could not be reached',
         'Check that the daemon is running and that this connector points at the right base URL.',
       );

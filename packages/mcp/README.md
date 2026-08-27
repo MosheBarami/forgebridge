@@ -20,7 +20,7 @@ wire format into a call and back.
 | Published to npm | no — M49 |
 
 The package builds and typechecks. Both bindings have been exercised: a live SDK client
-over an in-memory transport listed the eleven tools with the JSON Schemas the SDK projects
+over an in-memory transport listed the tools with the JSON Schemas the SDK projects
 from their Zod shapes, and the streamable-HTTP binding answered a real `initialize`, refused
 an `Origin`-bearing request with 403, and refused an unauthenticated one with 401. The API that had to be confirmed —
 constructor shapes, `registerTool`'s config keys, `handleRequest`'s signature — is listed
@@ -70,7 +70,7 @@ Two limits worth stating plainly rather than leaving to be discovered:
 
 ## Tools
 
-The eleven names are fixed by [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §5.
+The twelve names are fixed by [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §5.
 Every input schema is derived from `@forgebridge/protocol` rather than redeclared, so the
 protocol's refusals — a path segment that is not a safe identifier, a `setProperty` on
 `Parent` or `Name`, more than 500 operations — apply to an MCP caller unchanged.
@@ -80,6 +80,7 @@ protocol's refusals — a path segment that is not a safe identifier, a `setProp
 | `forge.list_projects` | `GET /v1/link` | projects and their paired Studio sessions |
 | `forge.read_tree` | — | **refuses with `not_found`**: no `/v1` tree endpoint exists (M09 owns the snapshot, M31 agrees the shape) |
 | `forge.read_script` | — | **refuses with `not_found`**, same reason |
+| `forge.start_run` | `POST /v1/runs` | hands the prompt to the daemon's own model and returns the ChangeSet it proposed, in `validated`; carries every `ModelAttempt` the router made |
 | `forge.propose_changeset` | `POST /v1/changesets` then `GET …/diff` | validates and records; applies nothing |
 | `forge.diff_changeset` | `GET /v1/changesets/:id/diff` | also how you check whether a human approved yet |
 | `forge.apply_changeset` | `GET /v1/changesets/:id/diff` | reports; refuses `not_approved` for anything a human has not cleared |
@@ -88,6 +89,19 @@ protocol's refusals — a path segment that is not a safe identifier, a `setProp
 | `forge.tail_output` | `GET /v1/output` | what Studio printed |
 | `forge.list_models` | `GET /v1/models` | the synced catalog and its live health |
 | `forge.link_status` | `GET /v1/link` | transport and what it implies about who can read your changes |
+
+### Which tool writes the operations
+
+`forge.propose_changeset` and `forge.start_run` end in the same place — a ChangeSet the
+daemon validated and nobody approved — and differ only in who wrote the operations. Use
+propose when the calling model wrote them; use start_run to hand the prompt to the model the
+daemon routes to. A run is not a shortcut past the gate, and its input shape has no field
+that reaches one.
+
+`forge.start_run` returns `attempts` whole: every model the router tried, in order, with
+why it moved on ([ADR-008](../../docs/architecture/adr-008-capability-router-with-visible-fallback.md)).
+The code came from the model named in the last `ok` attempt, which may not be the one that
+was asked for, so the description tells the calling model to report that list as it stands.
 
 The four that refuse say so in their description text as well as in their answer, because
 that text is what the calling model reads before it decides to try. Three of them refuse
@@ -278,7 +292,7 @@ One risk to check when you do: the MCP specification does not constrain tool-nam
 characters, but a client that projects tools into an OpenAI-style function schema inherits
 that grammar, which is `[A-Za-z0-9_-]` and excludes the dot in `forge.list_projects`.
 Whether any shipping client actually refuses it is **not known here**. If one does,
-`--tool-name-separator _` registers the same eleven tools as `forge_list_projects`.
+`--tool-name-separator _` registers the same twelve tools as `forge_list_projects`.
 
 ## Configuration
 
@@ -338,10 +352,10 @@ detail-free `internal`, the same rule the daemon applies to its own responses.
 npm run test
 ```
 
-Seven files, covering tool registration and the exact eleven names, schema validation
+Nine files, covering tool registration and the exact twelve names, schema validation
 rejecting malformed input, the propose/apply separation, error-code mapping, the daemon
 client's headers and refusal handling, transport selection, and the HTTP binding's
-authentication. The two that matter most:
+authentication, and the connector conformance suite. The three that matter most:
 
 - `test/approval-boundary.test.ts` drives a recording stand-in for `/v1` and asserts that an
   agent cannot chain propose → apply, that no tool under any arguments issues a request to
@@ -354,6 +368,13 @@ authentication. The two that matter most:
   wrong *length* is that same 401 rather than the 500 an unguarded `timingSafeEqual` throws,
   that `timingSafeEqual` is what does the comparing, and — the control — that a request
   carrying the token still gets a real `initialize` answered.
+- `test/conformance.test.ts` runs [`@forgebridge/conformance`](../conformance/README.md)
+  against a live daemon, through `registerForgeBridgeTools` rather than by calling handlers
+  — the registration wrapper is what a calling model's failures actually come back through.
+  Eleven cases pass; `tree-read` reports `unsupported`, because `forge.read_tree` refuses in
+  the protocol's own words and the suite records that as the gap it is. The approval it
+  needs comes from an object the adapter cannot reach, which is the only version of that
+  test worth running.
 
 `src/server.ts` is the one file that imports the SDK, and `register.ts` describes the slice
 of it this package calls as a structural interface — `createForgeBridgeServer` assigns the

@@ -113,16 +113,30 @@ it asked for, which is what that state means.
 
 Every skill's input schema is strict: an unrecognised key is refused rather than dropped.
 
-### The six skills
+### The seven skills
 
 | Skill id | Input | Writes to the place? |
 |---|---|---|
+| `start-run` | `{ prompt, projectId?, policy?, pinnedModel?, baseVersion?, maxAttempts? }` | no |
 | `propose-changeset` | `{ changeSet }` — a `ChangeSet` from `@forgebridge/protocol` | no |
 | `review-changeset-diff` | `{ changeSetId }` | no |
 | `apply-approved-changeset` | `{ changeSetId }` | **yes — approval-gated** |
 | `rollback-apply` | `{ journalId, expectedVersion, reason? }` | **yes — approval-gated** |
 | `query-models` | `{}` | no |
 | `studio-link-status` | `{}` | no |
+
+`start-run` and `propose-changeset` end in the same place — a ChangeSet the daemon
+validated and nobody approved — and differ only in who wrote the operations. A run hands the
+prompt to the model this ForgeBridge instance routes to; a proposal carries operations the
+calling agent wrote itself. Neither is a way past the gate, and `StartRunInput` has no field
+that reaches one.
+
+A run's artifact carries `run.attempts` whole: every model the router tried, in order, with
+why it moved on ([ADR-008](../../docs/architecture/adr-008-capability-router-with-visible-fallback.md)).
+The status message collapses it into one line — `glm-5.2:free → rate-limited →
+minimax-m3:free` — using the protocol's own renderer, so every ForgeBridge surface says it
+the same way. The code came from the model in the last successful attempt, which may not be
+the one that was asked for, and the skill's description says so on the card.
 
 Results come back as **artifacts**, not messages — §3.7 is explicit that "Messages SHOULD
 NOT be used to deliver task outputs". Each artifact carries a `data` Part with the daemon's
@@ -359,6 +373,14 @@ npm run test
 npm run build
 ```
 
+`test/conformance.test.ts` runs [`@forgebridge/conformance`](../conformance/README.md)
+against a live daemon, driving every case through a real `SendMessage` — invocation
+parsing, task creation, the executor, the artifact — rather than by calling
+`SkillExecutor` directly. The gate is `DENY_ALL_APPROVALS` and the approval the suite needs
+arrives from an object the adapter cannot reach, which is the only version of that test
+worth running. Eleven cases pass; `tree-read` reports `unsupported`, because this connector
+advertises no tree-reading skill and refuses in the protocol's own words.
+
 ---
 
 ## Known gaps
@@ -375,8 +397,10 @@ Each of these is a `TODO` in the source naming the milestone that closes it.
   Owner: the protocol maintainer.
 - **`TODO(M31)` — the Agent Card is validated against this package's own transcription**
   (`src/card.ts`), which can only catch drift from itself. The connector conformance suite
-  should validate it against the published A2A JSON Schema. Owner: the conformance-suite
-  author.
+  now runs against this package (`test/conformance.test.ts`) and checks what is
+  connector-neutral — unique, portable skill ids on a compatible protocol major — but not the
+  card against the published A2A JSON Schema, which would need that schema vendored here.
+  Owner: the conformance-suite author.
 - **`TODO(M31)` — the specification assigns no JSON-RPC error code for an authentication
   failure** (`src/server.ts`). §3.3.2 names "JSON-RPC custom error" as the representation but
   §5.4's A2A range `-32001`–`-32099` defines nine codes and none of them is one. Picking a

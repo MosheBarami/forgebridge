@@ -1,33 +1,30 @@
 {
-  "name": "@forgebridge/mcp",
+  "name": "@forgebridge/conformance",
   "version": "0.1.0",
-  "description": "The ForgeBridge MCP server: one tool surface over stdio and streamable HTTP, speaking the daemon's /v1 REST surface.",
+  "description": "The connector conformance suite: one executable definition of what any ForgeBridge connector must do, run against a live daemon.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" }
+    "./reference": { "types": "./dist/reference/index.d.ts", "default": "./dist/reference/index.js" }
   },
-  "bin": { "forgebridge-mcp": "./dist/bin.js" },
+  "bin": { "forgebridge-conformance": "./dist/bin.js" },
   "files": ["dist"],
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "echo 'lint: mcp (configured in M04 follow-up)'"
+    "lint": "echo 'lint: conformance (configured in M04 follow-up)'"
   },
   "dependencies": {
     "@forgebridge/daemon": "*",
     "@forgebridge/protocol": "*",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@forgebridge/conformance": "*",
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2",
     "vitest": "^4.1.11"

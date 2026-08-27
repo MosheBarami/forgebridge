@@ -69,6 +69,40 @@ match the operations it holds, so the field is what turns "I approve set X" into
 "I approve the operations I was shown for set X" — and `ApproveRequest` has no
 default for it, so a producer cannot skip the binding by accident.
 
+## A run is on the propose side of that line
+
+```python
+from forgebridge.models import StartRunRequest
+
+run = client.start_run(StartRunRequest(prompt="add a respawn handler"))
+
+for attempt in run.run.attempts:                    # every model, in order
+    print(attempt.modelId, attempt.outcome)         # glm-5.2:free rate-limited
+                                                    # minimax-m3:free ok
+print(run.changeSetId, run.changeSetStatus)         # ... validated
+```
+
+`start_run` hands the prompt to the model the daemon routes to and returns the
+ChangeSet it proposed. It is not a shortcut past the gate: the set comes back
+`validated`, and clearing it is still `approve_changeset`. `StartRunRequest` has
+no field that reaches approval, and none that carries a validation — a producer
+cannot send a verdict of its own, because there is nowhere to put one.
+
+`run.run.attempts` is the whole list, never only the model that succeeded
+([ADR-008](../../docs/architecture/adr-008-capability-router-with-visible-fallback.md)).
+The code came from the model in the last `ok` attempt, which may not be the one
+that was asked for, so a caller that reports only the winner is misreporting who
+wrote it.
+
+**A run waits on a language model**, and on the router's fallback through
+however many models the policy allows. The client's `timeout` applies to it like
+any other call, so construct the client with one sized for a run:
+`ForgeBridgeClient(url, producer_token=token, timeout=600)`.
+
+`stream=True` is refused rather than quietly downgraded: this client reads one
+JSON answer and cannot parse a `text/event-stream` body. The streamed form of a
+run is `GET /v1/runs/{id}/events`, and a Python reader for it is TODO(M30).
+
 ## Consumer routes need a MAC this package cannot compute
 
 `poll`, `report_apply_result` and `mirror_output` are authenticated by a MAC over
@@ -91,3 +125,29 @@ python -m ruff check .
 drift proof; the TypeScript half is `scripts/__tests__/schema-projection.test.ts`,
 which runs the same documents through Zod, through the JSON Schema and through
 these models and compares all three.
+
+### Not yet wired into the connector conformance suite
+
+`@forgebridge/conformance` is the one executable definition of what a ForgeBridge
+connector must do, and `@forgebridge/cli`, `@forgebridge/mcp` and
+`@forgebridge/a2a` each run it against a live daemon from their own test tree.
+This package does not, and the reason is structural rather than a decision about
+what is worth testing:
+
+- the suite is TypeScript, and it needs a live daemon and a built workspace to
+  run against. The Python gate in `.github/workflows/ci.yml` has neither — it
+  runs before `npm run build`, so nothing under `packages/*/dist` exists yet;
+- and hosting the adapter here would make this directory an npm workspace, which
+  changes `package-lock.json` for a package whose registry is PyPI.
+
+So the run behaviours the suite checks are asserted here instead, against the
+same requirements: `tests/test_client.py` holds that a run reports every attempt
+in order, that it stops at `validated`, that no route it builds reaches
+`/approve`, and that a verdict is unrepresentable on the request. That is the
+same set of claims, made one language over — it is not the same *proof*, and the
+difference is exactly what the suite exists to catch.
+
+TODO(M31): a driver in the shape of `tests/roundtrip.py` — a subprocess entry
+point the TypeScript side shells out to, which is how the cross-language drift
+proof above already works — plus an adapter in a package that runs after the
+build. Owner: whoever owns `packages/sdk-python` at M30.

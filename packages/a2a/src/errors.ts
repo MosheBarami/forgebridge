@@ -1,5 +1,5 @@
-import type { ErrorCode as ForgeBridgeErrorCode } from '@forgebridge/protocol';
-import { ForgeBridgeError } from '@forgebridge/protocol';
+import type { ErrorCode as ForgeBridgeErrorCode, ProtocolError } from '@forgebridge/protocol';
+import { ErrorCode as ForgeBridgeErrorCodeSchema, ForgeBridgeError, ProtocolError as ProtocolErrorSchema } from '@forgebridge/protocol';
 import type { TaskState } from './spec.js';
 
 /**
@@ -228,5 +228,72 @@ export function renderFailure(error: unknown): RenderedFailure {
     state: 'TASK_STATE_FAILED',
     summary: 'the ForgeBridge A2A connector failed to complete this task',
     detail: errorInfo('INTERNAL', FORGEBRIDGE_ERROR_DOMAIN),
+  };
+}
+
+/**
+ * A failure, reduced to the protocol code a caller branches on.
+ *
+ * This is `renderFailure`'s other half. That one answers "what does this task's
+ * status say"; this one answers "what happened", in the closed vocabulary of
+ * `packages/protocol`. A calling agent needs both: the task state tells it
+ * whether to retry, and the code tells it what to fix.
+ *
+ * `recognised` travels beside the code rather than being inferred from it,
+ * because `internal` is also a real answer the daemon sends. An unrecognised
+ * failure reported as `internal` is correct; an unrecognised failure reported as
+ * `not_approved` would be this connector inventing an approval decision out of
+ * a socket timeout.
+ *
+ * Three shapes reach here, and all three are real: a `ForgeBridgeError`, which
+ * is how the backend raises every `/v1` refusal; a bare `ProtocolError` payload,
+ * which is what a caller parsing a response body holds; and the `ErrorInfo`
+ * detail this connector puts on a failed task, which is what a *remote* agent
+ * actually receives and is the only one of the three it can read.
+ */
+export interface FailureView {
+  code: ForgeBridgeErrorCode;
+  recognised: boolean;
+  /** The A2A task state this failure lands a task in. */
+  state: Extract<TaskState, 'TASK_STATE_REJECTED' | 'TASK_STATE_FAILED'>;
+  message: string;
+  remedy?: string;
+}
+
+export function classifyFailure(error: unknown): FailureView {
+  const view = (payload: ProtocolError): FailureView => ({
+    code: payload.code,
+    recognised: true,
+    state: taskStateForFailure(payload.code),
+    message: payload.message,
+    ...(payload.remedy ? { remedy: payload.remedy } : {}),
+  });
+
+  if (error instanceof ForgeBridgeError) return view(error.toPayload());
+
+  const payload = ProtocolErrorSchema.safeParse(error);
+  if (payload.success) return view(payload.data);
+
+  // The shape a remote agent holds: the `google.rpc.ErrorInfo` detail this
+  // connector attaches to a failed or rejected task, whose metadata carries the
+  // protocol code that caused it.
+  const metadata = (error as { metadata?: { code?: unknown; message?: unknown; remedy?: unknown } } | null | undefined)
+    ?.metadata;
+  const fromDetail = ForgeBridgeErrorCodeSchema.safeParse(metadata?.code);
+  if (fromDetail.success) {
+    return {
+      code: fromDetail.data,
+      recognised: true,
+      state: taskStateForFailure(fromDetail.data),
+      message: typeof metadata?.message === 'string' ? metadata.message : '',
+      ...(typeof metadata?.remedy === 'string' ? { remedy: metadata.remedy } : {}),
+    };
+  }
+
+  return {
+    code: 'internal',
+    recognised: false,
+    state: 'TASK_STATE_FAILED',
+    message: 'the ForgeBridge A2A connector could not classify this failure',
   };
 }

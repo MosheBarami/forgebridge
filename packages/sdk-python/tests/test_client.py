@@ -15,7 +15,7 @@ from forgebridge.client import (
     HttpResponse,
 )
 from forgebridge.errors import ForgeBridgeError, TransportError
-from forgebridge.models import ApproveRequest, ChangeSet
+from forgebridge.models import ApproveRequest, ChangeSet, StartRunRequest
 
 # The digest `GET /v1/changesets/:id/diff` reports for CHANGESET's operations.
 # An approve must echo it: the daemon binds a "yes" to the content that was
@@ -178,3 +178,139 @@ def test_an_id_cannot_walk_out_of_its_route() -> None:
     _, url, _, _ = recorder.calls[0]
     assert "/v1/journal/" not in url
     assert url.endswith("/approve")
+
+
+# ── runs ──────────────────────────────────────────────────────────────────────
+
+#: What `POST /v1/runs` answers. Two attempts and not one, deliberately: a
+#: fixture whose run only ever tried the model that worked would let a client
+#: that reported the winner alone pass every assertion about the attempt list.
+RUN_RESPONSE = {
+    "run": {
+        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3310",
+        "projectId": CHANGESET["projectId"],
+        "prompt": "add a purchase handler",
+        "stage": "awaiting-approval",
+        "status": "running",
+        "attempts": [
+            {
+                "modelId": "glm-5.2:free",
+                "outcome": "rate-limited",
+                "startedAt": "2026-08-26T12:00:00Z",
+                "durationMs": 900,
+            },
+            {
+                "modelId": "minimax-m3:free",
+                "outcome": "ok",
+                "startedAt": "2026-08-26T12:00:01Z",
+                "durationMs": 4200,
+            },
+        ],
+        "changeSetIds": [CHANGESET["id"]],
+        "producer": {"kind": "sdk"},
+        "startedAt": "2026-08-26T12:00:00Z",
+        "finishedAt": None,
+    },
+    "plan": {"steps": ["write one script"]},
+    "changeSetId": CHANGESET["id"],
+    "changeSetStatus": "validated",
+    "contentDigest": REVIEWED_DIGEST,
+    "validation": {
+        "luau": {"status": "ok", "findings": []},
+        "policy": {"status": "ok", "violations": []},
+        "computedAt": "2026-08-26T12:00:06Z",
+        "computedBy": "forgebridge-daemon@0.1.0",
+    },
+    "skipped": [],
+    "ordering": {
+        "policy": "free-first",
+        "candidatesConsidered": 4,
+        "candidatesEligible": 2,
+        "order": ["glm-5.2:free", "minimax-m3:free"],
+    },
+    "failure": None,
+}
+
+
+def test_a_run_reports_every_model_it_tried_in_order() -> None:
+    """ADR-008: the caller always receives the full list, never only the winner.
+
+    A run that fell back and reports one attempt is perfectly well-formed, so
+    the shape alone cannot catch it — the fixture falls back, and this asserts
+    on both entries and on their order.
+    """
+    recorder = Recorder(ok(RUN_RESPONSE, status=201))
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
+
+    result = client.start_run(StartRunRequest(prompt="add a purchase handler"))
+
+    assert [(a.modelId, a.outcome) for a in result.run.attempts] == [
+        ("glm-5.2:free", "rate-limited"),
+        ("minimax-m3:free", "ok"),
+    ]
+    method, url, headers, body = recorder.calls[0]
+    assert (method, url) == ("POST", "http://127.0.0.1:8787/v1/runs")
+    assert headers[PRODUCER_TOKEN_HEADER] == "t0ken"
+    # Sent as the wire schema spells it, with the default policy carried
+    # explicitly rather than left for the server to guess at.
+    assert json.loads(body)["policy"] == "free-first"
+
+
+def test_a_run_stops_at_the_human_gate() -> None:
+    """A run proposes. The ChangeSet it leaves behind is nobody's approval."""
+    recorder = Recorder(ok(RUN_RESPONSE, status=201))
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
+
+    result = client.start_run(StartRunRequest(prompt="add a purchase handler"))
+
+    assert result.changeSetStatus == "validated"
+    assert result.contentDigest == REVIEWED_DIGEST
+    # And nothing on the way there touched the approve route.
+    assert all("approve" not in url for _, url, _, _ in recorder.calls)
+
+
+def test_a_run_never_claims_a_verdict_of_its_own() -> None:
+    """PROTOCOL invariant 4, from the client's side.
+
+    There is nowhere in `StartRunRequest` to put a validation, so a producer
+    cannot send one — and the verdict that comes back names the daemon.
+    """
+    assert "validation" not in StartRunRequest.model_fields
+    recorder = Recorder(ok(RUN_RESPONSE, status=201))
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
+    result = client.start_run(StartRunRequest(prompt="p"))
+    assert result.validation["computedBy"].startswith("forgebridge-daemon@")
+
+
+def test_a_streamed_run_is_refused_rather_than_quietly_downgraded() -> None:
+    recorder = Recorder()
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
+    with pytest.raises(TransportError):
+        client.start_run(StartRunRequest(prompt="p", stream=True))
+    assert recorder.calls == []
+
+
+def test_a_run_needs_the_producer_token_before_it_spends_anything() -> None:
+    recorder = Recorder()
+    client = ForgeBridgeClient("http://127.0.0.1:8787", transport=recorder)
+    with pytest.raises(TransportError):
+        client.start_run(StartRunRequest(prompt="p"))
+    assert recorder.calls == []
+
+
+def test_a_recorded_run_is_readable_while_it_is_still_running() -> None:
+    recorder = Recorder(ok(RUN_RESPONSE))
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t0ken", transport=recorder)
+
+    result = client.get_run("3f2504e0-4f89-41d3-9a0c-0305e82c3310")
+
+    assert result.run.status == "running"
+    _, url, _, _ = recorder.calls[0]
+    assert url.endswith("/v1/runs/3f2504e0-4f89-41d3-9a0c-0305e82c3310")
+
+
+def test_no_method_runs_and_approves() -> None:
+    """The same guard as above, aimed at the route a run could have grown."""
+    source = inspect.getsource(ForgeBridgeClient.start_run)
+    assert '"/v1/runs"' in source
+    assert "/approve" not in source.replace(ForgeBridgeClient.start_run.__doc__ or "", "")

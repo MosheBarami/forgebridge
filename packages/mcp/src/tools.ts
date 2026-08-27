@@ -14,11 +14,12 @@ import {
   readTreeInput,
   rollbackInput,
   runTestsInput,
+  startRunInput,
   tailOutputInput,
 } from './schemas.js';
 
 /**
- * The eleven tools `docs/ARCHITECTURE.md` §5 names, and no twelfth.
+ * The twelve tools `docs/ARCHITECTURE.md` §5 names, and no thirteenth.
  *
  * The description text is not documentation. It is the prompt: it is what the
  * calling model reads before it decides which tool to reach for, and it is the
@@ -167,6 +168,87 @@ const readScript: ToolDefinition = {
       'this ForgeBridge transport serves no script source',
       'Ask the user to paste the current source. Reading it needs a /v1 endpoint that does not exist yet (M09 owns the snapshot, M31 agrees the wire shape).',
     );
+  },
+};
+
+/**
+ * `forge.start_run`.
+ *
+ * The only tool on this server that spends the user's model credit, and the
+ * only one whose answer is written by a model other than the one calling it.
+ * Both facts are in the description, because the description is the prompt: it
+ * is what the calling model reads before deciding whether this is the tool it
+ * wants, and a model that reached for it expecting to have written the
+ * operations itself would be surprised by what comes back.
+ *
+ * The attempt list is returned in full and unedited (ADR-008). A caller that
+ * summarises it to the user as "I wrote this" — rather than as "glm-5.2:free
+ * was rate-limited, so minimax-m3:free wrote this" — is misreporting who wrote
+ * the code, which is the substitution the whole attempt list exists to prevent;
+ * so the description says that too.
+ */
+const startRun: ToolDefinition = {
+  name: 'forge.start_run',
+  title: 'Run a prompt into a proposed ChangeSet',
+  description: [
+    'Hand a prompt to the model this ForgeBridge daemon routes to, and get back a ChangeSet it proposed, already validated by the daemon. Use this when the user wants something built and you would rather the daemon\u2019s own model write the operations; use forge.propose_changeset instead when you have written the operations yourself.',
+    'This VALIDATES and RECORDS a proposal. It does NOT change the place, it does not queue anything for Studio, and the ChangeSet it returns is in status "validated" \u2014 never approved.',
+    APPROVAL_NOTE,
+    'The result carries `run.attempts`: every model the router tried, in order, with why it moved on. Report that list to the user as it stands. The code in the ChangeSet was written by the model named in the last ok attempt, which may not be the one anybody asked for, and describing it as your own work or as the first model\u2019s would be a false statement about who wrote it.',
+    'After this call, report the changeset id, the summary and the attempt list to the user, and ask them to review and approve it. forge.apply_changeset will refuse until they have.',
+  ].join(' '),
+  inputShape: startRunInput,
+  readOnlyHint: false,
+  destructiveHint: false,
+  handler: async (args, context): Promise<ToolResult> => {
+    const input = objectOf(startRunInput).parse(args);
+    const projectId = await resolveProjectId(context, input.projectId);
+
+    const response = (await context.client.startRun({
+      ...input,
+      projectId,
+      // Never the model's to set. `stream` has nowhere to go in a single tool
+      // result, and `producer` records which connector asked \u2014 a field the
+      // caller could fill in would let a model describe itself as the web app.
+      stream: false,
+      producer: { kind: 'mcp' },
+    })) as {
+      run?: { id?: string; stage?: string; status?: string; attempts?: unknown[] };
+      changeSetId?: string | null;
+      changeSetStatus?: string | null;
+      contentDigest?: string | null;
+      validation?: unknown;
+      skipped?: unknown[];
+      ordering?: unknown;
+      failure?: unknown;
+    } | null;
+
+    const changeSetId = response?.changeSetId ?? null;
+    const attempts = response?.run?.attempts ?? [];
+
+    return textResult({
+      runId: response?.run?.id ?? null,
+      projectId,
+      stage: response?.run?.stage ?? null,
+      status: response?.run?.status ?? null,
+      // Whole, in order, unedited. A run is not reproducible without it, and a
+      // connector that trimmed it to the model that succeeded would be hiding
+      // the fallback rather than reporting it (ADR-008).
+      attempts,
+      skipped: response?.skipped ?? [],
+      ordering: response?.ordering ?? null,
+      changeSetId,
+      changeSetStatus: response?.changeSetStatus ?? null,
+      contentDigest: response?.contentDigest ?? null,
+      validation: response?.validation ?? null,
+      failure: response?.failure ?? null,
+      applied: false,
+      approved: false,
+      nextStep:
+        changeSetId === null
+          ? `This run produced no ChangeSet, so there is nothing to review and nothing reached the place. Report the attempt list to the user: it says which models were tried and why each one did not produce a result.`
+          : `Nothing has changed in the place. Read forge.diff_changeset for ${changeSetId}, show it to the user with the attempt list, and ask them to approve it in Roblox Studio or in their ForgeBridge client. ${APPROVAL_NOTE}`,
+    });
   },
 };
 
@@ -423,6 +505,7 @@ export const TOOLS: readonly ToolDefinition[] = [
   listProjects,
   readTree,
   readScript,
+  startRun,
   proposeChangeSet,
   diffChangeSet,
   applyChangeSet,

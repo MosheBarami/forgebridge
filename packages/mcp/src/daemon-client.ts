@@ -44,6 +44,24 @@ export interface DaemonClientOptions {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * How long `POST /v1/runs` is given.
+ *
+ * A separate number because a run is a different kind of request from every
+ * other one here: the daemon calls a language model, possibly several in
+ * sequence as the router falls back, and thirty seconds would abandon a run
+ * that was working. The ceiling still exists — a request with no ceiling is a
+ * socket held for the life of the process — but it is sized for the work rather
+ * than for a REST read.
+ *
+ * This connector asks for the JSON form of a run rather than the streamed one:
+ * an MCP tool call is a single result, and a tool that streamed would have
+ * nowhere to put the frames. The attempt list is on the JSON answer in full, so
+ * nothing about ADR-008 is lost by waiting — only the ability to *watch*, which
+ * belongs to a terminal (`forgebridge run`) and not to a tool result.
+ */
+const RUN_TIMEOUT_MS = 10 * 60_000;
+
 /** Paths this client refuses to build, whatever it is asked for. */
 const FORBIDDEN_PATH_FRAGMENT = '/approve';
 
@@ -90,7 +108,26 @@ export class DaemonClient {
     return this.#request('GET', '/v1/models');
   }
 
-  async #request(method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
+  /**
+   * `POST /v1/runs` — a prompt in, a proposed ChangeSet out.
+   *
+   * Nothing here approves and nothing here applies. The run leaves a ChangeSet
+   * in `validated`; approval is `POST /v1/changesets/:id/approve`, which this
+   * client does not implement and must not (see the note at the top of this
+   * file). A run request has no field that reaches approval either — the shape
+   * is `StartRunRequest`, and `forge.start_run` validates against it before
+   * anything is sent.
+   */
+  startRun(request: unknown): Promise<unknown> {
+    return this.#request('POST', '/v1/runs', request, RUN_TIMEOUT_MS);
+  }
+
+  async #request(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+    timeoutMs: number = this.#timeoutMs,
+  ): Promise<unknown> {
     // Belt to the structural braces: an id interpolated into a path cannot turn
     // a read into an approval, but the check costs nothing and it fails loudly
     // if someone ever adds a route here without reading the comment above.
@@ -117,7 +154,7 @@ export class DaemonClient {
         method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.#timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (cause) {
       // TODO(M31): the protocol's ErrorCode has no "the transport is not

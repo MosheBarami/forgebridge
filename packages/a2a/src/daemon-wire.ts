@@ -112,6 +112,53 @@ export const RollbackResponse = z
   .passthrough();
 export type RollbackResponse = z.infer<typeof RollbackResponse>;
 
+/**
+ * `POST /v1/runs` — 201.
+ *
+ * Narrow, like every schema here: the fields this package reads are declared
+ * and the rest passes through. `run.attempts` is declared in full, though, and
+ * that is not an accident — it is the field ADR-008 is about, and a connector
+ * that let it arrive through `.passthrough()` would have no way to say anything
+ * true about it in the artifact summary a calling agent reads.
+ *
+ * `changeSetStatus` is a string here rather than the protocol's enum for the
+ * reason the file's header gives: this package validates what it reads and
+ * forwards the rest, and a daemon that gained a status would otherwise turn an
+ * additive server change into a broken connector.
+ */
+export const RunResponse = z
+  .object({
+    run: z
+      .object({
+        id: z.string().uuid(),
+        projectId: z.string().uuid(),
+        stage: z.string(),
+        status: z.string(),
+        attempts: z.array(
+          z
+            .object({
+              modelId: z.string(),
+              outcome: z.string(),
+              startedAt: z.string(),
+              durationMs: z.number(),
+            })
+            .passthrough(),
+        ),
+        changeSetIds: z.array(z.string().uuid()),
+      })
+      .passthrough(),
+    plan: z.object({ steps: z.array(z.string()) }).passthrough(),
+    changeSetId: z.string().uuid().nullable(),
+    changeSetStatus: z.string().nullable(),
+    contentDigest: z.string().min(1).nullable(),
+    validation: Validation.nullable(),
+    skipped: z.array(z.unknown()),
+    ordering: z.unknown().nullable(),
+    failure: z.unknown().nullable(),
+  })
+  .passthrough();
+export type RunResponse = z.infer<typeof RunResponse>;
+
 /** `GET /v1/models` — 200. */
 export const ModelsResponse = z
   .object({

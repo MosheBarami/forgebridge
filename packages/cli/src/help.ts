@@ -1,4 +1,5 @@
 import { PAIRING, PRIVACY_POSTURE } from '@forgebridge/protocol';
+import { MAX_RUN_ATTEMPTS, ROUTING_POLICIES } from '@forgebridge/daemon';
 import { DEFAULT_APPLY_TIMEOUT_SECONDS, DEFAULT_BASE_URL, BASE_URL_ENV, TOKEN_ENV, type Command } from './args.js';
 
 /**
@@ -18,7 +19,7 @@ const EXIT_CODES = `Exit codes:
 
 const GLOBAL = `Global options:
   --url <address>   Transport base address (default ${DEFAULT_BASE_URL}, or $${BASE_URL_ENV})
-  --token <value>   Producer token, required by diff, apply and rollback.
+  --token <value>   Producer token, required by run, diff, apply and rollback.
                     Defaults to $${TOKEN_ENV}. The daemon prints it once, on the
                     terminal it was started from. This CLI never writes it to disk.
   --json            Machine-readable output on stdout. Notices stay on stderr.
@@ -124,13 +125,32 @@ ${EXIT_CODES}`,
 Usage:
   forgebridge run "<prompt>" [options]
 
-Not yet available on any transport: the /v1 surface has no run endpoint, so
-there is nowhere to submit a prompt. This command reports that and exits 1
-rather than pretending to have sent something. M09 in docs/MILESTONES.md lands
-the pipeline behind such a route.
+Options:
+  --project <uuid>      Project to run against (default: the transport's own)
+  --policy <name>       How the router orders and falls back over the candidates:
+                        ${ROUTING_POLICIES.join(', ')}. Default free-first, which
+                        is the only default that cannot surprise you with a bill.
+  --model <id>          Pin one model. Implies --policy pinned, which disables
+                        fallback entirely: that model or nothing.
+  --base-version <n>    The tree version this run must build against. A mismatch
+                        is refused before a token is spent, not after.
+  --max-attempts <n>    Cap how many models one run may try (1–${MAX_RUN_ATTEMPTS})
+  --verbose             Print every attempt in full — durations, tokens, cost,
+                        the router's ordering, and the candidates it skipped
 
-Until then, a producer builds a ChangeSet itself, submits it to
-POST /v1/changesets, and reviews it with \`forgebridge diff\`.
+Every model tried is printed as it is tried, and again as one line at the end:
+
+  models     glm-5.2:free → rate-limited → minimax-m3:free
+
+That line is the run's record. A model swapped in without an attempt beside it
+would be a silent substitution, which is the thing ADR-008 exists to prevent.
+
+This command never applies. A run leaves a ChangeSet in "validated"; it prints
+the changeset id, how to review it, and how a human approves it. There is no
+flag that approves — that flag would be the off switch for the only gate
+between a model and your place (ADR-012).
+
+Needs the producer token: a run spends the daemon operator's model credit.
 
 ${GLOBAL}
 

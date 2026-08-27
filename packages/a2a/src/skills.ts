@@ -40,6 +40,7 @@ export const SKILL_INVOCATION_EXTENSION_URI =
   'https://github.com/MosheBarami/forgebridge/tree/main/packages/a2a#skill-invocation-v1' as const;
 
 export const SKILL_IDS = [
+  'start-run',
   'propose-changeset',
   'review-changeset-diff',
   'apply-approved-changeset',
@@ -60,6 +61,38 @@ export type SkillId = z.infer<typeof SkillId>;
  * caller trying something, and the right answer is a loud refusal, not a
  * silently ignored field. See `approval.ts`.
  */
+/**
+ * `start-run`.
+ *
+ * `.strict()` like the rest, and here the strictness carries the same weight it
+ * does on `apply-approved-changeset`: an unknown key on a run request is a
+ * caller trying to describe something the daemon's `StartRunRequest` has no
+ * field for — an approval, an apply, a status to store the result under — and
+ * the right answer is a loud refusal rather than a silently dropped field.
+ *
+ * `stream` and `producer` are absent because this connector owns them. An A2A
+ * task carries one artifact rather than a frame sequence, and `producer` says
+ * which connector asked; a caller that could set it could describe itself as
+ * the web app in the daemon's own run log.
+ */
+export const StartRunInput = z
+  .object({
+    prompt: z.string().min(1).max(50_000),
+    projectId: z.string().uuid().optional(),
+    /**
+     * Left as a bounded string rather than re-declared as an enum. The routing
+     * policies are `@forgebridge/core`'s and reach this package only through a
+     * daemon response; a copy of the list here would be a copy that goes stale,
+     * and the daemon refuses a policy it does not implement with a message that
+     * names the ones it does.
+     */
+    policy: z.string().min(1).max(40).optional(),
+    pinnedModel: z.string().min(1).max(200).optional(),
+    baseVersion: z.number().int().min(0).optional(),
+    maxAttempts: z.number().int().min(1).optional(),
+  })
+  .strict();
+
 export const ProposeChangesetInput = z.object({ changeSet: ChangeSet }).strict();
 
 export const ReviewChangesetDiffInput = z.object({ changeSetId: z.string().uuid() }).strict();
@@ -80,6 +113,7 @@ export const QueryModelsInput = z.object({}).strict();
 export const StudioLinkStatusInput = z.object({}).strict();
 
 export const SKILL_INPUTS = {
+  'start-run': StartRunInput,
   'propose-changeset': ProposeChangesetInput,
   'review-changeset-diff': ReviewChangesetDiffInput,
   'apply-approved-changeset': ApplyApprovedChangesetInput,
@@ -183,7 +217,7 @@ function example(skill: SkillId, input: unknown): string {
 }
 
 /**
- * The six skills, in the order a run uses them.
+ * The seven skills, in the order a run uses them.
  *
  * Read together they are a deliberate statement of the trust boundary: propose
  * and read are here as ordinary work, apply is described as requiring an
@@ -192,6 +226,26 @@ function example(skill: SkillId, input: unknown): string {
  * rather than by getting a task back in `TASK_STATE_AUTH_REQUIRED`.
  */
 export const FORGEBRIDGE_SKILLS: readonly AgentSkill[] = Object.freeze([
+  {
+    id: 'start-run',
+    name: 'Run a prompt into a proposal',
+    description:
+      'Hand a prompt to the model this ForgeBridge instance routes to and receive the ChangeSet it proposed, already ' +
+      'validated by the daemon. Nothing is written to the place: the ChangeSet comes back in status "validated", and ' +
+      'approving it is an act this caller cannot perform (see apply-approved-changeset). The artifact carries the ' +
+      'complete list of models the router tried, in order, with why it moved on from each — report that list as it ' +
+      'stands, because the code was written by the model named in the last successful attempt and that may not be ' +
+      'the one that was asked for.',
+    tags: ['roblox', 'run', 'prompt', 'changeset', 'propose', 'forgebridge'],
+    examples: [
+      example('start-run', {
+        prompt: 'add a respawn handler that puts players back at the lobby spawn',
+        policy: 'free-first',
+      }),
+    ],
+    inputModes: [JSON_MODE],
+    outputModes: [JSON_MODE, TEXT_MODE],
+  },
   {
     id: 'propose-changeset',
     name: 'Propose a change',

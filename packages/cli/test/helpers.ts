@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ChangeSetDiff, LinkStatusResponse, ModelsSnapshot } from '@forgebridge/daemon';
+import type { ChangeSetDiff, LinkStatusResponse, ModelsSnapshot, RunResponse } from '@forgebridge/daemon';
 import type { Io } from '../src/index.js';
 import type { Deps } from '../src/commands/context.js';
 import type { Transport } from '../src/client.js';
@@ -65,6 +65,67 @@ export function diffFixture(overrides: Partial<ChangeSetDiff> = {}): ChangeSetDi
   };
 }
 
+/**
+ * A run that fell back once and ended at the human gate.
+ *
+ * Two attempts rather than one, deliberately: a fixture whose run only ever
+ * tried the model that worked would let a renderer that prints the last attempt
+ * pass every assertion about the attempt log (ADR-008).
+ */
+export function runResponseFixture(overrides: Partial<RunResponse> = {}): RunResponse {
+  const changeSetId = randomUUID();
+  return {
+    run: {
+      id: randomUUID(),
+      projectId: randomUUID(),
+      prompt: 'build a shop',
+      stage: 'awaiting-approval',
+      status: 'running',
+      attempts: [
+        {
+          modelId: 'glm-5.2:free',
+          outcome: 'rate-limited',
+          startedAt: '2026-01-01T00:00:00.000Z',
+          durationMs: 1200,
+          note: 'the provider answered 429',
+        },
+        {
+          modelId: 'minimax-m3:free',
+          outcome: 'ok',
+          startedAt: '2026-01-01T00:00:02.000Z',
+          durationMs: 4800,
+          promptTokens: 812,
+          completionTokens: 640,
+          costUsd: 0,
+        },
+      ],
+      changeSetIds: [changeSetId],
+      producer: { kind: 'cli' },
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: null,
+    },
+    plan: { steps: ['write one script under ServerScriptService.Shop'] },
+    changeSetId,
+    changeSetStatus: 'validated',
+    contentDigest: 'sha256:the-digest-this-run-reported',
+    validation: {
+      luau: { status: 'ok', findings: [] },
+      policy: { status: 'ok', violations: [] },
+      computedAt: '2026-01-01T00:00:07.000Z',
+      computedBy: 'forgebridge-daemon@0.1.0',
+    },
+    skipped: [],
+    ordering: {
+      policy: 'free-first',
+      candidatesConsidered: 6,
+      candidatesEligible: 2,
+      order: ['glm-5.2:free', 'minimax-m3:free'],
+    },
+    failure: null,
+    ...overrides,
+  };
+}
+
 export function modelsFixture(overrides: Partial<ModelsSnapshot> = {}): ModelsSnapshot {
   return {
     configured: true,
@@ -95,6 +156,7 @@ export function stubTransport(handlers: Partial<Transport> = {}): Transport & { 
     models: async (...args) => (calls.push('models'), (handlers.models ?? refuse('models'))(...args)),
     diff: async (...args) => (calls.push(`diff:${args[0]}`), (handlers.diff ?? refuse('diff'))(...args)),
     rollback: async (...args) => (calls.push('rollback'), (handlers.rollback ?? refuse('rollback'))(...args)),
+    startRun: async (...args) => (calls.push('startRun'), (handlers.startRun ?? refuse('startRun'))(...args)),
   };
 }
 

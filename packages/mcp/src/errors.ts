@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ErrorCode, ForgeBridgeError, HTTP_STATUS, type ProtocolError } from '@forgebridge/protocol';
+import { ErrorCode, ForgeBridgeError, HTTP_STATUS, ProtocolError } from '@forgebridge/protocol';
 
 /**
  * Turning a ForgeBridge failure into something a calling model can act on.
@@ -188,15 +188,114 @@ export function toolFailure(error: unknown): ToolResult {
   };
 }
 
-/** The protocol code carried by a tool failure, for tests and for callers that branch. */
-export function codeOfFailure(result: ToolResult): string | null {
+/**
+ * Any failure this connector can produce, reduced to the code a caller branches
+ * on — and to whether the connector actually recognised it.
+ *
+ * That second field is the one worth stating. An unrecognised failure reported
+ * as `internal` is correct: the protocol's answer for "we do not know" is
+ * `internal`, and a connector that reported a socket timeout as, say,
+ * `not_approved` would be inventing an approval decision out of a network
+ * event. So `recognised: false` travels with the default rather than being
+ * inferred from the code, because `internal` is also a real answer the daemon
+ * sends.
+ *
+ * Four shapes reach here, and all four are real:
+ *
+ *   - a `DaemonRequestError`, which is how every `/v1` refusal arrives;
+ *   - a `ForgeBridgeError`, which is how a tool refuses on its own account —
+ *     `forge.read_tree`, `forge.rollback` without a clearance;
+ *   - a failed `ToolResult`, which is what a caller *outside* this process
+ *     sees, since `registerForgeBridgeTools` turns a throw into one;
+ *   - a bare `ProtocolError` payload, which is what an embedder holds after
+ *     parsing a response body itself.
+ *
+ * A classifier that understood only its own error class would have a mapping
+ * that works in its own tests and nowhere else.
+ */
+export interface FailureView {
+  code: z.infer<typeof ErrorCode>;
+  /** False only when nothing in the failure named a protocol code. */
+  recognised: boolean;
+  httpStatus: number;
+  message: string;
+  remedy?: string;
+}
+
+export function classifyFailure(error: unknown): FailureView {
+  const recognised = (payload: ProtocolError): FailureView => ({
+    code: payload.code,
+    recognised: true,
+    httpStatus: HTTP_STATUS[payload.code],
+    message: payload.message,
+    ...(payload.remedy ? { remedy: payload.remedy } : {}),
+  });
+
+  if (error instanceof DaemonRequestError) return recognised(error.payload);
+  if (error instanceof ForgeBridgeError) return recognised(error.toPayload());
+  if (error instanceof z.ZodError) return recognised(asProtocolError(error));
+
+  // A failed tool result — what a caller on the other side of the transport
+  // actually holds, since the registration wrapper turns every throw into one.
+  // Read whole rather than for its code alone: `remedy` is the field written
+  // for the caller, and a classifier that dropped it would hand back the one
+  // half of a refusal nobody can act on.
+  if (isToolResult(error) && error.isError === true) {
+    const body = failureBodyOf(error);
+    if (body) return recognised(body);
+  }
+
+  const payload = ProtocolError.safeParse(error);
+  if (payload.success) return recognised(payload.data);
+
+  // A protocol code inside a wrapper — how an error usually arrives once it has
+  // been through somebody else's transport.
+  const wrapped = error as { code?: unknown; payload?: { code?: unknown } } | null | undefined;
+  const nested = ErrorCode.safeParse(wrapped?.code ?? wrapped?.payload?.code);
+  if (nested.success) {
+    return { code: nested.data, recognised: true, httpStatus: HTTP_STATUS[nested.data], message: '' };
+  }
+
+  return {
+    code: 'internal',
+    recognised: false,
+    httpStatus: HTTP_STATUS.internal,
+    message: 'the ForgeBridge MCP server could not classify this failure',
+  };
+}
+
+function isToolResult(value: unknown): value is ToolResult {
+  return typeof value === 'object' && value !== null && Array.isArray((value as ToolResult).content);
+}
+
+/**
+ * The `ProtocolError` a failed tool result carries, parsed back out of the JSON
+ * `toolFailure` embedded in its text.
+ *
+ * Null when the result is not one of ours, or carries a code the protocol does
+ * not name — in which case the caller falls through to `internal`, rather than
+ * this function inventing a code out of whatever string it found.
+ */
+export function failureBodyOf(result: ToolResult): ProtocolError | null {
   const text = result.content[0]?.text ?? '';
   const start = text.indexOf('{');
   if (start === -1) return null;
+  let parsed: { error?: { code?: unknown; message?: unknown; remedy?: unknown } };
   try {
-    const parsed = JSON.parse(text.slice(start)) as { error?: { code?: unknown } };
-    return typeof parsed.error?.code === 'string' ? parsed.error.code : null;
+    parsed = JSON.parse(text.slice(start)) as typeof parsed;
   } catch {
     return null;
   }
+  const code = ErrorCode.safeParse(parsed.error?.code);
+  if (!code.success) return null;
+  return {
+    code: code.data,
+    message: typeof parsed.error?.message === 'string' ? parsed.error.message : '',
+    ...(typeof parsed.error?.remedy === 'string' ? { remedy: parsed.error.remedy } : {}),
+  };
+}
+
+/** The protocol code carried by a tool failure, for tests and for callers that branch. */
+export function codeOfFailure(result: ToolResult): string | null {
+  return failureBodyOf(result)?.code ?? null;
 }

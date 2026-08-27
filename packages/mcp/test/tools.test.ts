@@ -18,6 +18,7 @@ const ARCHITECTURE_TOOL_NAMES = [
   'forge.list_projects',
   'forge.read_tree',
   'forge.read_script',
+  'forge.start_run',
   'forge.propose_changeset',
   'forge.diff_changeset',
   'forge.apply_changeset',
@@ -48,7 +49,7 @@ function recordingServer(): { server: McpServerLike; registered: Registered[] } 
 }
 
 describe('tool registration', () => {
-  it('registers exactly the eleven tools the architecture names', () => {
+  it('registers exactly the twelve tools the architecture names', () => {
     const { server, registered } = recordingServer();
     const names = registerForgeBridgeTools(server, contextFor(fakeDaemon()));
 

@@ -14,6 +14,11 @@ The one rule this file exists to keep visible:
     that chained them — however convenient — would let a model approve its own
     work. If you find yourself wanting one, that is the gate working.
 
+`start_run` is on the same side of that line as `propose_changeset`: it hands a
+prompt to the daemon's own model and gets back a ChangeSet in `validated`. A run
+is not a shortcut past the gate, and its request shape has no field that reaches
+one.
+
 Only the standard library is used for transport. A client whose job is to be
 easy to drop into somebody else's agent should not drag an HTTP stack in with
 it, and `transport=` lets a caller supply their own (httpx, requests, a test
@@ -47,6 +52,8 @@ from .models import (
     ProtocolError,
     RollbackRequest,
     RollbackResponse,
+    RunResponse,
+    StartRunRequest,
     SubmitChangeSetResponse,
 )
 
@@ -141,6 +148,55 @@ class ForgeBridgeClient:
         """
         return SubmitChangeSetResponse.model_validate(
             self._call("POST", "/v1/changesets", body=changeset, producer=True)
+        )
+
+    def start_run(self, request: StartRunRequest) -> RunResponse:
+        """Turn a prompt into a proposed ChangeSet. Nothing is applied.
+
+        The run stops at the human gate: the ChangeSet it produces is stored
+        `validated`, and clearing it is `approve_changeset`, which is a separate
+        call for the reason ADR-012 gives. There is no field on `StartRunRequest`
+        that reaches approval, so a caller cannot ask for its own work to be
+        cleared even by accident.
+
+        `response.run.attempts` is the complete list of models the router tried,
+        in order, with why it moved on from each one (ADR-008). Report it whole.
+        The code in the ChangeSet was written by the model named in the last
+        successful attempt, which may not be the one that was asked for, and a
+        caller that shows only the winner is misreporting who wrote it.
+
+        **This call waits on a language model**, and on the router's fallback
+        through however many models the policy allows, so it can take minutes.
+        The client's `timeout` applies here as it does to every other call, so
+        construct the client with one sized for a run — or pass a `transport` of
+        your own that knows the difference.
+
+        `stream` is refused rather than ignored. This client reads one JSON
+        answer, so a `text/event-stream` body is one it cannot parse; the
+        streamed form of a run is `GET /v1/runs/{id}/events`, and a Python
+        reader for it is TODO(M30). Accepting the flag and quietly sending
+        `stream=false` would be the client overruling the caller in silence.
+        """
+        if request.stream:
+            raise TransportError(
+                "start_run reads a single JSON answer and cannot parse a "
+                "text/event-stream body; leave stream at its default of False. "
+                "The attempt list is on the JSON answer in full."
+            )
+        return RunResponse.model_validate(
+            self._call("POST", "/v1/runs", body=request, producer=True)
+        )
+
+    def get_run(self, run_id: str) -> RunResponse:
+        """Read a run the daemon already recorded.
+
+        Addressable while the run is still going and not only after it: the
+        daemon writes the record before it calls the first model. So this is how
+        a caller that lost its connection — or one that never held it — finds
+        out which models were tried.
+        """
+        return RunResponse.model_validate(
+            self._call("GET", f"/v1/runs/{_segment(run_id)}", producer=True)
         )
 
     def get_diff(self, changeset_id: str) -> ChangeSetDiff:

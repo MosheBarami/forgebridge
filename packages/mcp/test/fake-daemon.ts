@@ -157,6 +157,45 @@ function route(daemon: FakeDaemon, method: string, url: URL, rawBody: string | u
     });
   }
 
+  if (method === 'POST' && path === '/v1/runs') {
+    const runId = randomUUID();
+    const changeSetId = randomUUID();
+    return json(201, {
+      run: {
+        id: runId,
+        projectId: (body?.['projectId'] as string) ?? DEFAULT_PROJECT_ID,
+        prompt: body?.['prompt'],
+        stage: 'awaiting-approval',
+        status: 'running',
+        // Two attempts, never one: a fake whose run only tried the model that
+        // worked would let a connector that reports the winner alone pass every
+        // assertion about the attempt list (ADR-008).
+        attempts: [
+          { modelId: 'glm-5.2:free', outcome: 'rate-limited', startedAt: '2026-08-26T00:00:00.000Z', durationMs: 900 },
+          { modelId: 'minimax-m3:free', outcome: 'ok', startedAt: '2026-08-26T00:00:01.000Z', durationMs: 4200 },
+        ],
+        changeSetIds: [changeSetId],
+        producer: body?.['producer'],
+        startedAt: '2026-08-26T00:00:00.000Z',
+        finishedAt: null,
+      },
+      plan: { steps: ['write one script'] },
+      changeSetId,
+      // `validated`, never `approved`: a run stops at the human gate.
+      changeSetStatus: 'validated',
+      contentDigest: 'sha256:the-digest-this-run-reported',
+      validation: {
+        luau: { status: 'ok', findings: [] },
+        policy: { status: 'ok', violations: [] },
+        computedAt: '2026-08-26T00:00:02.000Z',
+        computedBy: 'forgebridge-daemon@0.1.0',
+      },
+      skipped: [],
+      ordering: { policy: 'free-first', candidatesConsidered: 4, candidatesEligible: 2, order: ['glm-5.2:free', 'minimax-m3:free'] },
+      failure: null,
+    });
+  }
+
   if (method === 'GET' && path === '/v1/models') {
     return json(200, { configured: true, source: 'test', verifiedAt: null, models: [] });
   }

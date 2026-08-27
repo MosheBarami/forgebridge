@@ -1,3 +1,5 @@
+import { ErrorCode, ForgeBridgeError, ProtocolError } from '@forgebridge/protocol';
+
 /**
  * Exit codes, and the error type that carries one.
  *
@@ -34,6 +36,21 @@ export class CliError extends Error {
     readonly exitCode: ExitCode,
     message: string,
     readonly remedy?: string,
+    /**
+     * The protocol code this refusal came from, when it came from one.
+     *
+     * Four exit codes are enough for a shell and not enough for a caller
+     * embedding this package: `EXIT.FAILED` covers a stale base, an unapproved
+     * ChangeSet and a policy violation alike, and those call for three
+     * different next moves. The code is carried alongside rather than folded
+     * into the message, because a caller that had to scrape `stale_base:` off
+     * the front of a sentence would be branching on prose.
+     *
+     * Absent when this CLI refused on its own account — a bad flag is not a
+     * protocol error, and reporting one as `invalid_request` would claim the
+     * transport said something it never saw.
+     */
+    readonly code?: ErrorCode,
   ) {
     super(message);
     this.name = 'CliError';
@@ -43,11 +60,75 @@ export class CliError extends Error {
 export const usageError = (message: string, remedy?: string): CliError =>
   new CliError(EXIT.USAGE, message, remedy);
 
-export const operationFailed = (message: string, remedy?: string): CliError =>
-  new CliError(EXIT.FAILED, message, remedy);
+export const operationFailed = (message: string, remedy?: string, code?: ErrorCode): CliError =>
+  new CliError(EXIT.FAILED, message, remedy, code);
 
 export const daemonUnreachable = (message: string, remedy?: string): CliError =>
   new CliError(EXIT.UNREACHABLE, message, remedy);
+
+/**
+ * Any failure this CLI can produce, reduced to the protocol code a caller
+ * branches on — and to whether it recognised one at all.
+ *
+ * `recognised: false` travels with the `internal` default rather than being
+ * inferred from it, because `internal` is also a real answer the daemon sends.
+ * A CLI that reported a missing daemon as `not_approved` would be inventing an
+ * approval decision out of a closed socket.
+ *
+ * The unreachable case is the one worth naming: the protocol's `ErrorCode` has
+ * no "the transport is not there" member, so it lands on `internal` and says so
+ * in its message. That gap is the same one `packages/daemon/src/auth.ts` and
+ * `packages/mcp/src/daemon-client.ts` both record — TODO(M31), owner: the
+ * protocol maintainer. Exit code 3 is what a shell branches on meanwhile, and
+ * it is not lost: it is on the error this reads.
+ */
+export interface FailureView {
+  code: ErrorCode;
+  recognised: boolean;
+  exitCode: ExitCode;
+  message: string;
+  remedy?: string;
+}
+
+export function classifyFailure(error: unknown): FailureView {
+  if (error instanceof CliError && error.code) {
+    return {
+      code: error.code,
+      recognised: true,
+      exitCode: error.exitCode,
+      message: error.message,
+      ...(error.remedy ? { remedy: error.remedy } : {}),
+    };
+  }
+
+  if (error instanceof ForgeBridgeError) {
+    return {
+      code: error.code,
+      recognised: true,
+      exitCode: EXIT.FAILED,
+      message: error.message,
+      ...(error.remedy ? { remedy: error.remedy } : {}),
+    };
+  }
+
+  const payload = ProtocolError.safeParse(error);
+  if (payload.success) {
+    return {
+      code: payload.data.code,
+      recognised: true,
+      exitCode: EXIT.FAILED,
+      message: payload.data.message,
+      ...(payload.data.remedy ? { remedy: payload.data.remedy } : {}),
+    };
+  }
+
+  return {
+    code: 'internal',
+    recognised: false,
+    exitCode: exitCodeFor(error),
+    message: error instanceof Error ? error.message : 'a non-error was thrown',
+  };
+}
 
 /**
  * The exit code for any thrown value.

@@ -1,7 +1,7 @@
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { normaliseHost } from '@forgebridge/luau-analysis';
 import { InstancePath } from '@forgebridge/protocol';
-import { DEFAULT_DAEMON_PORT } from '@forgebridge/daemon';
+import { DEFAULT_DAEMON_PORT, MAX_RUN_ATTEMPTS, ROUTING_POLICIES, type RoutingPolicyName } from '@forgebridge/daemon';
 import { usageError } from './exit.js';
 
 /**
@@ -66,7 +66,19 @@ export type Invocation =
     }
   | { command: 'link'; global: GlobalOptions; code: string | null }
   | { command: 'models'; global: GlobalOptions; free: boolean; capabilities: string[] }
-  | { command: 'run'; global: GlobalOptions; prompt: string }
+  | {
+      command: 'run';
+      global: GlobalOptions;
+      prompt: string;
+      projectId: string | null;
+      /** Null means "whatever the transport defaults to", which is `free-first`. */
+      policy: RoutingPolicyName | null;
+      pinnedModel: string | null;
+      baseVersion: number | null;
+      maxAttempts: number | null;
+      /** Print every attempt in full rather than the collapsed one-liner. */
+      verbose: boolean;
+    }
   | { command: 'diff'; global: GlobalOptions; changeSetId: string }
   | { command: 'apply'; global: GlobalOptions; changeSetId: string; timeoutSeconds: number }
   | { command: 'rollback'; global: GlobalOptions; journalId: string; expectedVersion: number; reason: string | null }
@@ -330,13 +342,69 @@ function parseModels(argv: readonly string[], env: NodeJS.ProcessEnv): Invocatio
 }
 
 function parseRun(argv: readonly string[], env: NodeJS.ProcessEnv): Invocation {
-  const { values, positionals } = parse(argv, {}, true);
+  const { values, positionals } = parse(
+    argv,
+    {
+      project: { type: 'string', multiple: true },
+      policy: { type: 'string', multiple: true },
+      model: { type: 'string', multiple: true },
+      'base-version': { type: 'string', multiple: true },
+      'max-attempts': { type: 'string', multiple: true },
+      verbose: { type: 'boolean' },
+    },
+    true,
+  );
   const prompt = requireExactlyOnePositional(positionals, 'a prompt');
   if (prompt.trim().length === 0) throw usageError('the prompt is empty');
   if (prompt.length > MAX_PROMPT_CHARS) {
     throw usageError(`the prompt is ${prompt.length} characters; the protocol caps Run.prompt at ${MAX_PROMPT_CHARS}`);
   }
-  return { command: 'run', global: globalsFrom(values, env), prompt };
+
+  const policyRaw = stringOrNull(values['policy'], '--policy');
+  if (policyRaw !== null && !(ROUTING_POLICIES as readonly string[]).includes(policyRaw)) {
+    throw usageError(
+      `--policy must be one of ${ROUTING_POLICIES.join(', ')} (got "${policyRaw}")`,
+      'These are the routing policies @forgebridge/core implements; the transport refuses anything else.',
+    );
+  }
+  const policy = policyRaw === null ? null : (policyRaw as RoutingPolicyName);
+  const pinnedModel = stringOrNull(values['model'], '--model');
+
+  // `pinned` and `--model` are one decision spelled two ways, so the two ways
+  // are held to agreeing. A `--model` under any other policy would be accepted
+  // by the transport and then ignored — a flag that silently does nothing on a
+  // command whose whole subject is which model wrote your code.
+  if (policy === 'pinned' && pinnedModel === null) {
+    throw usageError(
+      '--policy pinned needs --model <id>',
+      'Pinning disables fallback entirely: the named model is the only one tried, and a failure is the run failing rather than the next model being reached for.',
+    );
+  }
+  if (pinnedModel !== null && policy !== null && policy !== 'pinned') {
+    throw usageError(
+      `--model names a model to pin, which only means something under --policy pinned (got --policy ${policy})`,
+      'Drop --policy to pin, or drop --model to let the router order the candidates.',
+    );
+  }
+
+  const projectRaw = stringOrNull(values['project'], '--project');
+  const baseVersionRaw = stringOrNull(values['base-version'], '--base-version');
+  const maxAttemptsRaw = stringOrNull(values['max-attempts'], '--max-attempts');
+
+  return {
+    command: 'run',
+    global: globalsFrom(values, env),
+    prompt,
+    projectId: projectRaw === null ? null : requireUuid(projectRaw, '--project'),
+    // A bare `--model` means pinned. Naming a model and then watching another
+    // one answer is the substitution ADR-008 exists to make visible.
+    policy: policy ?? (pinnedModel === null ? null : 'pinned'),
+    pinnedModel,
+    baseVersion:
+      baseVersionRaw === null ? null : integerIn(baseVersionRaw, '--base-version', 0, Number.MAX_SAFE_INTEGER),
+    maxAttempts: maxAttemptsRaw === null ? null : integerIn(maxAttemptsRaw, '--max-attempts', 1, MAX_RUN_ATTEMPTS),
+    verbose: values['verbose'] === true,
+  };
 }
 
 function parseDiff(argv: readonly string[], env: NodeJS.ProcessEnv): Invocation {

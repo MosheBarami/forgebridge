@@ -449,6 +449,20 @@ class ModelAttempt(_Model):
     # round-trip.
     _omit_if_none: ClassVar[frozenset[str]] = frozenset({"providerSlug", "promptTokens", "completionTokens", "costUsd", "note"})
 
+RoutingPolicyName = Literal["free-first", "fastest", "cheapest", "best", "pinned"]
+
+class ModelOrdering(_Model):
+    policy: RoutingPolicyName
+    candidatesConsidered: Annotated[int, Ge(0)]
+    candidatesEligible: Annotated[int, Ge(0)]
+    order: list[Annotated[str, StringConstraints(max_length=200)]]
+    note: Annotated[str, StringConstraints(max_length=500)] | None = Field(default=None)
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"note"})
+
 class ModelsSnapshot(_Model):
     configured: bool
     source: Annotated[str, StringConstraints(max_length=200)]
@@ -555,6 +569,58 @@ class Run(_Model):
     # round-trip.
     _omit_if_none: ClassVar[frozenset[str]] = frozenset({"producer"})
 
+class RunResponsePlan(_Model):
+    steps: list[str]
+
+SkipReasonName = Literal["circuit-open", "attempt-budget"]
+
+class SkippedModel(_Model):
+    modelId: Annotated[str, StringConstraints(max_length=200)]
+    provider: Annotated[str, StringConstraints(max_length=80)]
+    reason: SkipReasonName
+    detail: Annotated[str, StringConstraints(max_length=500)]
+    retryAfterMs: Annotated[int, Ge(0)] | None = Field(default=None)
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"retryAfterMs"})
+
+class RunResponse(_Model):
+    run: Run
+    plan: RunResponsePlan
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')] | None
+    changeSetStatus: Any
+    contentDigest: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None
+    validation: Any
+    skipped: list[SkippedModel]
+    ordering: Any
+    failure: Any
+
+class StartRunRequestProducer(_Model):
+    kind: Literal["web", "mcp", "a2a", "cli", "sdk", "rest"]
+    client: Annotated[str, StringConstraints(max_length=120)] | None = Field(default=None)
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"client"})
+
+class StartRunRequest(_Model):
+    prompt: Annotated[str, StringConstraints(min_length=1, max_length=50000)]
+    projectId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')] | None = Field(default=None)
+    policy: RoutingPolicyName = Field(default="free-first")
+    pinnedModel: Annotated[str, StringConstraints(min_length=1, max_length=200)] | None = Field(default=None)
+    baseVersion: Annotated[int, Ge(0)] | None = Field(default=None)
+    maxAttempts: Annotated[int, Ge(1), Le(10)] | None = Field(default=None)
+    stream: bool = Field(default=False)
+    producer: StartRunRequestProducer | None = Field(default=None)
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"projectId", "pinnedModel", "baseVersion", "maxAttempts", "producer"})
+
 class SubmitChangeSetResponse(_Model):
     """Transcribed from ForgeBridgeDaemon#submitChangeSet. Not generated from a Zod schema — the handler has none. TODO(M31)."""
 
@@ -598,6 +664,7 @@ ALL_MODELS: dict[str, Any] = {
     "LinkState": LinkState,
     "LinkStatusResponse": LinkStatusResponse,
     "ModelAttempt": ModelAttempt,
+    "ModelOrdering": ModelOrdering,
     "ModelsSnapshot": ModelsSnapshot,
     "MoveInstanceOp": MoveInstanceOp,
     "NilValue": NilValue,
@@ -621,11 +688,16 @@ ALL_MODELS: dict[str, Any] = {
     "RectValue": RectValue,
     "RollbackRequest": RollbackRequest,
     "RollbackResponse": RollbackResponse,
+    "RoutingPolicyName": RoutingPolicyName,
     "Run": Run,
+    "RunResponse": RunResponse,
     "RunStage": RunStage,
     "RunStatus": RunStatus,
     "ScriptType": ScriptType,
     "SetPropertyOp": SetPropertyOp,
+    "SkipReasonName": SkipReasonName,
+    "SkippedModel": SkippedModel,
+    "StartRunRequest": StartRunRequest,
     "StringValue": StringValue,
     "SubmitChangeSetResponse": SubmitChangeSetResponse,
     "TransportKind": TransportKind,
