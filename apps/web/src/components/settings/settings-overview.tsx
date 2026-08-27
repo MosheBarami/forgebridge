@@ -105,7 +105,6 @@ export function SettingsOverview({ locale }: { locale: string }) {
           ) : transport ? (
             <PostureStatement
               transport={transport}
-              posture={bridge.link?.privacyPosture}
               showGloss={false}
             />
           ) : null}

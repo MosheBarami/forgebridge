@@ -69,7 +69,7 @@
       "unavailable": {
         "label": "Unavailable",
         "noRelay": "No relay exists in this build. The transport split is designed (ADR-004) and the far end has not been built, so there is nothing for a link to connect to.",
-        "gated": "Held back on purpose. End-to-end encryption needs X25519 and an AEAD implemented in pure Luau, because Roblox has no crypto standard library, and ADR-014 gates that behind a spike and an external review. Being wrong about crypto is worse than being late about it."
+        "gated": "Held back, and not on a schedule. End-to-end encryption needs each side to draw a private key nobody can predict. Roblox documents no cryptographic-randomness guarantee for math.random, Random.new or HttpService:GenerateGUID — not the algorithm, not the seeding, not the entropy source. The M19 spike ran and this is what it found, so the obstacle is not our arithmetic and not a review we owe you. Shipping a keypair drawn from a generator that might be seeded off the clock, behind a screen saying the relay sees only ciphertext, would be worse than shipping nothing."
       }
     },
     "pairing": {

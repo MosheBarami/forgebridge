@@ -53,12 +53,25 @@ describe('the posture statement', () => {
     expect(statement).toHaveAttribute('dir', 'ltr');
   });
 
-  it('prefers what the daemon asserted about itself when it said something', () => {
-    renderIn(
-      'en',
-      <PostureStatement transport="local-daemon" posture={PRIVACY_POSTURE['relay-tls']} />,
-    );
+  it('never lets a server describe its own privacy posture', () => {
+    // This test used to assert the opposite — that the component "prefers what
+    // the daemon asserted about itself". That is the defect: `privacyPosture` is
+    // `z.string()` on the wire, so a relay could answer with
+    // "Relay — end-to-end encrypted" and have this app say it, in its own voice,
+    // over a transport that sends plaintext with a MAC.
+    //
+    // The sentence now comes only from the local PRIVACY_POSTURE map, keyed by a
+    // transport parsed against the frozen enum — the same defence
+    // packages/cli/src/posture.ts already had.
+    renderIn('en', <PostureStatement transport="relay-tls" />);
     expect(screen.getByText(PRIVACY_POSTURE['relay-tls'])).toBeInTheDocument();
+    expect(screen.queryByText(/end-to-end encrypted/i)).toBeNull();
+  });
+
+  it('shows the local sentence for the transport, whatever the server is called', () => {
+    // The control: a local daemon still gets the local-daemon sentence.
+    renderIn('en', <PostureStatement transport="local-daemon" />);
+    expect(screen.getByText(PRIVACY_POSTURE['local-daemon'])).toBeInTheDocument();
   });
 
   it('adds a Hebrew gloss beneath the English statement, and only in Hebrew', () => {

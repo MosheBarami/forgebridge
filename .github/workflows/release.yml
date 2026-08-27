@@ -106,6 +106,27 @@ jobs:
           fi
           echo "Both configured."
 
+      - name: "The Python package is actually publishable"
+        # PyPI rejects `Private :: Do Not Upload` by design — that is what the
+        # classifier is for, and packages/sdk-python carries it deliberately
+        # while M30 says the SDK is unpublished. Without this check the run gets
+        # all the way to publish-pypi and fails there, AFTER publish-npm has
+        # already succeeded — the exact split-registry outcome the comment at the
+        # top of this file says preflight exists to prevent, and the one thing it
+        # was not checking.
+        #
+        # Removing the classifier is the deliberate act that makes the SDK
+        # publishable. Until someone performs it, this refuses early and says so.
+        if: ${{ inputs.publish }}
+        run: |
+          if grep -q 'Private :: Do Not Upload' packages/sdk-python/pyproject.toml; then
+            echo "::error::packages/sdk-python/pyproject.toml carries the \"Private :: Do Not Upload\" classifier, which PyPI refuses."
+            echo "::error::That classifier is deliberate: the Python SDK is not published yet (M30)."
+            echo "::error::To publish it, remove the classifier in its own commit — that is the decision, not a workflow flag."
+            exit 1
+          fi
+          echo "No blocking classifier."
+
   # ───────────────────────────────────────────────────────────────────────────
   # Builds every artefact and its checksum. Still publishes nothing.
   # ───────────────────────────────────────────────────────────────────────────

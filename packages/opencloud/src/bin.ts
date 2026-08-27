@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 /**
  * `forgebridge-opencloud` — the three Open Cloud surfaces from a terminal.
  *
@@ -295,8 +297,22 @@ export function describe(error: unknown): string {
 }
 
 /* c8 ignore start -- the process shim; `run` above is what the tests drive. */
-const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+// Compared as REAL paths. `npm` installs a bin as a symlink under
+// `node_modules/.bin/`, so launching `forgebridge-opencloud` — the only name the
+// README ever gives — sets argv[1] to the symlink while `import.meta.url` is the
+// resolved target. Comparing the two directly made the guard false for exactly
+// the invocation the docs tell people to use, and the CLI printed nothing.
+const invokedDirectly = (() => {
+  const argv1 = process.argv[1];
+  if (argv1 === undefined) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    // An unresolvable path is not this module; refusing to run is the safe
+    // answer, since the alternative is a CLI that executes on a mismatch.
+    return false;
+  }
+})();
 
 if (invokedDirectly) {
   const result = await run(process.argv.slice(2));

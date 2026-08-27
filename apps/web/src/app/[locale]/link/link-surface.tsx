@@ -59,9 +59,14 @@ function availabilityKeyFor(transport: TransportKind): string | null {
       // nothing has been built on the far end of it yet.
       return 'link.transport.unavailable.noRelay';
     case 'relay-e2e':
-      // ADR-014 gates this behind a spike and an external review of a pure-Luau
-      // X25519 + ChaCha20-Poly1305 implementation. Being wrong about crypto is
-      // worse than being late about it.
+      // The M19 spike ran and returned no. Not the field arithmetic — X25519
+      // needs each side to draw an unpredictable private scalar, and Roblox
+      // documents no cryptographic-randomness guarantee for math.random,
+      // Random.new or HttpService:GenerateGUID. Under this repo's fail-closed
+      // rule, undocumented and unsuitable are the same answer, so the blocker is
+      // outside this project. ADR-014 §"What stopped it" has the finding, and
+      // says relay-e2e should be withdrawn from the protocol rather than left
+      // standing as a permanent aspiration.
       return 'link.transport.unavailable.gated';
     default:
       return 'link.transport.unavailable.noRelay';
@@ -105,7 +110,7 @@ export function LinkSurface() {
         meta={<Code>{state.health.boundTo}</Code>}
       >
         <div className="flex flex-col gap-4">
-          <PostureStatement transport={activeTransport} posture={state.link?.privacyPosture} />
+          <PostureStatement transport={activeTransport} />
           <RelayReadabilityWarning transport={activeTransport} />
         </div>
       </Register>

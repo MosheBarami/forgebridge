@@ -17,8 +17,8 @@ it — a summary of a carefully qualified claim is usually a stronger claim.
 | | |
 |---|---|
 | ✅ shipped | 25 |
-| ◐ in progress | 22 |
-| · not started or planned | 4 |
+| ◐ in progress | 24 |
+| · not started or planned | 2 |
 | **total** | **51** |
 
 “Shipped” means the row carries a ✅ in `MILESTONES.md`, and every ✅ there was put
@@ -62,7 +62,7 @@ maintainer looks like.
 |---|---|---|
 | [`M14`](MILESTONES.md) | `packages/daemon` — localhost HTTP server, zero-cloud mode | ✅ shipped |
 | [`M15`](MILESTONES.md) | Studio plugin v2 — poll, diff preview, approve, apply, journal | ◐ in progress |
-| [`M16`](MILESTONES.md) | Plugin: console mirror + selection context back to producers | · not started |
+| [`M16`](MILESTONES.md) | Plugin: console mirror + selection context back to producers | ◐ in progress |
 | [`M17`](MILESTONES.md) | `apps/relay` — cloud transport, pairing codes, long-poll | ✅ shipped |
 | [`M18`](MILESTONES.md) | Encrypted pairing v1 — session keys + payload HMAC over TLS | ✅ shipped |
 | [`M19`](MILESTONES.md) | Encrypted pairing v2 — end-to-end payload encryption, blind relay | ◐ in progress |
@@ -120,5 +120,5 @@ maintainer looks like.
 | [`M46`](MILESTONES.md) | Deployment: Vercel for apple.gg, reproducible from a clean clone | · not started |
 | [`M47`](MILESTONES.md) | Self-hosting: `docker compose up` full stack + lite daemon image | ◐ in progress |
 | [`M48`](MILESTONES.md) | Roblox Open Cloud: publish place versions, DataStore, messaging | ◐ in progress |
-| [`M49`](MILESTONES.md) | Release engineering: semver, changesets, signed releases, plugin dist | · not started |
+| [`M49`](MILESTONES.md) | Release engineering: semver, changesets, signed releases, plugin dist | ◐ in progress |
 | [`M50`](MILESTONES.md) | Community: docs site, examples, templates, issue triage, roadmap | ◐ in progress |

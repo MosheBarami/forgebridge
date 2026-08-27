@@ -43,19 +43,28 @@ const POSTURE_STATUS: Record<TransportKind, Status> = {
 
 export function PostureStatement({
   transport,
-  /** The daemon's own `privacyPosture` when there is one; it asserted it about itself. */
-  posture,
   showGloss = true,
 }: {
   transport: TransportKind;
-  posture?: string | undefined;
   showGloss?: boolean;
 }) {
   const { t, locale } = useLocale();
-  // Prefer what the daemon said; fall back to the protocol constant keyed by
-  // transport. Both paths produce one of the three exact strings — there is no
-  // third source and no place a paraphrase could enter.
-  const statement = posture && posture.length > 0 ? posture : PRIVACY_POSTURE[transport];
+  // The sentence is looked up locally and the wire cannot supply it.
+  //
+  // This component used to prefer the daemon's own `privacyPosture` string and
+  // fall back to the constant, with a comment saying both paths produce one of
+  // three exact strings. They do not: `privacyPosture` is typed `z.string()` on
+  // the wire, so a relay answering GET /v1/link with
+  //   { transport: 'relay-tls', privacyPosture: 'Relay — end-to-end encrypted' }
+  // had that sentence rendered as the privacy statement, in this app's voice,
+  // over a transport that sends plaintext with a MAC. The posture is a claim
+  // ABOUT a server made BY that server, and the operator who can read every
+  // ChangeSet has both the means and the motive to make it.
+  //
+  // packages/cli/src/posture.ts spends nine lines on exactly this and defends
+  // against it. The web app had the same threat and no defence — and its own
+  // comments asserted the opposite, which is how a reviewer reads past it.
+  const statement = PRIVACY_POSTURE[transport];
 
   return (
     <div className="flex flex-col gap-2">

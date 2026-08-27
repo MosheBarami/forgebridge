@@ -90,8 +90,17 @@ export function tableCells(row: string): string[] {
  */
 export function statusOf(idCell: string, definition: string): Status {
   if (idCell.includes('✅')) return 'shipped';
-  if (/\bnot started\b/i.test(definition)) return 'not started';
-  if (/\bpartial\b/i.test(definition)) return 'in progress';
+
+  // Anchored at the OPENER, and partial is tested first.
+  //
+  // Matching anywhere in the cell read a row's own description of what remains
+  // as its status: M16 opens "**Partial —** the console mirror is done" and
+  // later says "Not done, and not started:", so the roadmap called a
+  // half-finished milestone unstarted. A row states its status once, at the
+  // front, in bold — everything after that is prose about the work.
+  const opener = definition.trimStart().slice(0, 40);
+  if (/^\*{0,2}partial\b/i.test(opener)) return 'in progress';
+  if (/^\*{0,2}not started\b/i.test(opener)) return 'not started';
   return 'planned';
 }
 
