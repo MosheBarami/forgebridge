@@ -31,8 +31,19 @@ export const STALENESS_THRESHOLD_DAYS = 14;
  * "Received an instance of URL" — which is what `next build` did to the models
  * settings page. A string carries no realm, so it is the form that survives
  * being bundled by something we do not control.
+ *
+ * Lazy, not a module-scope constant. Merely importing this package used to run
+ * `fileURLToPath` — so a bundler that shims `node:url` threw at import time, and
+ * a consumer that never wanted the file path at all (the web app reads the
+ * catalog as a module) could not import the package root without it. A function
+ * runs only when someone actually asks for the path.
  */
-export const CATALOG_PATH = fileURLToPath(new URL('../data/catalog.json', import.meta.url).href);
+let catalogPath: string | undefined;
+
+export function catalogPathOf(): string {
+  catalogPath ??= fileURLToPath(new URL('../data/catalog.json', import.meta.url).href);
+  return catalogPath;
+}
 
 export interface Staleness {
   syncedAt: Date;
@@ -53,7 +64,7 @@ export interface Staleness {
  * packaging fault surfacing to whoever is running the process, never a payload
  * crossing the wire, so there is nothing here to withhold.
  */
-export function loadCatalog(path: string = CATALOG_PATH): Catalog {
+export function loadCatalog(path: string = catalogPathOf()): Catalog {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));

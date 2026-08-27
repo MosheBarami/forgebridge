@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CATALOG_PATH,
+  catalogPathOf,
   ModelRegistry,
   STALENESS_THRESHOLD_DAYS,
   getRegistry,
@@ -29,7 +29,7 @@ describe('loading', () => {
 
   it('memoises the shipped registry', () => {
     expect(getRegistry()).toBe(getRegistry());
-    expect(CATALOG_PATH).toMatch(/data\/catalog\.json$/);
+    expect(catalogPathOf()).toMatch(/data\/catalog\.json$/);
   });
 
   /**
@@ -255,5 +255,19 @@ describe('providers', () => {
     expect(openrouter.freeCount).toBe(catalog.models.length);
     expect(new Set(openrouter.authors).size).toBe(openrouter.authors.length);
     expect(openrouter.authors).toContain('nvidia');
+  });
+});
+
+describe('the catalog path is resolved lazily', () => {
+  // Importing this package used to run fileURLToPath at module scope, so a
+  // bundler that shims node:url threw at import time — which is what broke
+  // `next build` on the models settings page. A consumer that reads the catalog
+  // as a module never wants the path at all and must be able to import freely.
+  it('is stable across calls', () => {
+    expect(catalogPathOf()).toBe(catalogPathOf());
+  });
+
+  it('points at the committed catalog', () => {
+    expect(catalogPathOf()).toMatch(/data\/catalog\.json$/);
   });
 });
