@@ -113,7 +113,7 @@ it asked for, which is what that state means.
 
 Every skill's input schema is strict: an unrecognised key is refused rather than dropped.
 
-### The seven skills
+### The eight skills
 
 | Skill id | Input | Writes to the place? |
 |---|---|---|

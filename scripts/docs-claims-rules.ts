@@ -36,7 +36,7 @@ import path from 'node:path';
 
 export interface Violation {
   /** Rule id, matching the describe block in the test file. */
-  rule: 'D1' | 'D2' | 'D3' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9';
+  rule: 'D1' | 'D2' | 'D3' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9' | 'D10' | 'D11' | 'D12';
   /** Repository-relative path of the document. */
   file: string;
   /** 1-indexed line the claim sits on. */
@@ -90,9 +90,58 @@ export interface RepoFacts {
   workspaceDirs: ReadonlySet<string>;
   /** Every repository-relative source path in the tree, forward-slashed. */
   sourceFiles: ReadonlySet<string>;
+  /**
+   * Every directory in the tree, repository-relative and forward-slashed, with
+   * no trailing slash: `apps`, `apps/relay`, `apps/relay/src`, … Built by the
+   * same walk that finds the files, so a directory a document calls absent can
+   * be decided against the thing `ls` would print rather than against a list
+   * somebody remembered to update.
+   */
+  treeDirs: ReadonlySet<string>;
+  /**
+   * The size of the three surfaces this repository states in prose: the MCP
+   * tools, the A2A skills and the CLI commands. Counted out of the source
+   * arrays that define them, never transcribed.
+   *
+   * `-1` means the counter could not decide — the file moved, or its array was
+   * rewritten into a shape the regex no longer sees. D12 reports that as a
+   * violation rather than skipping the check, because a counter that quietly
+   * returns nothing makes every prose count pass.
+   */
+  surfaces: Readonly<Record<SurfaceKind, number>>;
 }
 
+/** The prose nouns D12 decides. `rules` is deliberately not one — see D12. */
+export type SurfaceKind = 'tools' | 'skills' | 'commands';
+
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.turbo', '.venv']);
+
+/** Every directory under `abs`, repository-relative, skipping `SKIP_DIRS`. */
+function walkDirs(abs: string, root: string, out: string[] = []): string[] {
+  if (!existsSync(abs)) return out;
+  for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
+    const full = path.join(abs, entry.name);
+    out.push(path.relative(root, full).split(path.sep).join('/'));
+    walkDirs(full, root, out);
+  }
+  return out;
+}
+
+/**
+ * How many entries an `as const` array literal assigned to `name` holds, or -1
+ * when the declaration is not there to count.
+ *
+ * String entries only, because that is what all three surfaces are, and because
+ * counting commas would count the ones inside a nested object.
+ */
+function countConstArray(source: string, name: string): number {
+  const start = source.indexOf(`const ${name} = [`);
+  if (start === -1) return -1;
+  const end = source.indexOf(']', start);
+  if (end === -1) return -1;
+  return [...source.slice(start, end).matchAll(/'[^']+'/g)].length;
+}
 
 function walk(abs: string, root: string, out: string[] = []): string[] {
   if (!existsSync(abs)) return out;
@@ -150,7 +199,7 @@ function manifestDirs(dir: string): string[] {
     .filter((entry) => entry.isDirectory())
     .filter((entry) =>
       // A manifest, not specifically a package.json. `packages/sdk-python` is a
-      // real workspace member with 143 tests and a pyproject.toml, and reading
+      // real workspace member with a pyproject.toml and no package.json, and reading
       // only package.json made D1 report it as a package that does not exist —
       // so a document naming it correctly was the thing that failed. A gate
       // whose idea of "package" is narrower than the repository's will keep
@@ -226,6 +275,24 @@ export function collectRepoFacts(root: string): RepoFacts {
         manifestDirs(path.join(root, dir)).map((name) => `${dir}/${name}`),
       ),
     ),
+    treeDirs: new Set(walkDirs(root, root)),
+    surfaces: {
+      // The registration list itself, not a count of anything downstream of it.
+      tools: (() => {
+        const file = path.join(root, 'packages/mcp/src/tools.ts');
+        if (!existsSync(file)) return -1;
+        const found = [...readFileSync(file, 'utf8').matchAll(/^\s*name: '[a-z]+\.[a-z_]+',$/gm)].length;
+        return found === 0 ? -1 : found;
+      })(),
+      skills: (() => {
+        const file = path.join(root, 'packages/a2a/src/skills.ts');
+        return existsSync(file) ? countConstArray(readFileSync(file, 'utf8'), 'SKILL_IDS') : -1;
+      })(),
+      commands: (() => {
+        const file = path.join(root, 'packages/cli/src/args.ts');
+        return existsSync(file) ? countConstArray(readFileSync(file, 'utf8'), 'COMMANDS') : -1;
+      })(),
+    },
   };
 }
 
@@ -783,6 +850,238 @@ export function checkCitedTodos(
   return out;
 }
 
+// ─────────────────── D10: a directory called absent that is there ───────────────────
+
+/**
+ * The words an inventory uses for "this directory does not exist yet".
+ *
+ * Narrower than `NO_CODE_HERE` on purpose, and "not yet" is deliberately not in
+ * it: `docs/MILESTONES.md` is one long table of rows that say a dozen true
+ * things are not done yet, and a rule that read those as claims about a
+ * directory would fire on every one of them. Rule 4 of this repository's own
+ * list — a fix must not become fail-noisy — is the whole reason this set is
+ * five phrases and not a synonym dictionary.
+ */
+const ABSENT_MARKER = /\b(absent|empty|does not exist|do not exist|never existed)\b/i;
+
+/** A tree-diagram entry at the top level: `├── apps/`, and not `│   └── web/`. */
+const TOP_LEVEL_TREE_ENTRY = /^\s*[├└]──\s+(\.?[a-z][a-z0-9._-]*)\//;
+
+/**
+ * A directory path a document names, from the two ways documents write them:
+ * inside backticks, and bare with a trailing slash.
+ */
+export function pathsNamedIn(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    const token = (match[1] ?? '').trim().replace(/\/$/, '');
+    if (/^\.?[a-z][a-z0-9._-]*(\/[a-z0-9._-]+)*$/.test(token)) out.push(token);
+  }
+  for (const match of text.matchAll(/(?:^|[\s(])(\.?[a-z][a-z0-9._-]*(?:\/[a-z0-9._-]+)*)\/(?=[\s`|)]|$)/g)) {
+    out.push(match[1] ?? '');
+  }
+  return out.filter((token) => token !== '');
+}
+
+/** The cells of a markdown table row, trimmed. */
+export function cellsOf(row: string): string[] {
+  return row.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim());
+}
+
+/**
+ * How long a table cell may be and still count as a *status* cell. A status
+ * cell is a label — `M17 — absent`, `built`, `M40 — absent` — and this rule
+ * only reads those. The long definition-of-done cells in `docs/MILESTONES.md`
+ * are prose about work, not labels about directories, and are out of reach on
+ * purpose.
+ */
+const STATUS_CELL_CHARS = 60;
+
+/**
+ * D10 — an inventory may not call a directory absent while the directory is
+ * there.
+ *
+ * This is the rule that four parallel agents made necessary. `apps/relay`,
+ * `apps/web`, `packages/opencloud`, `packages/sdk-ts`, `packages/conformance`
+ * and `packages/storage-sqlite` all landed with code and tests, and six
+ * different inventories went on describing some of them as directories that do
+ * not exist: `docs/ARCHITECTURE.md` §5 carried `apps/relay | M17 — absent`
+ * beside a paragraph describing the relay's tests, §10 said `apps/` did not
+ * exist at all, `docs/REPO-LAYOUT.md` said `apps/` was "absent entirely",
+ * `docs/PROTOCOL.md` said `apps/relay` "does not exist yet", and `SECURITY.md`
+ * listed both apps under a heading that said the directories were absent — so
+ * the two most valuable things in this tree to attack were formally out of
+ * scope for a security report.
+ *
+ * D8 already checks one table this way. Every one of those defects was in a
+ * different document, which is the finding: the check was right and its reach
+ * was one file.
+ *
+ * **This rule does not take the milestone escape hatch, and that is the point.**
+ * Every other rule here forgives a claim that carries `(M17)`, because a
+ * marker turns a false present-tense sentence into an honest plan. `apps/relay
+ * | M17 — absent` is not a plan. It carries its marker *and* states, as fact,
+ * something the tree contradicts — and it survived precisely because the
+ * marker made it look like a plan to every rule that reads one.
+ *
+ * **Not covered**: nested tree-diagram entries, whose path depends on the
+ * indentation above them rather than on the token itself (`│   └── docs/`
+ * inside `apps/` is not the repository's `docs/`); prose paragraphs, where
+ * "the selection context does not exist" is an ordinary English sentence that
+ * happens to sit near a path; and files, since absence is asserted about
+ * directories.
+ */
+export function checkAbsenceClaims(docs: readonly Doc[], facts: RepoFacts): Violation[] {
+  const out: Violation[] = [];
+  for (const doc of docs) {
+    doc.text.split('\n').forEach((line, index) => {
+      const claimed: string[] = [];
+
+      const treeEntry = TOP_LEVEL_TREE_ENTRY.exec(line);
+      if (treeEntry && ABSENT_MARKER.test(line)) claimed.push(treeEntry[1] ?? '');
+
+      if (/^\s*\|/.test(line)) {
+        const cells = cellsOf(line);
+        cells.forEach((cell, position) => {
+          if (cell.length > STATUS_CELL_CHARS || !ABSENT_MARKER.test(cell)) return;
+          // The path is in the status cell itself, or — only when the status
+          // cell names none — in the cell it labels. Reading both would drag in
+          // every path mentioned in a long neighbouring prose cell, which is
+          // how this rule first reported `packages/cli` as absent on a row that
+          // says nothing of the kind.
+          const here = pathsNamedIn(cell);
+          claimed.push(...(here.length > 0 ? here : pathsNamedIn(cells[position - 1] ?? '')));
+        });
+      }
+
+      for (const claim of new Set(claimed)) {
+        if (!facts.treeDirs.has(claim)) continue;
+        push(out, 'D10', doc, index, `${claim}/ is described as absent, and it exists`);
+      }
+    });
+  }
+  return out;
+}
+
+// ───────────────────── D11: a quoted `ls` that is not what ls prints ─────────────────────
+
+/** ``` `ls packages/` returns `a2a cli …` ``` and its near spellings. */
+const LS_CLAIM = /`ls ([a-z][a-z0-9-]*)\/?`[^`]{0,60}`([^`]+)`/g;
+
+/**
+ * D11 — a document that quotes the output of `ls <dir>/` must quote what `ls`
+ * would print.
+ *
+ * Both places this repository does it had gone stale, and in the same direction
+ * — `docs/ARCHITECTURE.md` listed nine packages and called them "every one of
+ * the nine" while there were thirteen, and `docs/REPO-LAYOUT.md`'s list was
+ * missing two. An enumeration is the most checkable claim a document can make
+ * and was the least checked one here.
+ *
+ * The comparison is a set comparison in both directions: a name `ls` prints and
+ * the document omits is a package a reader will not know about, and a name the
+ * document prints and `ls` does not is a package that is gone.
+ */
+export function checkDirectoryListings(docs: readonly Doc[], facts: RepoFacts): Violation[] {
+  const out: Violation[] = [];
+  for (const doc of docs) {
+    for (const match of doc.text.matchAll(LS_CLAIM)) {
+      const dir = match[1] ?? '';
+      const lineIndex = lineOf(doc.text, match.index ?? 0);
+      const actual = new Set(
+        [...facts.treeDirs]
+          .filter((rel) => rel.startsWith(`${dir}/`) && !rel.slice(dir.length + 1).includes('/'))
+          .map((rel) => rel.slice(dir.length + 1)),
+      );
+      if (actual.size === 0) {
+        // Fail closed: a quoted listing of a directory this walk found nothing
+        // in is a claim nothing can decide, not a claim that passes.
+        push(out, 'D11', doc, lineIndex, `quotes \`ls ${dir}/\`, and ${dir}/ has no subdirectories in this tree`);
+        continue;
+      }
+      const quoted = new Set((match[2] ?? '').split(/\s+/).filter((name) => name !== ''));
+      const missing = [...actual].filter((name) => !quoted.has(name)).sort();
+      const extra = [...quoted].filter((name) => !actual.has(name)).sort();
+      if (missing.length > 0) {
+        push(out, 'D11', doc, lineIndex, `quotes \`ls ${dir}/\` without ${missing.join(', ')}`);
+      }
+      if (extra.length > 0) {
+        push(out, 'D11', doc, lineIndex, `quotes \`ls ${dir}/\` with ${extra.join(', ')}, which ${dir}/ does not contain`);
+      }
+    }
+  }
+  return out;
+}
+
+// ────────────────────── D12: how big a surface is said to be ──────────────────────
+
+const NUMBER_WORDS: Readonly<Record<string, number>> = {
+  four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+  twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
+  eighteen: 18, nineteen: 19, twenty: 20,
+};
+
+/**
+ * A stated surface size. Numbers below four are excluded because English uses
+ * them for things that are not counts of the surface — "one tool", "two
+ * commands", "one skill" all appear in this tree meaning *some* one of them.
+ */
+const SURFACE_CLAIM = new RegExp(
+  String.raw`\b(\d+|${Object.keys(NUMBER_WORDS).join('|')}) (tools?|skills?|commands?)\b`,
+  'gi',
+);
+
+/**
+ * D12 — a document or a comment that says how many tools, skills or commands
+ * this repository has must agree with the arrays that define them.
+ *
+ * Three numbers, three source arrays, and all three had drifted: `seven skills`
+ * stood in `docs/ARCHITECTURE.md`, `packages/a2a/README.md` and the doc comment
+ * above `FORGEBRIDGE_SKILLS` itself while `SKILL_IDS` held eight, and `eleven
+ * tools` stood in four places while `packages/mcp/src/tools.ts` registered
+ * twelve and its own test asserted twelve. The `.ts` files are read as well as
+ * the markdown: the comment above the array was one of the wrong ones, and a
+ * gate that reads only documentation would have left it standing.
+ *
+ * **`rules` is deliberately not one of the nouns.** `packages/luau-analysis`
+ * has eight rules in `RULES` and nine ids that can appear in a finding, and its
+ * README says nine and explains which tenth id is not a rule. Both counts are
+ * right about different things, so a gate that picked one would be confidently
+ * wrong about the other — worse than no gate.
+ */
+const SURFACE_SELF = new Set(['scripts/docs-claims-rules.ts', 'scripts/__tests__/docs-claims.test.ts']);
+
+export function checkSurfaceCounts(docs: readonly Doc[], facts: RepoFacts): Violation[] {
+  const out: Violation[] = [];
+  for (const kind of ['tools', 'skills', 'commands'] as const) {
+    if (facts.surfaces[kind] > 0) continue;
+    // Fail closed. The counter reads one array out of one file; if that file
+    // moves, every prose count in the tree starts passing silently.
+    out.push({ rule: 'D12', file: 'scripts/docs-claims-rules.ts', line: 0, detail: `the ${kind} counter found nothing to count — the array it reads has moved` });
+  }
+  if (out.length > 0) return out;
+
+  for (const doc of docs) {
+    // The two files that necessarily quote the wrong numbers: the rule's own
+    // prose names the drift it catches, and the self-tests plant it. Same
+    // exemption `verify-no-secrets.ts` takes for the same reason, and it costs
+    // the same thing — a surface count stated wrongly *inside this gate* is the
+    // one this gate cannot see.
+    if (SURFACE_SELF.has(doc.path)) continue;
+    for (const match of doc.text.matchAll(SURFACE_CLAIM)) {
+      const word = (match[1] ?? '').toLowerCase();
+      const stated = NUMBER_WORDS[word] ?? Number(word);
+      if (!Number.isFinite(stated)) continue;
+      const kind = (match[2] ?? '').toLowerCase().replace(/s$/, '') + 's';
+      const actual = facts.surfaces[kind as SurfaceKind];
+      if (actual === undefined || stated === actual) continue;
+      const lineIndex = lineOf(doc.text, match.index ?? 0);
+      push(out, 'D12', doc, lineIndex, `says ${match[0]}; this repository has ${actual}`);
+    }
+  }
+  return out;
+}
+
 export function checkAll(docs: readonly Doc[], facts: RepoFacts, root: string): Violation[] {
   const readOr = (rel: string): string => {
     const abs = path.join(root, rel);
@@ -798,5 +1097,11 @@ export function checkAll(docs: readonly Doc[], facts: RepoFacts, root: string): 
     ...checkBinNames(docs, facts),
     ...checkLayoutCoverage({ path: 'README.md', text: readOr('README.md') }, facts),
     ...checkCitedTodos(docs, facts, (rel) => readOr(rel)),
+    ...checkAbsenceClaims(docs, facts),
+    ...checkDirectoryListings(docs, facts),
+    // Markdown *and* source: the comment above `FORGEBRIDGE_SKILLS` said seven
+    // while the array below it held eight, and a gate that reads only .md files
+    // would have read past it.
+    ...checkSurfaceCounts([...docs, ...[...facts.sourceFiles].map((rel) => ({ path: rel, text: readOr(rel) }))], facts),
   ];
 }

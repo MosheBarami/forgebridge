@@ -28,6 +28,9 @@ import {
   unitAt,
   checkLayoutCoverage,
   checkCitedTodos,
+  checkAbsenceClaims,
+  checkDirectoryListings,
+  checkSurfaceCounts,
 } from '../docs-claims-rules.js';
 
 /**
@@ -486,6 +489,25 @@ describe('every document that counts the plugin tests counts them right', () => 
     expect(CI, `the CI TODO is stale; the suite has ${luauCount} tests`).toContain(`${luauCount} Luau tests`);
   });
 
+  it('finds the count on every MILESTONES line that names the plugin suite', () => {
+    // The regex below reads "<n> Luau". The `M15` row said "231 tests" three
+    // times, about the same suite, in a sentence that never used the word —
+    // and so passed a gate written to decide exactly that number. A count is
+    // only gated by the phrasing somebody happened to use unless the rule
+    // follows the subject instead: any count on a line that cites a file under
+    // `plugin/` is a count of this suite.
+    const lines = MILESTONES.split('\n');
+    for (const [index, line] of lines.entries()) {
+      if (!/`plugin\/(src|tests)\//.test(line)) continue;
+      for (const match of line.matchAll(/(\d+) tests?\b/g)) {
+        expect(
+          Number(match[1]),
+          `MILESTONES line ${index + 1} says ${match[0]} of the plugin suite; plugin/tests/ has ${luauCount}`,
+        ).toBe(luauCount);
+      }
+    }
+  });
+
   it('finds the same count everywhere MILESTONES states one', () => {
     // Every "<n> Luau" in the document, not the first: the live-status paragraph
     // and the M41 row each carry one, and a fix applied to whichever a reader
@@ -746,6 +768,56 @@ describe('D8 — the layout table lists every package, and calls none of them em
   });
 });
 
+describe('D10 — no inventory calls a directory absent while it is there', () => {
+  // Six inventories in five documents described directories that had landed
+  // with code and tests as directories that do not exist. `SECURITY.md` was the
+  // expensive one: `apps/relay` and `apps/web` sat under a heading saying the
+  // directories were absent, so the two most attackable things in the tree were
+  // formally out of scope for a report.
+  it('finds no directory described as absent that this tree has', () => {
+    expect(report(checkAbsenceClaims(DOCS, FACTS))).toBe('');
+  });
+
+  it('reads a corpus that still contains the inventories', () => {
+    // Guards the vacuous pass: if the tree-diagram and table shapes disappeared
+    // from the corpus, the assertion above would be green over nothing.
+    const inventoryLines = DOCS.flatMap((d) => d.text.split('\n')).filter(
+      (line) => /^\s*[├└]──\s/.test(line) || /^\s*\|/.test(line),
+    );
+    expect(inventoryLines.length).toBeGreaterThan(100);
+  });
+});
+
+describe('D11 — a quoted `ls` prints what `ls` prints', () => {
+  // `docs/ARCHITECTURE.md` listed nine packages and called them "every one of
+  // the nine" while `packages/` held thirteen.
+  it('finds no stale directory listing', () => {
+    expect(report(checkDirectoryListings(DOCS, FACTS))).toBe('');
+  });
+
+  it('still finds a listing to check', () => {
+    expect(DOCS.some((d) => /`ls [a-z]+\/?`/.test(d.text))).toBe(true);
+  });
+});
+
+describe('D12 — stated surface sizes match the arrays that define them', () => {
+  // `seven skills` stood in three files while `SKILL_IDS` held eight, and
+  // `eleven tools` in four while `tools.ts` registered twelve.
+  it('counts the three surfaces out of the tree', () => {
+    expect(FACTS.surfaces.tools).toBeGreaterThan(0);
+    expect(FACTS.surfaces.skills).toBeGreaterThan(0);
+    expect(FACTS.surfaces.commands).toBeGreaterThan(0);
+  });
+
+  it('finds no document or comment that misstates one', () => {
+    const sources = [...FACTS.sourceFiles].map((rel) => ({
+      path: rel,
+      text: readFileSync(path.join(ROOT, rel), 'utf8'),
+    }));
+    expect(report(checkSurfaceCounts([...DOCS, ...sources], FACTS))).toBe('');
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Self-tests. Every rule above is handed a planted violation and required to
 //  reject it, and handed the marked-up version and required to accept it.
@@ -760,6 +832,8 @@ describe('D8 — the layout table lists every package, and calls none of them em
 
 const FIXTURE_FACTS: RepoFacts = {
   packages: new Set(['protocol']),
+  treeDirs: new Set(['packages', 'packages/protocol', 'packages/protocol/src', 'apps', 'apps/relay']),
+  surfaces: { tools: 12, skills: 8, commands: 8 },
   npmScripts: new Set(['check', 'verify:boundaries', 'verify:assets']),
   binNames: new Set(['acme-daemon']),
   binPrefix: 'acme',
@@ -1149,5 +1223,132 @@ describe('self-test: D9 rejects a TODO citation that points nowhere', () => {
       () => '// TODO(M15): still open\n',
     );
     expect(found).toEqual([]);
+  });
+});
+
+describe('self-test: D10 rejects an absence claim about a directory that exists', () => {
+  it('rejects a status cell that calls a live directory absent', () => {
+    const found = checkAbsenceClaims(
+      doc('| **REST + OpenAPI 3.1** | `apps/relay` | M17 — absent | the same surface |'),
+      FIXTURE_FACTS,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]?.rule).toBe('D10');
+    expect(found[0]?.detail).toContain('apps/relay');
+  });
+
+  it('rejects a top-level tree entry that calls a live directory absent', () => {
+    const found = checkAbsenceClaims(doc('├── apps/                       absent entirely'), FIXTURE_FACTS);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.detail).toContain('apps/');
+  });
+
+  it('does not let the milestone marker excuse it', () => {
+    // Every other rule in this file forgives a claim carrying `(M17)`. This one
+    // must not: `M17 — absent` is the exact string that survived five reviews.
+    expect(checkAbsenceClaims(doc('| `apps/relay` | M17 — absent |'), FIXTURE_FACTS)).toHaveLength(1);
+  });
+
+  it('accepts an absence claim about a directory that really is absent — CONTROL', () => {
+    expect(
+      checkAbsenceClaims(doc('| `packages/storage-supabase` | M40 — absent |'), FIXTURE_FACTS),
+    ).toEqual([]);
+    expect(checkAbsenceClaims(doc('├── rfcs/                       absent'), FIXTURE_FACTS)).toEqual([]);
+  });
+
+  it('leaves prose that happens to say "does not exist" alone — CONTROL', () => {
+    // `docs/MILESTONES.md` is one long table of rows that say true things are
+    // unfinished. A rule that read those as claims about a directory would fire
+    // on dozens of correct sentences, and the fix for that is not a longer
+    // allowlist — it is not reading prose in the first place.
+    const row =
+      '| M16 | Plugin: console mirror | PART | the console mirror is done and the selection ' +
+      'context does not exist; `apps/relay` carries the transport half and the rest is owed |';
+    expect(checkAbsenceClaims(doc(row), FIXTURE_FACTS)).toEqual([]);
+    expect(checkAbsenceClaims(doc('The `apps/relay` queue register does not exist yet.'), FIXTURE_FACTS)).toEqual([]);
+  });
+
+  it('leaves a nested tree entry alone — CONTROL', () => {
+    // `│   └── docs/` inside `apps/` is `apps/docs/`, which this tree does not
+    // have. Reading it as the repository's `docs/` would be a false positive on
+    // a correct line.
+    expect(checkAbsenceClaims(doc('│   └── docs/     documentation site   M50 — absent'), FIXTURE_FACTS)).toEqual([]);
+  });
+});
+
+describe('self-test: D11 rejects a stale directory listing', () => {
+  it('rejects a listing that omits a directory', () => {
+    const found = checkDirectoryListings(doc('`ls packages/` returns `protocol`.'), {
+      ...FIXTURE_FACTS,
+      treeDirs: new Set(['packages', 'packages/protocol', 'packages/opencloud']),
+    });
+    expect(found).toHaveLength(1);
+    expect(found[0]?.detail).toContain('opencloud');
+  });
+
+  it('rejects a listing naming a directory that is gone', () => {
+    const found = checkDirectoryListings(
+      doc('`ls packages/` returns exactly `protocol storage-supabase`.'),
+      FIXTURE_FACTS,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]?.detail).toContain('storage-supabase');
+  });
+
+  it('fails closed when the directory has nothing in it', () => {
+    const found = checkDirectoryListings(doc('`ls plugins/` returns `a b`.'), FIXTURE_FACTS);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.detail).toContain('no subdirectories');
+  });
+
+  it('accepts a listing that matches the tree — CONTROL', () => {
+    expect(checkDirectoryListings(doc('`ls packages/` returns `protocol`.'), FIXTURE_FACTS)).toEqual([]);
+  });
+});
+
+describe('self-test: D12 rejects a misstated surface size', () => {
+  it('rejects a skill count the array contradicts', () => {
+    const found = checkSurfaceCounts(doc('The card advertises seven skills.'), FIXTURE_FACTS);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.rule).toBe('D12');
+    expect(found[0]?.detail).toContain('this repository has 8');
+  });
+
+  it('rejects a tool count in a source comment, not only in markdown', () => {
+    const found = checkSurfaceCounts(
+      [{ path: 'packages/mcp/src/server.ts', text: ' * constructing eleven tool registrations per call.' }],
+      FIXTURE_FACTS,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]?.file).toBe('packages/mcp/src/server.ts');
+  });
+
+  it('fails closed when the counter finds no array to count', () => {
+    const found = checkSurfaceCounts(doc('twelve tools'), {
+      ...FIXTURE_FACTS,
+      surfaces: { tools: -1, skills: 8, commands: 8 },
+    });
+    expect(found).toHaveLength(1);
+    expect(found[0]?.detail).toContain('has moved');
+  });
+
+  it('accepts the counts the arrays really hold — CONTROL', () => {
+    expect(
+      checkSurfaceCounts(doc('twelve tools, eight skills and eight commands.'), FIXTURE_FACTS),
+    ).toEqual([]);
+  });
+
+  it('leaves "one tool" and "two commands" alone — CONTROL', () => {
+    // English, not arithmetic: `packages/mcp/README.md` says "one tool" meaning
+    // some one of them, and four other files do the same with two and three.
+    expect(checkSurfaceCounts(doc('Approval is never one tool call away.'), FIXTURE_FACTS)).toEqual([]);
+    expect(checkSurfaceCounts(doc('The walkthrough is two commands.'), FIXTURE_FACTS)).toEqual([]);
+  });
+
+  it('leaves rule counts alone — CONTROL', () => {
+    // `packages/luau-analysis` has eight entries in `RULES` and nine ids that
+    // can appear in a finding. Both numbers are right about different things,
+    // so this rule decides neither.
+    expect(checkSurfaceCounts(doc('It carries nine rules and eight rules.'), FIXTURE_FACTS)).toEqual([]);
   });
 });

@@ -76,23 +76,34 @@ Also in scope:
   instead of returning. Note the layer's stated reach first: it is a recogniser over a
   token stream, not a Luau compiler, so "an obfuscated payload assembled at runtime is not
   detected" is a documented limit rather than a finding.
-- `packages/mcp`, `packages/a2a`, `packages/cli` — anything that lets a producer approve
-  its own ChangeSet, reach a project it was not linked to, or reach the daemon's approve
-  path from a tool. This is the single most valuable thing to break in a connector.
+- `packages/mcp`, `packages/a2a`, `packages/cli`, `packages/sdk-ts`, `packages/sdk-python` —
+  anything that lets a producer approve its own ChangeSet, reach a project it was not linked
+  to, or reach the daemon's approve path from a connector. This is the single most valuable
+  thing to break in a connector.
+- `apps/relay` — pairing weaknesses, replay, cross-link injection, authentication bypass,
+  reading or altering another link's traffic. Note the stated posture first: on this
+  transport the operator can read changes by design (`relay-tls`, ADR-014), so "the relay
+  can read a ChangeSet" is a documented property and not a finding; "one link can read
+  another's" is.
+- `apps/web` — the usual web classes: authn/authz, XSS, CSRF, SSRF, secret exposure. It is a
+  static front end with no route handler of its own, so a report that a credential reached a
+  server we run is a high-severity finding rather than a configuration question.
+- `packages/opencloud` — an Open Cloud API key reaching a log, an error body or disk, or a
+  request built so that a scoped key acts outside its scope.
 - Continuous-integration integrity — a way to get unreviewed code into what
   `.github/workflows/` executes, or into the `assets/brands/` provenance manifest.
+- Release integrity — a way to get unreviewed bytes into a published artefact or into the
+  plugin `.rbxm`. `.github/workflows/release.yml` exists and builds both, including the
+  `.rbxm` via a pinned Rojo; it is manual-only, publishes nothing unless a human passes
+  `publish: true`, and has never been run that way, because no credential for npm or PyPI
+  exists in this repository. Nothing has been published anywhere.
 
 **In scope the moment each of these exists.** The directories below are absent from the tree
 entirely, so there is nothing yet to report against them. They are listed so the boundary is
 not quietly redrawn when they land.
 
-- `apps/relay` (M17) — pairing weaknesses, replay, cross-link injection, authentication
-  bypass, reading or altering another link's traffic.
-- `apps/web` (M32–M39) — the usual web classes: authn/authz, XSS, CSRF, SSRF, RLS bypass,
-  secret exposure.
-- Release integrity (M49) — a way to get unreviewed bytes into a published artefact or into
-  the plugin `.rbxm`. There is no release pipeline here yet, nothing is published to npm or
-  PyPI, and no `.rbxm` is built by anything in this repository.
+- `packages/storage-supabase` (M40) — RLS bypass, cross-tenant reads, credential handling in
+  the adapter.
 
 **Out of scope:**
 

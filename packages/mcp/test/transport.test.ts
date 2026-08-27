@@ -56,7 +56,7 @@ describe('resolving the rest of the configuration', () => {
   });
 
   it('refuses to start with no producer token', () => {
-    // Starting without one would produce eleven tools that all fail 401 at the
+    // Starting without one would produce twelve tools that all fail 401 at the
     // first call, which reads to a user as a broken bridge rather than as an
     // unset variable.
     expect(() => resolveConfig([], {})).toThrow(ConfigError);

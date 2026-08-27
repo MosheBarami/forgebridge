@@ -117,7 +117,7 @@ reversible, testable, and transport-agnostic*. Free-text code is none of those.
 
 | | **Local daemon** (default) | **Cloud relay** (opt-in) |
 |---|---|---|
-| Runs | `forgebridge daemon` from `packages/cli`, or the `forgebridge-daemon` bin `packages/daemon/package.json` declares. Both start the same server; the CLI is a front-end over `createDaemon` and holds no transport decisions of its own | `apps/relay` on apple.gg or self-hosted (M17 — absent) |
+| Runs | `forgebridge daemon` from `packages/cli`, or the `forgebridge-daemon` bin `packages/daemon/package.json` declares. Both start the same server; the CLI is a front-end over `createDaemon` and holds no transport decisions of its own | `apps/relay` on apple.gg or self-hosted |
 | Studio reaches it via | `HttpService` → `http://127.0.0.1:<port>` | `HttpService` → `https://…` long-poll |
 | Needs an account | No | Yes (for the sponsored run + sync) |
 | Sees user API keys | Yes — locally, from OS keychain | **Never** |
@@ -194,19 +194,19 @@ moved on. A silent downgrade would be a lie about what produced the code.
 
 ## 5. Agent connectors
 
-One core, five front doors. Each is a thin adapter — no business logic lives in a
-connector. Four of the five are open. The `Status` column says what each one's limits are,
-because "the package exists" and "the door opens onto everything the row promises" are not
-the same claim.
+One core, six front doors. Each is a thin adapter — no business logic lives in a
+connector. All six now have code — `apps/relay` and `packages/sdk-ts` were the last two to
+arrive. The `Status` column says what each one's limits are, because "the package exists"
+and "the door opens onto everything the row promises" are not the same claim.
 
 | Connector | Package | Status | Reaches |
 |---|---|---|---|
 | **REST** | `packages/daemon` | shipping | anything that can do HTTP, on `127.0.0.1` |
-| **REST + OpenAPI 3.1** | `apps/relay` | M17 — absent | the same surface, over a relay. The OpenAPI document it must serve is generated (M08) and committed at `packages/protocol/schema/openapi.json` |
+| **REST + OpenAPI 3.1** | `apps/relay` | built; `apps/relay/test/surface.test.ts` compares the routes it serves against `packages/protocol/schema/openapi.json` in both directions, so a transport that answered a different set of paths would fail rather than fork the protocol. State is in memory only, so a restart drops every session (M40) | the same surface, over a relay. On this transport the operator can read changes — the posture is `relay-tls`, served verbatim, and `relay-e2e` is M19 and unbuilt |
 | **MCP** (stdio + streamable HTTP) | `packages/mcp` | built; twelve tools over both transports, verified against the reference SDK client and against the M31 conformance suite on a live daemon. **No editor in the next column has been tried** (M26, M31) | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
-| **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, seven skills, message and task methods, conformant against the M31 suite. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
+| **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, eight skills, message and task methods, conformant against the M31 suite. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
 | **CLI** | `packages/cli` | built; every subcommand, `run` included — it streams the plan and the attempt log off `POST /v1/runs` and never approves. Conformant against the M31 suite | shells, CI, Codex/Copilot CLI, scripting |
-| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client — `propose_changeset`, `start_run`, `approve_changeset` — plus `describe_error`; unpublished (M30), and green against the M31 conformance suite through a subprocess driver. TypeScript: absent | embedding ForgeBridge in other products |
+| **SDKs** | `packages/sdk-ts`, `packages/sdk-python` | TypeScript: a typed `/v1` client whose route table and wire schemas are generated from `packages/protocol/schema/openapi.json`, with the contract types bound to `@forgebridge/protocol` rather than re-derived; conformant against the M31 suite. Python: generated pydantic models and the producer half of the client — `propose_changeset`, `start_run`, `approve_changeset`, `watch_run` — plus `describe_error`; green against the same suite through a subprocess driver. Both are unpublished by construction — `packages/sdk-ts` is `private` and `packages/sdk-python` carries `Private :: Do Not Upload` — and M49 owns whether either marker comes off | embedding ForgeBridge in other products |
 
 The MCP tool surface below is the shipped one — these are the twelve names
 `packages/mcp/src/tools.ts` registers, and a live client has listed them. Three of them
@@ -238,15 +238,23 @@ apply is unreachable without an `ApprovalGrant` a human produced.
 **Ports and adapters** (ADR-005), because auth is optional and self-hosting is required:
 
 Adapters that exist carry the export that builds them; the rest are the target
-shape and are marked.
+shape and are marked. Three of the four secrets backends the original plan named are
+built, and each is named here by the export that exists rather than by the name the plan
+gave it — a diagram that keeps the planned name after the code lands is a diagram nobody
+can grep. Windows Credential Manager and libsecret are still unbuilt, so off macOS
+`defaultSecrets()` layers the environment alone; and because `LayeredSecrets.describe()`
+reports `readableByOtherProcesses` true if *any* layer is, adding a keychain never
+upgrades the posture a UI shows. Both backends are read-only: `TODO(M38)` in
+`packages/daemon/src/secrets.ts` owns the remaining platforms and the verified write
+path.
 
 ```
 Storage port ──┬── SqliteStoragePort         node:sqlite under ~/.forgebridge   (no account)
                └── SupabaseAdapter           Postgres 17 + RLS + Realtime       M40 — absent
 
-Secrets port ──┬── KeychainAdapter           macOS Keychain / Windows CredMan   M23 — absent
-               ├── WebCryptoAdapter          non-extractable key + IndexedDB    M32-M39 — absent
-               └── EnvAdapter                CI / headless                      M23 — absent
+Secrets port ──┬── KeychainSecrets           macOS Keychain via `security(1)`   read-only; writes M38
+               ├── browser key vault         non-extractable key + IndexedDB    apps/web/src/lib/keys/vault.ts
+               └── EnvironmentSecrets        CI / headless                      packages/daemon/src/secrets.ts
 
 Telemetry port ┬── otlpTelemetry             OTLP/HTTP+JSON over fetch; no vendor dependency
                └── errorReporterTelemetry    an injected client — a Sentry module object fits
@@ -322,17 +330,18 @@ this tree; the other three bullets are the design M45 lands, marked as such.
 |---|---|---|
 | **Solo local** | any user, no account | daemon + plugin + local model or BYOK |
 | **apple.gg** | us | Vercel (web + relay) · Supabase · Upstash · Sentry/OTel |
-| **Self-host full** | anyone | `docker compose up` → web + Postgres + Redis + OTel collector |
-| **Self-host lite** | anyone | daemon container only, plugin points at it |
+| **Self-host full** | anyone | `docker compose up` → relay + Caddy (TLS) + OTel collector. **Built, and smaller than this row used to claim**: there is no database and no Redis, because the relay holds session keys in memory and nowhere else and persisting them would put the material to forge a delivery to any user in one file. `apps/web` is not in the stack either — it is a static front end a self-hoster deploys separately (`docs/DEPLOYMENT.md`). The collector runs and nothing exports to it yet (M44). See [`SELF-HOSTING.md`](SELF-HOSTING.md) |
+| **Self-host lite** | anyone | `deploy/daemon.Dockerfile` — the daemon alone. Useful on Linux with `--network host`; **not** useful on Docker Desktop for macOS or Windows, because the daemon binds the container's loopback and Studio is outside the VM. The Dockerfile says so at the top rather than leaving it to be discovered |
 | **CI / headless** | teams | CLI + SDK, env-based secrets, no UI |
 
 ## 10. What already exists
 
 Two different answers, and conflating them is how this section went stale before.
 
-**In this repository, right now** — `ls packages/` returns `a2a cli core daemon
-luau-analysis mcp model-registry protocol sdk-python`, and every one of the nine has code
-and tests in it:
+**In this repository, right now** — `ls packages/` returns `a2a cli conformance core
+daemon luau-analysis mcp model-registry opencloud protocol sdk-python sdk-ts
+storage-sqlite`, and every one of the thirteen has code and tests in it. `ls apps/`
+returns `relay web`, and so do both of those:
 
 | Directory | What is in it |
 |---|---|
@@ -341,20 +350,27 @@ and tests in it:
 | `packages/daemon/` | The localhost transport: HTTP server, pairing, envelope handling, store seam, and the `forgebridge-daemon` bin, with tests. |
 | `packages/model-registry/` | The synced catalog and its capability metadata, plus `scripts/sync-catalog.ts` and the weekly `catalog-drift.yml` job that opens a PR on drift. |
 | `packages/luau-analysis/` | The Luau linter: a tokenizer, a block recogniser, eight rules, and an `analyse` that never reports a pass for a source it could not read. `packages/daemon` calls it on every ChangeSet. |
-| `packages/mcp/` | The MCP server: eleven tools over stdio and streamable HTTP, with the SDK confined to `src/server.ts` and everything above it tested against a double. |
+| `packages/mcp/` | The MCP server: twelve tools over stdio and streamable HTTP, with the SDK confined to `src/server.ts` and everything above it tested against a double. |
 | `packages/a2a/` | The A2A connector: Agent Card, message and task methods over JSON-RPC, and an approval seam that makes apply unreachable without a human grant. |
 | `packages/cli/` | `forgebridge` — `daemon`, `link`, `status`, `models`, `run`, `diff`, `apply`, `rollback`, with `--json` output and distinct exit codes. `run` streams the plan and the attempt log, and never approves. |
-| `packages/sdk-python/` | The generated pydantic models and a thin `/v1` client, with ruff and pytest. Not published (M30). |
+| `packages/sdk-ts/` | The TypeScript SDK: a typed `/v1` client driven by a route table and wire schemas generated from the protocol's own OpenAPI document. Not published (M49). |
+| `packages/sdk-python/` | The generated pydantic models and a thin `/v1` client, with ruff and pytest. Not published (M49). |
+| `packages/conformance/` | The one executable definition of what a connector must do, plus the cheating adapters that prove each case can fail. Five connectors inherit it through one adapter interface. |
+| `packages/storage-sqlite/` | `DaemonStore` and `StoragePort` over `node:sqlite` — the persistence that needs no account. One suite runs against it and the in-memory default both. |
+| `packages/opencloud/` | Roblox Open Cloud: place versions, standard data stores, MessagingService, and the `forgebridge-opencloud` bin. Zero runtime dependencies. |
+| `apps/relay/` | The cloud transport: the daemon's `/v1` surface over a relay, with pairing, long-poll and SSE, and a privacy posture it is required to state rather than draw. In-memory state only (M40). |
+| `apps/web/` | apple.gg — the official instance, as a static front end with no route handler of its own, which is what keeps a credential unable to reach a server we run (ADR-006). |
 | `plugin/` | The Studio plugin in Luau — transport, diff, approve, apply, journal — and a Luau test suite run by hand (in CI: M41). |
-| `scripts/` + `.github/workflows/` | The gates: boundaries, brand-asset provenance, key custody, secret scanning, DCO, and their own tests. `ci.yml`, `catalog-drift.yml`, `dco.yml` — there is no release workflow (M49). |
+| `scripts/` + `.github/workflows/` | The gates: boundaries, brand-asset provenance, key custody, secret scanning, DCO, and their own tests. Eight workflows — `ci`, `catalog-drift`, `dco`, `codeql`, `semgrep`, `sbom`, `dependency-review` and `release`. `release` is manual-only, defaults to publishing nothing, and has never published anything: no credential for either registry exists here. |
 
-`apps/`, `packages/sdk-ts/`, `packages/opencloud/` and the storage adapters do not exist as
-directories at all. A milestone marker in §1 does not by itself mean absent — `packages/core`
-(M09–M13), `packages/daemon` (M14) and `plugin/` (M15) are all partial rather than missing,
-and so are the four connectors, each for a reason its row states;
-[`MILESTONES.md`](MILESTONES.md) carries the per-row status. No test count is quoted here
-on purpose: `npm run test` prints the real one, and a number transcribed into prose is the
-first thing in this document to rot.
+Two rows of the target shape in [`REPO-LAYOUT.md`](REPO-LAYOUT.md) are still empty
+directories nothing has created: `packages/storage-supabase/` (M40) and `packages/ui/`
+(M32–M39). Everything else that document draws exists. A milestone marker in §1 does not
+by itself mean absent — `packages/core` (M09–M13), `packages/daemon` (M14) and `plugin/`
+(M15) are all partial rather than missing, and so are several of the six connectors, each
+for a reason its row states; [`MILESTONES.md`](MILESTONES.md) carries the per-row status.
+No test count is quoted here on purpose: `npm run test` prints the real one, and a number
+transcribed into prose is the first thing in this document to rot.
 
 **Elsewhere** — the predecessor private repo (`Claude-Web-Cloner`, HEAD `b174ec2`,
 referenced as lineage in `NOTICE` and quarantined by

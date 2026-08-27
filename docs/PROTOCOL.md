@@ -224,9 +224,11 @@ paths a model could pick freely.
 
 ## Transport endpoints
 
-Served by `packages/daemon` (M14) today. `apps/relay` (M17) does not exist yet and must
-serve this surface identically when it does — a transport that answers a different set of
-paths is a second protocol, and the plugin only knows one.
+Served by `packages/daemon` (M14) and, since M17, by `apps/relay` as well. Both serve this
+surface identically, and that is checked rather than intended — a transport that answered a
+different set of paths would be a second protocol, and the plugin only knows one, so
+`apps/relay/test/surface.test.ts` compares the relay's routes against
+`packages/protocol/schema/openapi.json` in both directions and fails on an extra or a gap.
 
 ```
 GET    /v1/health

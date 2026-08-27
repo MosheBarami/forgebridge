@@ -229,7 +229,7 @@ function example(skill: SkillId, input: unknown): string {
 }
 
 /**
- * The seven skills, in the order a run uses them.
+ * The eight skills, in the order a run uses them.
  *
  * Read together they are a deliberate statement of the trust boundary: propose
  * and read are here as ordinary work, apply is described as requiring an

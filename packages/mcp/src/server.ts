@@ -16,7 +16,7 @@ import { bindsPublicly, ConfigError, MIN_HTTP_TOKEN_CHARS, type ServerConfig } f
  * error mapping and the registration walk are all plain TypeScript, tested
  * against a recording double. This file is the only place the SDK is imported,
  * which is what keeps a protocol-library upgrade a change to one file rather
- * than to eleven tool handlers.
+ * than to twelve tool handlers.
  *
  * ── Verified against @modelcontextprotocol/sdk 1.30.0 (M26) ──────────────────
  *
@@ -36,7 +36,7 @@ import { bindsPublicly, ConfigError, MIN_HTTP_TOKEN_CHARS, type ServerConfig } f
  *      Earlier 1.x releases may well work; none has been tested, so none is
  *      claimed.
  *
- * A live client over an in-memory transport listed the eleven tools with their
+ * A live client over an in-memory transport listed the twelve tools with their
  * projected schemas, and the HTTP binding answered a real `initialize`. Do not
  * widen what this file claims beyond that.
  */
@@ -185,7 +185,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
  *
  * A fresh server and transport per request: the stateless shape, which needs no
  * session table and cannot leak one client's state into another's response. The
- * cost is constructing eleven tool registrations per call, which is object
+ * cost is constructing twelve tool registrations per call, which is object
  * allocation, not I/O.
  */
 export function startHttp(options: StartOptions): Promise<Server> {

@@ -37,7 +37,8 @@ custom UI) caps how good the in-editor experience can be versus a native extensi
 - **Positive**: eleven surfaces from roughly two implementations; connectors stay tiny.
 - **Negative**: no bespoke polish anywhere; MCP protocol churn hits us directly.
 - **Mitigation**: conformance suite catches churn early; the tool surface is deliberately
-  small (11 tools) so a protocol migration is a day, not a quarter.
+  small — twelve tools today, eleven when this was decided — so a protocol migration is a
+  day, not a quarter.
 
 ## Revisit trigger
 If one tool exceeds ~40% of active links, a native extension for that tool becomes worth
