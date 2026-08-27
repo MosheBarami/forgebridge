@@ -206,7 +206,7 @@ the same claim.
 | **MCP** (stdio + streamable HTTP) | `packages/mcp` | built; twelve tools over both transports, verified against the reference SDK client and against the M31 conformance suite on a live daemon. **No editor in the next column has been tried** (M26, M31) | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
 | **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, seven skills, message and task methods, conformant against the M31 suite. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
 | **CLI** | `packages/cli` | built; every subcommand, `run` included — it streams the plan and the attempt log off `POST /v1/runs` and never approves. Conformant against the M31 suite | shells, CI, Codex/Copilot CLI, scripting |
-| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client — `propose_changeset`, `start_run`, `approve_changeset` — unpublished, and not yet wired into the M31 suite (M30). TypeScript: absent | embedding ForgeBridge in other products |
+| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client — `propose_changeset`, `start_run`, `approve_changeset` — plus `describe_error`; unpublished (M30), and green against the M31 conformance suite through a subprocess driver. TypeScript: absent | embedding ForgeBridge in other products |
 
 The MCP tool surface below is the shipped one — these are the twelve names
 `packages/mcp/src/tools.ts` registers, and a live client has listed them. Three of them
@@ -237,17 +237,29 @@ apply is unreachable without an `ApprovalGrant` a human produced.
 
 **Ports and adapters** (ADR-005), because auth is optional and self-hosting is required:
 
-```
-Storage port ──┬── LocalStorageAdapter   SQLite + files under ~/.forgebridge   (no account)
-               └── SupabaseAdapter       Postgres 17 + RLS + Realtime          (apple.gg / self-host)
+Adapters that exist carry the export that builds them; the rest are the target
+shape and are marked.
 
-Secrets port ──┬── KeychainAdapter       macOS Keychain / Windows CredMan / libsecret
-               ├── WebCryptoAdapter      non-extractable key + IndexedDB blob (browser)
-               └── EnvAdapter            CI / headless
-
-Telemetry port ┬── OTelAdapter           OpenTelemetry (neutral, self-host default)
-               └── SentryAdapter         apple.gg only, opt-in for self-hosters
 ```
+Storage port ──┬── SqliteStoragePort         node:sqlite under ~/.forgebridge   (no account)
+               └── SupabaseAdapter           Postgres 17 + RLS + Realtime       M40 — absent
+
+Secrets port ──┬── KeychainAdapter           macOS Keychain / Windows CredMan   M23 — absent
+               ├── WebCryptoAdapter          non-extractable key + IndexedDB    M32-M39 — absent
+               └── EnvAdapter                CI / headless                      M23 — absent
+
+Telemetry port ┬── otlpTelemetry             OTLP/HTTP+JSON over fetch; no vendor dependency
+               └── errorReporterTelemetry    an injected client — a Sentry module object fits
+```
+
+The daemon has a second, narrower persistence seam of its own — `DaemonStore`,
+the local transport's queues, nonce watermarks and link table — with the same
+two implementations: `InMemoryDaemonStore` (the default) and
+`SqliteDaemonStore`. One suite runs against both (`DAEMON_STORE_SUITE`).
+
+Neither telemetry adapter is constructed unless an operator names a collector:
+`telemetryFromEnvironment` returns `undefined` otherwise, so "off by default"
+is the absence of an adapter rather than a disabled one (ADR-011).
 
 Core entities (same shape in both adapters):
 

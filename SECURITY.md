@@ -151,9 +151,10 @@ script says rather than what it computes; the plugin therefore still sends every
 carrying Luau source to a human regardless of the verdict that arrived with it.
 `packages/core`'s out-of-process `SandboxPort` has no adapter, so a run driven through the
 pipeline rather than the daemon still returns `core/luau-analysis-unavailable` (M13).
-Rollback is scoped to the Studio session that applied the change, because `ApplyResult` has
-nowhere on the wire to carry the inverses (M11). Delimiting retrieved content as data inside
-the prompt is unbuilt (M22).
+Rollback now outlives the Studio session that applied the change (M11), but a restored
+deletion is a rebuild rather than a resurrection: Luau has no property reflection, so the
+durable record carries a fixed list of engine properties and not every property of every
+class (M15). Delimiting retrieved content as data inside the prompt is unbuilt (M22).
 
 Claims in that document are meant to be backed by tests rather than by prose (M43). **A claim
 there that no test defends is itself worth reporting** — quietly, through this policy.

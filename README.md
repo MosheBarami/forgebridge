@@ -95,8 +95,8 @@ Studio plugin.
 
 Every box carrying a milestone marker is unbuilt or partial — the marker is the row in
 [`docs/MILESTONES.md`](docs/MILESTONES.md) that lands it, and the row says which of the two
-it is. `packages/mcp`, `packages/a2a` and `packages/cli` exist and are tested; each still
-owes something its row names. The relay line is the one worth
+it is. `packages/mcp`, `packages/a2a`, `packages/cli` and `apps/relay` exist and are tested;
+each still owes something its row names. The relay line is the one worth
 reading twice: **relay v1 is not a blind pipe.** It authenticates and integrity-protects
 every payload and runs over TLS, but the operator *can* read ChangeSet contents, and the
 link indicator says exactly that. A blind relay — end-to-end encrypted payloads the
@@ -200,8 +200,9 @@ this lose trust.
 
 ### Connecting an agent instead
 
-One core, five front doors — MCP, A2A, REST (the daemon today, a relay at M17), the CLI, and
-the SDKs. MCP is the primary connector (ADR-009), so an editor that speaks it reaches
+One core, five front doors — MCP, A2A, REST (the daemon on localhost or `apps/relay` in the
+cloud, serving the same nineteen `/v1` routes), the CLI, and the SDKs. MCP is the primary
+connector (ADR-009), so an editor that speaks it reaches
 ForgeBridge through these twelve tools, which is the surface `packages/mcp` registers today:
 
 ```
@@ -296,8 +297,11 @@ packages/mcp/            MCP server (stdio + streamable HTTP)             M26
 packages/a2a/            A2A agent card + task endpoints                  M27
 packages/cli/            the `forgebridge` binary                         M28
 packages/sdk-python/     generated pydantic models + a thin client        M30
+packages/conformance/    the connector conformance matrix + its cheats    M31
+packages/storage-sqlite/ SQLite adapters over `node:sqlite`               M40
 examples/                SDK examples                                     M29/M30 — empty
-apps/web/                apple.gg — the official instance                 M32–M39 — absent
+apps/relay/              the cloud transport — a pipe, not a brain        M17
+apps/web/                apple.gg — the official instance                 M32–M39
 assets/brands/           official third-party marks + provenance manifest
 scripts/                 sync-catalog · generate-schemas · verify-assets
                          · verify-boundaries · verify-no-key-storage
@@ -306,18 +310,25 @@ scripts/                 sync-catalog · generate-schemas · verify-assets
 docs/                    architecture, protocol, threat model, milestones, ADRs
 ```
 
-Every `packages/*` row and `plugin/` has code and its own tests in it. The remaining rows are
-not packages and do not pretend to be: `assets/brands/` holds third-party marks and their
-provenance manifest, `scripts/` holds the gates and their self-tests, `docs/` holds prose, and a
-row whose right-hand column is a bare milestone — `examples/`, `apps/web/` — names a directory
-that stays empty or absent until that milestone lands.
+Every `packages/*` row, both `apps/*` rows and `plugin/` has code and its own tests in it. The
+remaining rows are not packages and do not pretend to be: `assets/brands/` holds third-party
+marks and their provenance manifest, `scripts/` holds the gates and their self-tests, `docs/`
+holds prose, and a row whose right-hand column says *empty* or *absent* — `examples/` — names a
+directory that stays that way until its milestone lands. A milestone on a row that has code is
+the milestone the row is still working through, not a promise that the directory will appear.
+
+The table is checked in both directions. `scripts/__tests__/docs-claims.test.ts` asserts that
+every directory carrying a `package.json` has a row here and that no such row calls itself empty
+or absent — which is the check that was missing when `apps/relay`, `packages/conformance` and
+`packages/storage-sqlite` each landed as a full package and none of them reached this table, and
+when the `apps/web` row still read *absent* after the app had built and passed 248 tests.
 
 A milestone number is not a claim of completeness: `packages/mcp` has not been tried from any of
 the editors M26 names, and no connector can read a tree snapshot, because no `/v1` route serves
 one. Each row in [`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
 
-`apps/relay/`, `packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and
-do not exist as directories at all — M17, M29 and M48 respectively.
+`packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and do not exist as
+directories at all — M29 and M48 respectively.
 
 The boundary rules that keep this shape honest are in
 [`docs/REPO-LAYOUT.md`](docs/REPO-LAYOUT.md) and enforced by `scripts/verify-boundaries.ts`.

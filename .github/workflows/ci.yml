@@ -94,7 +94,7 @@ jobs:
         # is indistinguishable from a passing one in a log.
         run: npx vitest run --dir scripts
 
-      # TODO(M41): the Studio plugin has 187 Luau tests (`plugin/tests/run.luau`,
+      # TODO(M41): the Studio plugin has 206 Luau tests (`plugin/tests/run.luau`,
       # documented in plugin/BUILD.md) and nothing in CI runs them, so a change to
       # plugin/src is currently reviewed on a human's word that they still pass.
       # Adding the step needs a pinned Luau toolchain — the version and its
@@ -117,6 +117,23 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - uses: actions/setup-python@v5
+        with:
+          # The same oldest-supported version the gates job pins, for the same
+          # reason: `packages/sdk-python` claims 3.10+, so the connector
+          # conformance suite should exercise it on the version it claims.
+          python-version: '3.10'
+
+      - name: Install the Python SDK so the fourth connector can run the conformance suite
+        # `packages/conformance/test/python-sdk.test.ts` runs the whole matrix
+        # against `packages/sdk-python` by shelling out to
+        # `packages/sdk-python/tests/conformance_driver.py`. Without an
+        # interpreter that can import the models, that test fails — deliberately,
+        # and not silently: a cross-language test that skips itself is
+        # indistinguishable from a passing one in a log, which is the same
+        # argument the gates job makes for the schema drift proof.
+        run: python -m pip install -e "packages/sdk-python"
 
       - run: npm run typecheck
 
