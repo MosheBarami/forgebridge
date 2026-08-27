@@ -25,7 +25,10 @@
     "verify:boundaries": "tsx scripts/verify-boundaries.ts",
     "verify:no-key-storage": "tsx scripts/verify-no-key-storage.ts",
     "verify:no-secrets": "tsx scripts/verify-no-secrets.ts",
-    "verify:schemas": "tsx scripts/generate-schemas.ts --check"
+    "verify:schemas": "tsx scripts/generate-schemas.ts --check",
+    "generate:roadmap": "tsx scripts/roadmap.ts",
+    "release:check": "tsx scripts/release.ts check",
+    "release:notes": "tsx scripts/release.ts notes"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

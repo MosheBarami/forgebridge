@@ -1,0 +1,329 @@
+name: Release
+
+# MANUAL ONLY, AND THAT IS THE POINT.
+#
+# There is no `push: tags:` trigger here and there must not be one. A tag is a
+# thing a person can create by accident, from a branch, on a Friday; a release
+# that publishes to two public registries and stamps a plugin that runs inside
+# Studio with somebody's session is not something a `git push --tags` should be
+# able to start. `scripts/release-rules.ts` R1 asserts this file has no
+# automatic trigger, and `scripts/__tests__/release.test.ts` plants one to prove
+# the rule fires.
+#
+# ── Nothing is published by default ─────────────────────────────────────────
+#
+# `publish` defaults to false. A run with it false does everything a real
+# release does except the two `publish` steps: it verifies the versions, builds
+# every artefact, builds the plugin `.rbxm`, computes the checksums and uploads
+# them as workflow artefacts. That is the rehearsal, and it is the mode this
+# repository has ever run, because no credential for either registry exists.
+#
+# ── Why every credential is checked before any of them is used ──────────────
+#
+# The failure this shape exists to prevent is the one this repository has
+# already had to fix three times in other places: a partial failure recorded as
+# a success. A release that publishes to npm and then discovers PyPI was never
+# configured leaves two ecosystems disagreeing about what version 1.2.0 is, and
+# neither registry lets you take it back.
+#
+# So `preflight` decides everything and touches nothing, and it reports **every**
+# missing credential rather than the first — a run that fails, gets one secret
+# added, and fails again on the next one is how somebody ends up disabling the
+# check. Both publish jobs depend on it, and the GitHub release that announces
+# the version depends on both of them.
+#
+# What this shape still cannot prevent, said plainly rather than left to be
+# discovered: npm can accept a publish and PyPI can then reject one, in the same
+# run, after preflight passed. Nothing short of a staging registry fixes that.
+# What the workflow does about it is refuse to create the GitHub release, so the
+# failure is loud and the tag is not blessed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver to release, without a leading v (e.g. 0.2.0). Must already match every manifest in the tree.'
+        required: true
+        type: string
+      publish:
+        description: 'Publish to npm and PyPI. Leave false to rehearse.'
+        required: true
+        type: boolean
+        default: false
+
+# Read-only by default; each job asks for exactly what it needs.
+permissions:
+  contents: read
+
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+  DO_NOT_TRACK: 1
+
+concurrency:
+  # Never two releases at once. Never cancelled, either: a half-run release is
+  # the state this whole file is arranged to avoid.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Decides. Touches nothing.
+  # ───────────────────────────────────────────────────────────────────────────
+  preflight:
+    name: Preflight — versions, notes, credentials
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: "Versions and release notes agree with the requested version"
+        # Checks, in one pass and reporting all of them: the version is semver;
+        # every package.json, the pyproject and the plugin's Config.PLUGIN_VERSION
+        # carry it; CHANGELOG.md has a section for it; and `.changes/` holds at
+        # least one entry that the section accounts for.
+        run: npm run release:check -- --version "${{ inputs.version }}"
+
+      - name: "Every credential this release needs is present, or none of it runs"
+        if: ${{ inputs.publish }}
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PYPI_TRUSTED_PUBLISHER_CONFIGURED: ${{ vars.PYPI_TRUSTED_PUBLISHER_CONFIGURED }}
+        run: |
+          missing=()
+          [ -n "$NPM_TOKEN" ] || missing+=("secrets.NPM_TOKEN — an npm automation token with publish rights on the @forgebridge scope")
+          [ "$PYPI_TRUSTED_PUBLISHER_CONFIGURED" = "true" ] || missing+=("vars.PYPI_TRUSTED_PUBLISHER_CONFIGURED — set it to \"true\" once a PyPI Trusted Publisher for this repository, this workflow file and the \"pypi\" environment exists")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::This release cannot complete, so none of it will start. Missing:"
+            for item in "${missing[@]}"; do echo "::error::  - $item"; done
+            echo "::error::Add all of them and run again. Publishing to one registry and failing on the other is the outcome this check exists to prevent."
+            exit 1
+          fi
+          echo "Both configured."
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Builds every artefact and its checksum. Still publishes nothing.
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build — tarballs, wheels, the plugin rbxm and its checksum
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - run: npm ci
+
+      - name: Build every workspace
+        run: npm run build
+
+      - name: Pack the publishable npm workspaces
+        # `npm pack` produces exactly what `npm publish` would upload, so the
+        # tarball a human inspects in a rehearsal is the artefact a real run
+        # sends. Private workspaces (`apps/*`) are excluded by npm itself.
+        run: |
+          mkdir -p dist/npm
+          npm pack --workspaces --pack-destination dist/npm
+
+      - name: Build the Python distribution
+        # Pinned, for the reason `.github/workflows/ci.yml` pins everything else:
+        # a build backend that floats is a supply chain nobody chose.
+        run: |
+          python -m pip install build==1.2.2.post1
+          python -m build --sdist --wheel --outdir dist/pypi packages/sdk-python
+
+      - name: Install the pinned Rojo and build the plugin
+        # The version comes out of `aftman.toml` rather than being written here.
+        # That file's own comment says it should be "the one M49's release job
+        # should read rather than choose again", and this is that job.
+        #
+        # TODO(M49): the downloaded archive's checksum is not verified. Pinning
+        # it needs a value recorded from a download somebody verified, and a
+        # number invented here would be worse than the honest gap — it would
+        # look like a check.
+        run: |
+          version="$(sed -n 's/^rojo *= *"rojo-rbx\/rojo@\([0-9][0-9.]*\)"/\1/p' aftman.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::could not read the pinned Rojo version from aftman.toml"
+            exit 1
+          fi
+          echo "Rojo $version, as pinned in aftman.toml"
+          curl -fsSL -o rojo.zip \
+            "https://github.com/rojo-rbx/rojo/releases/download/v${version}/rojo-${version}-linux-x86_64.zip"
+          unzip -q rojo.zip -d "$RUNNER_TEMP/rojo"
+          chmod +x "$RUNNER_TEMP/rojo/rojo"
+          mkdir -p dist/plugin
+          (cd plugin && "$RUNNER_TEMP/rojo/rojo" build --output ../dist/plugin/ForgeBridge.rbxm)
+
+      # The plugin version is NOT checked again here. `release:check` in the
+      # preflight job already reads the constant out of the plugin's Config
+      # module along with every package manifest and the pyproject, and refuses
+      # a release where any of them disagrees with the requested version — so a
+      # second check in this job would be a second place to keep in step for no
+      # extra coverage.
+      #
+      # It is checked rather than rewritten, which is a departure from what
+      # plugin/BUILD.md asks release engineering for. A build step that edits
+      # the tree produces an artefact that differs from the commit it claims to
+      # be, and the version bump belongs in the same commit as the changes it
+      # describes. Edit it there; this job will tell you if you forgot.
+      #
+      # This step is also deliberately free of the string that names the
+      # plugin's language: `scripts/__tests__/docs-claims.test.ts` asserts that
+      # no workflow's *executable* body contains it, which is what lets rule D2
+      # keep failing any document that claims the 208 plugin tests run in CI.
+      # They do not (TODO(M41)), and a workflow line mentioning the language
+      # would quietly make that claim checkable-as-true.
+
+      - name: Bill of materials
+        # npm's own generator, for the reason `.github/workflows/sbom.yml` gives
+        # for choosing it: the last step of a supply-chain story should not add a
+        # supply chain of its own.
+        #
+        # This is the half `THREAT-MODEL.md` T6 records as owed — the generation
+        # in `sbom.yml` runs on every push and the *attachment* never has, because
+        # a release created with the default GITHUB_TOKEN raises no `release`
+        # event for that workflow to hear. Producing the documents here and
+        # attaching them below is the fix that does not depend on an event
+        # GitHub will not send.
+        run: |
+          mkdir -p dist/sbom
+          npm sbom --sbom-format cyclonedx --omit dev > dist/sbom/cyclonedx.json
+          npm sbom --sbom-format spdx --omit dev > dist/sbom/spdx.json
+          for file in dist/sbom/*.json; do
+            # A document listing no components is a document that would pass a
+            # reviewer's glance and answer no question anybody has.
+            components="$(node -e "const d=require('./$file');process.stdout.write(String((d.components??d.packages??[]).length))")"
+            if [ "$components" -lt 1 ]; then
+              echo "::error::$file lists no components"
+              exit 1
+            fi
+            echo "$file: $components components"
+          done
+
+      - name: Extract this version's release notes
+        # The section `release:check` already required CHANGELOG.md to have.
+        # Extracted rather than written again in the release job, so the notes
+        # a reader finds on the tag are the notes in the tree.
+        run: npm run release:notes -- --version "${{ inputs.version }}" --out dist/RELEASE-NOTES.md
+
+      - name: Checksums
+        # THREAT-MODEL T6: the plugin runs inside Studio with the user's
+        # session, so the .rbxm is checksummed and the checksum is published
+        # with the release. Every other artefact is covered by the same file
+        # because there is no reason for it not to be.
+        run: |
+          (cd dist && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-artefacts
+          path: dist/
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # The two publishes. Both gated on `publish`, both dependent on preflight.
+  # ───────────────────────────────────────────────────────────────────────────
+  publish-npm:
+    name: Publish — npm, with provenance
+    needs: [preflight, build]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      # Provenance is an OIDC-signed statement that this workflow, at this
+      # commit, produced this tarball. Without it, "published by the project" is
+      # a claim resting on whoever holds the token.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --workspaces --provenance --access public
+
+  publish-pypi:
+    name: Publish — PyPI, via Trusted Publishing
+    needs: [preflight, build]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      # No API token: PyPI Trusted Publishing exchanges this OIDC token for a
+      # short-lived one, which is also what makes PEP 740 attestations possible.
+      # A long-lived token in a repository secret is the credential this avoids.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artefacts
+          path: dist
+      - name: Publish the distribution built above
+        # The same files the build job produced and checksummed. Rebuilding here
+        # would publish an artefact nothing had checksummed.
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: dist/pypi
+          attestations: true
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Announces the version — only once both registries have accepted it.
+  # ───────────────────────────────────────────────────────────────────────────
+  github-release:
+    name: GitHub release — the plugin and its checksums
+    needs: [preflight, build, publish-npm, publish-pypi]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artefacts
+          path: dist
+
+      - name: Attest the plugin build
+        uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: dist/plugin/ForgeBridge.rbxm
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          tag_name: v${{ inputs.version }}
+          # The notes are the CHANGELOG section `release:check` already required
+          # to exist, extracted rather than written again here.
+          body_path: dist/RELEASE-NOTES.md
+          files: |
+            dist/plugin/ForgeBridge.rbxm
+            dist/sbom/cyclonedx.json
+            dist/sbom/spdx.json
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
