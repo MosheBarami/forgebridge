@@ -393,6 +393,52 @@ return function(t)
 		t.truthy(font.auto)
 	end)
 
+	t.test("an Enabled write starts dormant code just as a Disabled write does", function()
+		-- The hole this closes. `ACTIVATING_PROPERTIES` in
+		-- `packages/protocol/src/operation.ts` names three properties and this
+		-- plugin's restatement of that list named two, so `Enabled = true` on a
+		-- Script sitting inside the auto-apply scope started it with no analysis and
+		-- no human — through a rule written specifically to stop exactly that.
+		for _, value in { { t = "Bool", v = true }, { t = "String", v = "true" }, { t = "Nil" } } do
+			local decision = Approve.evaluate(
+				set({
+					{ op = "setProperty", path = "ServerScriptService.Shop.Handler", property = "Enabled", value = value },
+				}),
+				permissive,
+				Path.isWithin
+			)
+			t.falsy(decision.auto, string.format("an Enabled of tag %s must not auto-apply", tostring(value.t)))
+			t.truthy(blockedBy(decision, "Enabled"), "the blocker names the property responsible")
+		end
+
+		local missing = Approve.evaluate(
+			set({ { op = "setProperty", path = "ServerScriptService.Shop.Handler", property = "Enabled" } }),
+			permissive,
+			Path.isWithin
+		)
+		t.falsy(missing.auto, "an absent value is the least readable of all")
+	end)
+
+	t.test("switching one off still auto-applies — the rule must not become noise", function()
+		-- The control, and the same sharpest-available one the Disabled rule has:
+		-- `Enabled = false` is the mirror of `Disabled = true`. After it the script
+		-- is not running, so it cannot be the operation the rule above is for, and a
+		-- rule that fires here teaches people to click through the one that matters.
+		local stopped = Approve.evaluate(
+			set({
+				{
+					op = "setProperty",
+					path = "ServerScriptService.Shop.Handler",
+					property = "Enabled",
+					value = { t = "Bool", v = false },
+				},
+			}),
+			permissive,
+			Path.isWithin
+		)
+		t.truthy(stopped.auto, "turning a script off can never start code")
+	end)
+
 	t.test("a Disabled value this plugin cannot read blocks rather than passes", function()
 		-- Only a literal Bool true is demonstrably a stop. A string that spells a
 		-- boolean, a Nil, a number, a value that never arrived: each is a shape this

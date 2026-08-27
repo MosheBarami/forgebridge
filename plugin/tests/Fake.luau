@@ -239,30 +239,222 @@ function Fake.folders(root, path: string)
 end
 
 --[[
-	A deterministic JSON-ish encoder. The journal only needs the serialised form to
-	be a stable string it can hand back later; the tests only need it to be
-	comparable.
+	Everything this fake holds, as plain comparable data.
+
+	The instrument the rollback round-trip is measured with: encode this before an
+	apply and again after the reversal, and the two strings are either equal or the
+	journal did not do what ADR-012 says it does. Reading the backing table rather
+	than a list of property names is the point — a snapshot that only looked at
+	properties the test remembered to name would pass over exactly the property a
+	restore dropped.
+
+	`Parent` is skipped because the nesting already carries it, and children are
+	sorted by name because neither Roblox nor the journal promises child order: a
+	restored subtree is appended to its parent, and asserting on the position would
+	be asserting on something no part of the system undertakes to preserve.
 ]]
-function Fake.encodeJson(value: any): string
-	local function encode(node: any): string
-		local kind = type(node)
-		if kind == "table" then
-			local keys = {}
-			for key in node do
-				table.insert(keys, tostring(key))
-			end
-			table.sort(keys)
-			local parts = {}
-			for _, key in keys do
-				table.insert(parts, string.format("%q:%s", key, encode(node[key] or node[tonumber(key)])))
-			end
-			return "{" .. table.concat(parts, ",") .. "}"
-		elseif kind == "string" then
-			return string.format("%q", node)
+function Fake.describe(proxy): any
+	local self = data[proxy]
+	local node = {
+		className = self.fields.ClassName,
+		name = self.fields.Name,
+		properties = {},
+		attributes = {},
+		children = {},
+	}
+	for key, value in self.fields do
+		if key ~= "Parent" and key ~= "ClassName" and key ~= "Name" then
+			node.properties[key] = value
 		end
-		return tostring(node)
 	end
-	return encode(value)
+	for key, value in self.attributes do
+		node.attributes[key] = value
+	end
+	local children = table.clone(self.children)
+	table.sort(children, function(left, right)
+		return data[left].fields.Name < data[right].fields.Name
+	end)
+	for _, child in children do
+		table.insert(node.children, Fake.describe(child))
+	end
+	return node
+end
+
+--[[
+	A deterministic JSON codec.
+
+	Real JSON rather than the "JSON-ish" string this used to produce, and the
+	reason is `plugin/tests/RollbackSpec.luau`: a `restoreSubtree` inverse carries
+	the deleted subtree as an opaque serialised blob, and the rollback executor has
+	to parse that blob back into the structure `Journal.describeSubtree` wrote. A
+	codec whose output its own reader could not consume would make the one test
+	that matters — delete a subtree, reverse it, find the subtree again —
+	impossible to write, and that test is what the whole journal exists for.
+
+	Deterministic because a serialised blob that changed between two encodings of
+	the same tree would make any assertion on it a coin toss: object keys are
+	sorted.
+
+	It is not `HttpService:JSONEncode`. It handles what the journal actually puts
+	in a described subtree — nested tables, strings, numbers, booleans — and
+	nothing else, and it says so by erroring rather than by emitting something a
+	reader would misread.
+]]
+local ESCAPES = {
+	['"'] = '\\"',
+	["\\"] = "\\\\",
+	["\n"] = "\\n",
+	["\r"] = "\\r",
+	["\t"] = "\\t",
+}
+
+local function encodeString(value: string): string
+	local escaped = string.gsub(value, '[%c"\\]', function(character)
+		return ESCAPES[character] or string.format("\\u%04x", string.byte(character))
+	end)
+	return '"' .. escaped .. '"'
+end
+
+function Fake.encodeJson(value: any): string
+	local kind = type(value)
+	if kind == "string" then
+		return encodeString(value)
+	elseif kind == "number" or kind == "boolean" then
+		return tostring(value)
+	elseif kind == "nil" then
+		return "null"
+	elseif kind ~= "table" then
+		error(string.format("this codec cannot encode a %s", kind), 0)
+	end
+
+	-- An empty table encodes as an array, which is what HttpService does, and it
+	-- decodes back to an empty table — indistinguishable from an empty object in
+	-- Luau, which is why the ambiguity costs nothing here.
+	if #value > 0 or next(value) == nil then
+		local parts = {}
+		for _, item in value do
+			table.insert(parts, Fake.encodeJson(item))
+		end
+		return "[" .. table.concat(parts, ",") .. "]"
+	end
+
+	local keys = {}
+	for key in value do
+		table.insert(keys, tostring(key))
+	end
+	table.sort(keys)
+	local parts = {}
+	for _, key in keys do
+		table.insert(parts, encodeString(key) .. ":" .. Fake.encodeJson(value[key]))
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
+end
+
+function Fake.decodeJson(text: string): any
+	local at = 1
+
+	local function skip()
+		while at <= #text and string.find(string.sub(text, at, at), "%s") do
+			at += 1
+		end
+	end
+
+	local parseValue
+
+	local function parseString(): string
+		at += 1 -- the opening quote
+		local out = {}
+		while at <= #text do
+			local character = string.sub(text, at, at)
+			if character == '"' then
+				at += 1
+				return table.concat(out)
+			elseif character == "\\" then
+				local escape = string.sub(text, at + 1, at + 1)
+				at += 2
+				if escape == "n" then
+					table.insert(out, "\n")
+				elseif escape == "r" then
+					table.insert(out, "\r")
+				elseif escape == "t" then
+					table.insert(out, "\t")
+				elseif escape == "u" then
+					table.insert(out, string.char(tonumber(string.sub(text, at, at + 3), 16) or 0))
+					at += 4
+				else
+					table.insert(out, escape)
+				end
+			else
+				table.insert(out, character)
+				at += 1
+			end
+		end
+		error("unterminated string", 0)
+	end
+
+	function parseValue(): any
+		skip()
+		local character = string.sub(text, at, at)
+		if character == '"' then
+			return parseString()
+		elseif character == "{" then
+			at += 1
+			local object = {}
+			skip()
+			if string.sub(text, at, at) == "}" then
+				at += 1
+				return object
+			end
+			while true do
+				skip()
+				local key = parseString()
+				skip()
+				at += 1 -- the colon
+				object[key] = parseValue()
+				skip()
+				local delimiter = string.sub(text, at, at)
+				at += 1
+				if delimiter == "}" then
+					return object
+				end
+			end
+		elseif character == "[" then
+			at += 1
+			local array = {}
+			skip()
+			if string.sub(text, at, at) == "]" then
+				at += 1
+				return array
+			end
+			while true do
+				table.insert(array, parseValue())
+				skip()
+				local delimiter = string.sub(text, at, at)
+				at += 1
+				if delimiter == "]" then
+					return array
+				end
+			end
+		elseif string.sub(text, at, at + 3) == "true" then
+			at += 4
+			return true
+		elseif string.sub(text, at, at + 4) == "false" then
+			at += 5
+			return false
+		elseif string.sub(text, at, at + 3) == "null" then
+			at += 4
+			return nil
+		end
+
+		local literal = string.match(text, "^%-?%d+%.?%d*[eE]?[%-+]?%d*", at)
+		if not literal then
+			error(string.format("unreadable JSON at character %d", at), 0)
+		end
+		at += #literal
+		return tonumber(literal)
+	end
+
+	return parseValue()
 end
 
 return Fake

@@ -434,9 +434,13 @@ return function(t)
 
 	t.test("accepts a delivery that verifies under the paired key", function()
 		local transport, key = pairedTransport()
-		local changeSet, reason = transport:unwrap(sealed(key, 1, "{}"))
+		-- `unwrap` hands back the tagged `DeliveryPayload`, not the ChangeSet
+		-- inside it: the poll carries rollbacks too, and a caller given a bare
+		-- ChangeSet has no way to tell which kind it was handed.
+		local payload, reason = transport:unwrap(sealed(key, 1, "{}"))
 		t.isNil(reason)
-		t.equal(changeSet.id, "cs")
+		t.equal(payload.kind, "changeset")
+		t.equal(payload.changeSet.id, "cs")
 		t.equal(transport._cursor, 1)
 	end)
 

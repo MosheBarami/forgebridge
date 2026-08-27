@@ -31,11 +31,16 @@ local Journal = {}
 	skipped. Structure, names, attributes, tags and script sources are always
 	captured; engine properties are captured only if they are on this list.
 
-	TODO(M11): full-fidelity restore ("rollback restores the prior tree
+	TODO(M15): full-fidelity restore ("rollback restores the prior tree
 	byte-for-byte") needs a property table generated from a Roblox API dump and
-	shipped with the plugin. Until then a durable restore of a delete rebuilds the
-	tree and these properties, and the README says so plainly.
-	Owner: plugin (this file) + packages/core journal.
+	shipped with the plugin. Retargeted from M11 rather than deleted: M11 closed
+	the part that was missing on the wire — the inverses now leave this session and
+	a reversal is reported back — and this is the part that was never on the wire
+	to begin with. Until it lands, a durable restore of a delete rebuilds the tree,
+	its names, attributes, tags, script sources and these properties, and nothing
+	else; `plugin/README.md` says exactly that rather than letting the word
+	"rollback" imply more than the record holds.
+	Owner: plugin (this file).
 ]]
 local CAPTURED_PROPERTIES = table.freeze({
 	-- BasePart
@@ -290,10 +295,13 @@ function Journal.capture(operation: any, target: any, options: any?): (any?, str
 		-- Read as "the instance now at `path` belongs back at `from`". After the
 		-- move the instance lives at operation.to, so that is where a rollback has
 		-- to look for it; `from` is where it came from and where it goes back.
-		-- TODO(M11): pin this reading in the conformance test against the core's
-		-- rollback executor — the union alone does not disambiguate it, and a
-		-- wrong reading silently misplaces instances instead of erroring.
-		-- Owner: packages/core rollback + plugin.
+		-- Pinned at both ends now rather than left to the reader: `assertInverts`
+		-- in `packages/daemon/src/rollback.ts` refuses a `moveBack` whose `path` is
+		-- not the move's destination, and `Rollback:_moveBack` resolves the
+		-- instance at `path` and puts it at `from`. The union alone does not
+		-- disambiguate it, and a wrong reading silently misplaces instances instead
+		-- of erroring, so the round-trip test in `plugin/tests/RollbackSpec.luau`
+		-- asserts the instance ends up where it started.
 		return {
 			inverse = { inverse = "moveBack", path = operation.to, from = operation.path },
 		},
@@ -349,15 +357,75 @@ function Journal.capture(operation: any, target: any, options: any?): (any?, str
 end
 
 --[[
+	The wire form of an apply's journal entry — `JournalEntry` in
+	`packages/protocol/src/apply.ts`, exactly.
+
+	This is how the inverses leave the session that captured them (M11). Before it
+	existed they never did: `ApplyResult` carries a `journalId` and nothing else,
+	and it has no metadata field to smuggle anything through — "if a field is not
+	in the Zod schema it does not exist" — so closing Studio was the end of the
+	road back from an apply. `POST /v1/journal/:id/entry` is the route they take.
+
+	Built field by field rather than by handing the applier's entry over wholesale,
+	and that is the point of the function. The applier's entry also carries
+	`artefacts`, which are live Instances held for the session's own undo. They
+	cannot be serialised, and a JSON encoder handed one either throws — losing the
+	upload, and with it the only durable route back — or silently writes something
+	meaningless. Naming the fields is what keeps a field added to the local entry
+	from leaking onto the wire by default.
+
+	`projectId` is not on the local entry at all: it belongs to the link, not to
+	the apply, so the caller passes the one this link is bound to.
+]]
+function Journal.wireEntry(entry: any, projectId: string): (any?, string?)
+	if type(entry) ~= "table" then
+		return nil, "there is no journal entry to upload"
+	end
+	if type(projectId) ~= "string" or projectId == "" then
+		return nil, "this link has no project id, so its journal entry has nowhere to attach"
+	end
+	if type(entry.applied) ~= "table" or #entry.applied == 0 then
+		-- An apply that changed nothing has no inverses and nothing to reverse; the
+		-- daemon refuses such an entry (`planRollback`), so refusing here keeps the
+		-- plugin from reporting an upload failure for a case that is not a failure.
+		return nil, "this apply changed nothing, so it has no inverses to upload"
+	end
+	if #entry.applied ~= #(entry.inverses or {}) then
+		return nil,
+			string.format(
+				"this apply recorded %d operations but %d inverses; the pairing is positional and cannot be uploaded broken",
+				#entry.applied,
+				#(entry.inverses or {})
+			)
+	end
+
+	return {
+		id = entry.id,
+		projectId = projectId,
+		changeSetId = entry.changeSetId,
+		summary = entry.summary,
+		applied = entry.applied,
+		inverses = entry.inverses,
+		versionBefore = entry.versionBefore,
+		versionAfter = entry.versionAfter,
+		appliedAt = entry.appliedAt,
+		-- Deliberately absent, which the schema reads as null: `JournalEntry
+		-- .rolledBackAt` defaults to null. The plugin uploads the inverses
+		-- immediately after the apply, before any reversal exists, and a value here
+		-- would be a consumer claiming a rollback the daemon never dispatched.
+		-- (Luau has no way to put an explicit JSON null in a table anyway — a key
+		-- assigned nil is a key that is not there — so the default is what makes
+		-- this expressible at all.)
+	},
+		nil
+end
+
+--[[
 	A session-scoped record of what this plugin applied.
 
-	TODO(M11): ApplyResult carries a journalId but no inverse operations, and it
-	has no metadata field to smuggle them through — "if a field is not in the Zod
-	schema it does not exist". So the inverses computed here currently never reach
-	the core, and rollback works only inside the Studio session that applied the
-	change. Settling how inverses travel (an additive ApplyResult field or a
-	dedicated endpoint) is protocol + core work.
-	Owner: packages/protocol + packages/core journal.
+	Still session-scoped, and still worth having now that the inverses also travel:
+	it holds the live clones (`artefacts`) that make an in-session undo of a delete
+	lossless, which the durable record deliberately is not.
 ]]
 local Session = {}
 Session.__index = Session

@@ -10,8 +10,9 @@
 	(path resolution, value decoding, inverse capture, the approval policy) would
 	have no tests at all. Composition lives here so those stay testable.
 
-	The loop is: pair → poll → diff → approve → apply → report. The plugin calls
-	exactly four endpoints, and nothing else (PROTOCOL.md).
+	The loop is: pair → poll → diff → approve → apply → report → journal, and a
+	rollback the user asks for arrives back down the same poll. The plugin calls
+	exactly six endpoints, and nothing else (PROTOCOL.md).
 ]]
 
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
@@ -27,6 +28,7 @@ local Diff = require(script.Diff)
 local Journal = require(script.Journal)
 local Pairing = require(script.Pairing)
 local Path = require(script.Path)
+local Rollback = require(script.Rollback)
 local Transport = require(script.Transport)
 local Value = require(script.Value)
 
@@ -123,6 +125,21 @@ local applier = Apply.new({
 	maxOperations = Config.LIMITS.MAX_OPERATIONS,
 })
 
+--[[
+	The rollback executor, built on the applier rather than beside it.
+
+	The applier owns the tree version, and two owners of that number is the defect
+	this avoids: a reversal that moved its own copy would leave the next
+	ChangeSet's `baseVersion` check comparing against a version the applier had
+	never heard of.
+]]
+local reverser = Rollback.new({
+	applier = applier,
+	decodeJson = function(text: string)
+		return HttpService:JSONDecode(text)
+	end,
+})
+
 local diffContext = {
 	resolve = function(path: string)
 		return Path.resolve(game, path)
@@ -183,6 +200,10 @@ local pending: any = nil
 local widget: any
 local connect: () -> ()
 local pairAndConnect: (string?) -> ()
+-- Forward-declared here with the other mutually-recursive parts rather than
+-- beside `applyChangeSet`: `rollback` also has to hand the queue back on when a
+-- reversal finishes, and it is defined above that point.
+local presentNext: () -> ()
 
 local function log(message: string)
 	print(string.format("[ForgeBridge] %s", message))
@@ -203,6 +224,83 @@ local function report(result: any)
 	end
 end
 
+--[[
+	Hand the inverses to the daemon, so a rollback can outlive this Studio session.
+
+	Posted right after the ApplyResult and never before it: the daemon attaches
+	the entry to the apply it already witnessed, and refuses one for an apply it
+	has not seen.
+
+	A failure here is reported plainly rather than swallowed, because of what it
+	costs. The change is already in the place; what is missing is the durable route
+	back from it. The session journal still holds the inverses, so an in-session
+	undo still works — and that is exactly the distinction the message draws, since
+	a user who closes Studio believing a rollback is available would find out only
+	when they needed it.
+]]
+local function uploadJournal(entry: any)
+	if not transport then
+		return
+	end
+	local wire, reason = Journal.wireEntry(entry, state.projectId)
+	if not wire then
+		-- Not every refusal is a fault: an apply that changed nothing has no
+		-- inverses, and there is nothing to say about that.
+		if entry.applied and #entry.applied > 0 then
+			log(string.format("the inverses for this apply could not be prepared: %s", tostring(reason)))
+		end
+		return
+	end
+	local ok, err = transport:postJournalEntry(wire)
+	if not ok then
+		log(
+			string.format(
+				"applied, but the inverse operations could not be uploaded: %s — this apply can still be undone in this Studio session, and not after it closes",
+				tostring(err)
+			)
+		)
+	end
+end
+
+--[[
+	Replay a rollback the user asked for, and report how far it got.
+
+	Runs on the poll thread like an apply does, so the link is quiet while the tree
+	is being changed and the next delivery is built against a version this plugin
+	has already reported.
+]]
+local function rollback(delivery: any)
+	local result, notes = reverser:execute(delivery)
+	local summary = Rollback.summarise(result)
+	local fully = Rollback.isFullyReversed(result)
+
+	log(string.format("rollback of %s — %s", tostring(delivery.changeSetId), summary))
+	for _, note in notes do
+		log(note)
+	end
+	if not fully then
+		for _, outcome in result.outcomes do
+			if not outcome.ok then
+				log(string.format("  inverse %d: %s", outcome.index, tostring(outcome.error)))
+			end
+		end
+	end
+
+	widget:report(string.format("Rollback\n%s", summary), not fully)
+
+	if transport then
+		local ok, reason = transport:postRollbackResult(result)
+		if not ok then
+			-- The reversal already happened. Saying so plainly matters more here
+			-- than anywhere else: without this report the producer's journal stays
+			-- at "requested" forever, and a user reading that would try again
+			-- against inverses that are already spent.
+			log(string.format("the rollback result could not be reported: %s", tostring(reason)))
+		end
+	end
+	presentNext()
+end
+
 local function refusalResult(changeSet: any, reason: string): any
 	local outcomes = {}
 	for index = 1, #(changeSet.operations or {}) do
@@ -217,8 +315,6 @@ local function refusalResult(changeSet: any, reason: string): any
 		pluginVersion = Config.PLUGIN_VERSION,
 	}
 end
-
-local presentNext: () -> ()
 
 local function applyChangeSet(changeSet: any)
 	local result, entry = applier:execute(changeSet)
@@ -243,6 +339,7 @@ local function applyChangeSet(changeSet: any)
 		not fully
 	)
 	report(result)
+	uploadJournal(entry)
 	presentNext()
 end
 
@@ -521,6 +618,7 @@ connect = function()
 	-- Applying runs on the poll thread, so the link is quiet while a ChangeSet is
 	-- being applied and reported. That is the ordering we want: the next delivery
 	-- is built against a version this plugin has already reported.
+	transport.onRollback = rollback
 	transport.onChangeSet = function(changeSet)
 		if #queue >= 10 then
 			log("dropping a delivery: ten ChangeSets are already waiting for review")

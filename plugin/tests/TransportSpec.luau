@@ -20,6 +20,17 @@ local function newTransport(baseUrl)
 				error("not json")
 			end
 			if text == "{rollback}" then
+				return {
+					kind = "rollback",
+					journalId = "j",
+					changeSetId = "cs",
+					expectedVersion = 4,
+					restoresToVersion = 3,
+					steps = { { index = 0, inverse = { inverse = "deleteCreated", path = "Workspace.Door" } } },
+				}
+			end
+			if text == "{rollback-no-steps}" then
+				-- The pre-M11 shape: the ids and the version, and no inverses at all.
 				return { kind = "rollback", journalId = "j", changeSetId = "cs", expectedVersion = 4 }
 			end
 			if text == "{untagged}" then
@@ -194,9 +205,9 @@ return function(t)
 
 	t.test("accepts a fresh delivery and advances the cursor", function()
 		local transport = newTransport("http://127.0.0.1:9000")
-		local changeSet, err = transport:unwrap({ linkId = "l", nonce = 7, payload = "{}", encrypted = false })
+		local payload, err = transport:unwrap({ linkId = "l", nonce = 7, payload = "{}", encrypted = false })
 		t.isNil(err)
-		t.truthy(changeSet)
+		t.equal(payload.kind, "changeset")
 		t.equal(transport._cursor, 7)
 	end)
 
@@ -365,14 +376,68 @@ return function(t)
 
 	t.suite("Transport — delivery envelopes, continued")
 
-	t.test("refuses a rollback it cannot execute, and does not skip past it", function()
+	t.test("hands a rollback delivery through with its inverses attached", function()
 		local transport = newTransport("http://127.0.0.1:9000")
-		local changeSet, err = transport:unwrap({ nonce = 5, payload = "{rollback}" })
-		t.isNil(changeSet)
-		t.contains(err, "M11")
-		-- The cursor must not move: a rollback silently skipped is a user watching
-		-- for a restore that will never come.
+		transport.onRollback = function() end
+		local payload, err = transport:unwrap({ nonce = 5, payload = "{rollback}" })
+		t.isNil(err)
+		t.equal(payload.kind, "rollback")
+		t.equal(payload.restoresToVersion, 3)
+		t.equal(#payload.steps, 1)
+		t.equal(transport._cursor, 5, "an executable rollback advances the cursor like any other delivery")
+	end)
+
+	t.test("refuses a rollback this build has no executor for, and does not skip past it", function()
+		-- Fail closed. The cursor must not move: a rollback silently skipped is a
+		-- user watching for a restore that will never come.
+		local transport = newTransport("http://127.0.0.1:9000")
+		local payload, err = transport:unwrap({ nonce = 5, payload = "{rollback}" })
+		t.isNil(payload)
+		t.contains(err, "no executor")
 		t.equal(transport._cursor, 0)
+	end)
+
+	t.test("refuses a rollback carrying no inverse operations rather than reporting it reversed", function()
+		-- An older daemon sends the ids and nothing else. Executing that as "a
+		-- reversal with no work to do" would report a clean rollback for a tree
+		-- nobody touched, which is the worst answer available here.
+		local transport = newTransport("http://127.0.0.1:9000")
+		transport.onRollback = function()
+			error("this must never be reached")
+		end
+		local payload, err = transport:unwrap({ nonce = 5, payload = "{rollback-no-steps}" })
+		t.isNil(payload)
+		t.contains(err, "no inverse operations")
+		t.equal(transport._cursor, 0)
+	end)
+
+	t.test("a rollback delivery goes to the rollback handler, not the ChangeSet handler", function()
+		-- The control for the dispatch: one poll loop now carries two kinds of
+		-- work, and sending a rollback to the applier would apply the inverses as
+		-- if they were a proposed change.
+		local transport = newTransport("http://127.0.0.1:9000")
+		local toApply, toRollback = 0, 0
+		transport.onChangeSet = function()
+			toApply += 1
+		end
+		transport.onRollback = function()
+			toRollback += 1
+		end
+
+		local rollback = transport:unwrap({ nonce = 5, payload = "{rollback}" })
+		local changeSet = transport:unwrap({ nonce = 6, payload = "{}" })
+		local dispatch = function(payload)
+			if payload.kind == "rollback" then
+				transport.onRollback(payload)
+			else
+				transport.onChangeSet(payload.changeSet)
+			end
+		end
+		dispatch(rollback)
+		dispatch(changeSet)
+
+		t.equal(toApply, 1)
+		t.equal(toRollback, 1)
 	end)
 
 	t.test("refuses an untagged payload rather than treating it as a ChangeSet", function()

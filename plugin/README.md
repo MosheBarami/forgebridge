@@ -4,11 +4,15 @@ The consumer end of the bridge. It polls a ForgeBridge daemon (or relay) for Cha
 shows you what each one would do, waits for your approval, applies the operations one by
 one, and reports back exactly how far it got.
 
-It calls four endpoints and nothing else: `POST /v1/link/pair` once, then
-`GET /v1/link/poll`, `POST /v1/changesets/:id/apply-result`, and `POST /v1/output`. That
-surface is small on purpose — a Studio plugin is the hardest piece of this system to
-update once it is in the field, so it should have as little in it as possible. Diffing
-for the web UI, approval records and rollback all live on the other side of the link.
+It calls six endpoints and nothing else: `POST /v1/link/pair` once, then
+`GET /v1/link/poll`, `POST /v1/changesets/:id/apply-result`,
+`POST /v1/journal/:id/entry`, `POST /v1/journal/:id/rollback-result` and
+`POST /v1/output`. The two journal routes are M11's: the first hands the inverse
+operations to the daemon so a rollback can outlive this Studio session, the second reports
+how far a reversal got. That surface is small on purpose — a Studio plugin is the hardest
+piece of this system to update once it is in the field, so it should have as little in it
+as possible. Diffing for the web UI and the approval record live on the other side of the
+link, and so does the decision to roll back; what happens here is the replay.
 
 ## Installing it
 
@@ -124,17 +128,42 @@ machine can open a socket to `127.0.0.1` and the MAC is what separates the daemo
 paired with from everything else that found the port. X25519 and an AEAD are M19, behind
 an external review.
 
-**Rollback is session-scoped.** The plugin captures the inverse of every operation before
-it runs, but `ApplyResult` has nowhere to put those inverses (TODO(M11) in
-`src/Journal.luau`), so they currently live only in the Studio session that applied the
-change. Studio's own undo works too — every apply is one `ChangeHistoryService`
-recording, so <kbd>Ctrl</kbd>+<kbd>Z</kbd> takes the whole ChangeSet back.
-
 **A restored deletion is rebuilt, not resurrected.** Luau has no property reflection, so
 the durable record of a deleted subtree captures its structure, names, attributes, tags,
 script sources and a list of common engine properties — not every property of every
 class. The in-session undo uses a live clone and loses nothing; the durable record is
-honest about being a rebuild (TODO(M11)).
+honest about being a rebuild. That limit is `TODO(M15)` in `src/Journal.luau`, and
+`tests/RollbackSpec.luau` pins it in both directions: a property on the captured list
+comes back, one off it does not.
+
+## Rollback
+
+**It outlives the session (M11).** The plugin captures the inverse of every operation
+before it runs, and after each apply it uploads those inverses to
+`POST /v1/journal/:id/entry`. A reversal the user asks for arrives back down the same
+poll carrying the inverses to replay, `src/Rollback.luau` replays them last-first — undo
+the last operation first, or a create-then-set pair deletes the instance before restoring
+a property on it — and `POST /v1/journal/:id/rollback-result` reports how far it got.
+Closing Studio is no longer the end of the road back from an apply.
+
+Studio's own undo works too, and now covers both directions: every apply and every
+rollback is one `ChangeHistoryService` recording, so <kbd>Ctrl</kbd>+<kbd>Z</kbd> takes the
+whole thing back. A reversal Studio will not open a waypoint for is refused outright rather
+than performed without one — the inverses are spent once replayed, so a rollback with no
+waypoint would have no recovery path in either direction.
+
+**A partial reversal is reported as a partial reversal.** If some inverses replay and
+others do not, the panel and the report both say so, per inverse. The place is then in a
+state neither the apply nor the rollback describes and the inverses that would have
+finished the job are spent, so it is never rounded up to "rolled back" — and the reported
+tree version is a fresh one rather than the pre-apply version, because the pre-apply tree
+is not where the place is.
+
+**Two things it refuses rather than guesses at.** A delivery whose steps are not in replay
+order is refused instead of re-sorted, because a consumer that quietly corrected the order
+would hide a daemon that had stopped producing it. A delivery carrying no inverses at all
+— the shape a pre-M11 daemon sends — is refused instead of executed as a reversal with no
+work to do, which would report a clean rollback for a tree nobody touched.
 
 ## Approval
 
@@ -226,6 +255,13 @@ refusing a tag it does not recognise, inverse capture for every operation kind, 
 applies being reported as partial, the transport stopping dead on `426`, replayed
 deliveries being dropped, and `deleteInstance` never being auto-applied.
 
+The load-bearing one is in `tests/RollbackSpec.luau`: it applies a ChangeSet that uses
+every operation the protocol has, replays the journal, and asserts the place is the exact
+structure it was before — including a `deleteInstance` whose inverse carries a serialised
+subtree, which is the case where a half-restore cannot be retried because there is nothing
+left to read. What ADR-012 promises is that the tree comes back, not that a list was
+ordered correctly, so that is what the test measures.
+
 Several of them exist because a gate that cannot fail is decoration, so they arrange for
 the failure: an engine that refuses a `Name` or a `Parent` write, a move whose rename fails
 after the reparent landed (with and without a successful restore), a Studio that will not
@@ -273,8 +309,9 @@ src/
   Transport.luau     long-poll with backoff; 204 / 409 / 426 handling; replay refusal
   Pairing.luau       redeeming a code for a link and a session key
   Crypto.luau        SHA-256, HMAC-SHA256, HKDF-SHA256 and base64, in pure Luau
-  Journal.luau       inverse capture, before anything is applied
+  Journal.luau       inverse capture, before anything is applied; the wire entry
   Apply.luau         ordered application, per-operation outcomes, stale-base refusal
+  Rollback.luau      replaying a journal's inverses last-first, and reporting honestly
   Diff.luau          before/after rendering, including a real line delta for scripts
   Approve.luau       the approval policy (pure) and the dock widget
   Value.luau         the tagged PropertyValue union, both directions

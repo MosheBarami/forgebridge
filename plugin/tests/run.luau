@@ -77,6 +77,7 @@ local suites = {
 	require("./ValueSpec"),
 	require("./JournalSpec"),
 	require("./ApplySpec"),
+	require("./RollbackSpec"),
 	require("./ApproveSpec"),
 	require("./TransportSpec"),
 	require("./PairingSpec"),

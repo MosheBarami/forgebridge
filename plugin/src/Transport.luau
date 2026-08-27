@@ -8,14 +8,17 @@
 	plugin one. That is the same shape Rojo has used in the wild for years, so the
 	loop below is HTTP or it is nothing.
 
-	The plugin's whole network surface is four endpoints (PROTOCOL.md):
+	The plugin's whole network surface is six endpoints (PROTOCOL.md):
 	`/v1/link/pair` (once, in `Pairing.luau`), then `/v1/link/poll`,
-	`/v1/changesets/:id/apply-result` and `/v1/output`. Keeping it this small is
-	deliberate — the plugin is the hardest artefact to update in the field, so it
-	should have as little to update as possible.
+	`/v1/changesets/:id/apply-result`, `/v1/journal/:id/entry`,
+	`/v1/journal/:id/rollback-result` and `/v1/output`. The two journal routes are
+	M11's: the first takes the inverse operations off this session so a rollback
+	can outlive it, the second reports how far a reversal actually got. Keeping the
+	surface this small is deliberate — the plugin is the hardest artefact to update
+	in the field, so it should have as little to update as possible.
 
-	Every one of the latter three carries the pairing-derived session key: the poll
-	as a MAC over its own parameters, the two writes as a MAC over a sealed
+	Every one of the latter five carries the pairing-derived session key: the poll
+	as a MAC over its own parameters, the four writes as a MAC over a sealed
 	envelope (`#authenticate` and `#openFromConsumer` in
 	`packages/daemon/src/server.ts`).
 	Loopback is not an authentication boundary — any process on the machine can
@@ -455,6 +458,13 @@ function Transport.new(options: Options): (any?, string?)
 		_outboundNonce = options.outboundNonce or 0,
 
 		onChangeSet = nil :: ((any) -> ())?,
+		--[[
+			The rollback executor, and its absence is load-bearing rather than
+			cosmetic: `unwrap` refuses a rollback delivery outright when this is nil,
+			so a build with no executor leaves the delivery queued and says why
+			instead of skipping past a reversal the user is waiting for.
+		]]
+		onRollback = nil :: ((any) -> ())?,
 		onState = nil :: ((string, string?) -> ())?,
 		--[[
 			Called with the cursor and the outbound nonce whenever either moves, so the
@@ -632,19 +642,26 @@ function Transport:unwrap(envelope: any): (any?, string?)
 		kind of thing.
 	]]
 	if payload.kind == "rollback" then
-		-- Deliberately does not advance the cursor. This plugin cannot execute a
-		-- rollback that arrives over the wire: the inverse operations live in the
-		-- session journal, and `ApplyResult` has nowhere to report that a rollback
-		-- completed (Journal.luau, M11). Skipping past it would leave the user
-		-- watching a rollback that says "requested" and will never arrive, which is
-		-- the worse of the two failures — so the delivery stays queued and the
-		-- refusal stays on screen.
-		--
-		-- TODO(M11): execute it, and report the result. Owner: packages/core
-		-- rollback + packages/protocol + plugin.
-		return nil, "the daemon sent a rollback, which this plugin build cannot execute yet (M11)"
-	end
-	if payload.kind ~= "changeset" or type(payload.changeSet) ~= "table" then
+		--[[
+			Both refusals below deliberately leave the cursor where it is, so the
+			daemon offers the same delivery again. A rollback silently skipped is a
+			user watching for a restore that will never come — the worse of the two
+			failures — so the delivery stays queued and the refusal stays on screen.
+
+			The first is the fail-closed check for a build with no rollback executor
+			wired in: `unwrap` cannot execute anything itself, and handing a payload
+			to a loop that will drop it is the same outcome as skipping it. The
+			second is an old daemon sending the pre-M11 shape, which carried the ids
+			and nothing else; treating that as a reversal with no work to do would
+			report a clean rollback for a tree nobody touched.
+		]]
+		if self.onRollback == nil then
+			return nil, "the daemon sent a rollback, which this plugin build has no executor for"
+		end
+		if type(payload.steps) ~= "table" or #payload.steps == 0 then
+			return nil, "the daemon sent a rollback carrying no inverse operations, so there is nothing to reverse"
+		end
+	elseif payload.kind ~= "changeset" or type(payload.changeSet) ~= "table" then
 		return nil, "the delivery is not a kind of payload this plugin understands"
 	end
 
@@ -653,7 +670,11 @@ function Transport:unwrap(envelope: any): (any?, string?)
 	if self.onCursor then
 		self.onCursor(nonce)
 	end
-	return payload.changeSet, nil
+	-- The whole tagged payload, not the ChangeSet inside it. The poll can carry
+	-- more than one kind of thing (`DeliveryPayload` in
+	-- `packages/daemon/src/wire.ts`) and a caller that received a bare ChangeSet
+	-- would have no way to tell which kind it had been handed.
+	return payload, nil
 end
 
 function Transport:_loop()
@@ -677,11 +698,16 @@ function Transport:_loop()
 			self:_setState("update-required", verdict.reason)
 			break
 		elseif verdict.action == "delivery" then
-			local changeSet, reason = self:unwrap(response.body)
-			if changeSet then
+			local payload, reason = self:unwrap(response.body)
+			if payload then
 				self._failures = 0
 				self:_setState("connected", nil)
-				if self.onChangeSet then
+				-- One dispatch for both kinds. `unwrap` has already refused a
+				-- rollback this build has no executor for, so a rollback that reaches
+				-- here has a handler.
+				local handler = if payload.kind == "rollback" then self.onRollback else self.onChangeSet
+				local argument = if payload.kind == "rollback" then payload else payload.changeSet
+				if handler then
 					-- The handler is the whole rest of the plugin: diff, approval,
 					-- apply, report. Called raw, one throw anywhere in there unwinds
 					-- this loop, and the link dies with nothing on screen to say why —
@@ -690,7 +716,7 @@ function Transport:_loop()
 					-- already advanced, deliberately: re-offering a delivery whose
 					-- apply may have partly landed is worse than skipping it, and the
 					-- ApplyResult (or its absence) is what the producer reasons from.
-					local handled, handlerError = pcall(self.onChangeSet, changeSet)
+					local handled, handlerError = pcall(handler, argument)
 					if not handled then
 						self._failures += 1
 						self:_setState(
@@ -811,25 +837,62 @@ function Transport:_seal(payload: any): (any?, string?)
 		nil
 end
 
---- POST /v1/changesets/:id/apply-result, enveloped. Returns (ok, reason).
-function Transport:postApplyResult(result: any): (boolean, string?)
-	local envelope, sealError = self:_seal(result)
+--- Seal a payload, POST it, and turn the answer into (ok, reason).
+function Transport:_postSealed(path: string, payload: any): (boolean, string?)
+	local envelope, sealError = self:_seal(payload)
 	if not envelope then
 		return false, sealError
 	end
-	local response = self:_request(
-		"POST",
-		string.format("/v1/changesets/%s/apply-result", tostring(result.changeSetId)),
-		envelope
-	)
+	local response = self:_request("POST", path, envelope)
 	if not response.ok then
 		return false, response.transportError
 	end
 	if response.statusCode >= 200 and response.statusCode < 300 then
 		return true, nil
 	end
-	local verdict = Transport.classify(response, self.protocolMajor)
-	return false, verdict.reason
+	return false, Transport.classify(response, self.protocolMajor).reason
+end
+
+--- POST /v1/changesets/:id/apply-result, enveloped. Returns (ok, reason).
+function Transport:postApplyResult(result: any): (boolean, string?)
+	return self:_postSealed(
+		string.format("/v1/changesets/%s/apply-result", tostring(result.changeSetId)),
+		result
+	)
+end
+
+--[[
+	POST /v1/journal/:id/entry — hand the inverse operations to the daemon.
+
+	M11's first half, and the one that decides whether an apply is survivable at
+	all. The inverses are captured before anything runs and, until this route
+	existed, never left the session that captured them: close Studio and the only
+	route back from an apply was gone.
+
+	Enveloped and MAC'd like the apply result, and for a stronger reason than
+	symmetry. This is the record a rollback is replayed from, so a process that
+	found the loopback port must not be able to write one.
+]]
+function Transport:postJournalEntry(entry: any): (boolean, string?)
+	return self:_postSealed(string.format("/v1/journal/%s/entry", tostring(entry.id)), entry)
+end
+
+--[[
+	POST /v1/journal/:id/rollback-result — say how far a reversal actually got.
+
+	M11's second half. Until it existed the daemon could dispatch a rollback and
+	never learn whether it happened, so `rolledBackAt` stayed null forever and the
+	CLI, the A2A connector and the Python SDK could only ever say "dispatched".
+
+	A partial reversal is posted exactly as a partial reversal: `RollbackResult
+	.outcomes` carries one entry per inverse attempted and nothing here rounds a
+	failure up.
+]]
+function Transport:postRollbackResult(result: any): (boolean, string?)
+	return self:_postSealed(
+		string.format("/v1/journal/%s/rollback-result", tostring(result.journalId)),
+		result
+	)
 end
 
 --[[
@@ -847,18 +910,7 @@ end
 	what promotes it. Owner: packages/protocol.
 ]]
 function Transport:postOutput(messages: { any }): (boolean, string?)
-	local envelope, sealError = self:_seal({ messages = messages })
-	if not envelope then
-		return false, sealError
-	end
-	local response = self:_request("POST", "/v1/output", envelope)
-	if not response.ok then
-		return false, response.transportError
-	end
-	if response.statusCode >= 200 and response.statusCode < 300 then
-		return true, nil
-	end
-	return false, Transport.classify(response, self.protocolMajor).reason
+	return self:_postSealed("/v1/output", { messages = messages })
 end
 
 return Transport

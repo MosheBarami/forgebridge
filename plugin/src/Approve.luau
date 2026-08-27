@@ -123,6 +123,40 @@ local function carriesSource(operation: any): boolean
 end
 
 --[[
+	The properties that can start code already sitting in the place.
+
+	Mirrors `ACTIVATING_PROPERTIES` in `packages/protocol/src/operation.ts`, which
+	is what `activatesExistingCode` is built from and which this plugin cannot
+	import — Roblox's Instance-based `require` puts a TypeScript package out of
+	reach, so the protocol's list is restated here and the restatement is the thing
+	that can go wrong. It already had: this table read `Disabled` and `RunContext`
+	and not `Enabled`, so `setProperty` of `Enabled` on a Script inside the
+	auto-apply scope started dormant code with no analysis and no human — the exact
+	hole the protocol added `activatesExistingCode` to close.
+
+	The value maps each property to the ONE value that provably stops code, which
+	is the only shape that may be waved through. Everything else blocks, including
+	a value this function cannot read: unreadable is not safe.
+
+	  * `Disabled` = `Bool true` disables the script whatever state it was in, so
+	    it can never start anything. `Bool false` starts it.
+	  * `Enabled` = `Bool false` is the same statement the other way round. It is
+	    the property that was missing, and it is missing from nothing else now
+	    because this table is the whole rule.
+	  * `RunContext` has no such value at all, and that is `false` below rather
+	    than an omission: `Server` or `Client` makes a Script run where it sits,
+	    including in a container that has never run one, and `evaluate` holds the
+	    ChangeSet and nothing else — no DataModel, so no way to read what the
+	    instance's RunContext is now, and therefore no way to tell a write that
+	    stops a script from one that starts it.
+]]
+local ACTIVATING_PROPERTIES: { [string]: any } = table.freeze({
+	Disabled = { t = "Bool", v = true },
+	Enabled = { t = "Bool", v = false },
+	RunContext = false,
+})
+
+--[[
 	Does this operation take the brake off code that is ALREADY in the place?
 
 	`carriesSource` catches an operation that INSTALLS code. This is the other
@@ -136,17 +170,6 @@ end
 
 	Returns the property responsible, so the blocker can name it.
 
-	  * `Disabled` is waved through only when the value reads, right here, as one
-	    that stops code: a literal `Bool true` disables the script whatever state
-	    it was in, so it can never start anything. `Bool false` starts it, and any
-	    other shape — a String "false", a Nil, a missing value — is one this
-	    function cannot read as either. An unreadable value is the dangerous one.
-	  * `RunContext` blocks whatever it is set to. `Server` or `Client` makes a
-	    Script run where it sits, including in a container that has never run one.
-	    `evaluate` holds the ChangeSet and nothing else — no DataModel, so no way
-	    to read what the instance's RunContext is now — which leaves no way to
-	    tell a write that stops a script from the one that starts it.
-
 	Deliberately not `moveInstance`: a move carries no class, so this could not
 	tell a Script being reparented from a Part being tidied, and a rule that fires
 	on every ordinary reparent is one people learn to click through. A move stays
@@ -156,15 +179,17 @@ local function startsDormantCode(operation: any): string?
 	if operation.op ~= "setProperty" then
 		return nil
 	end
-	if operation.property == "RunContext" then
-		return "RunContext"
+	local stopper = ACTIVATING_PROPERTIES[tostring(operation.property)]
+	if stopper == nil then
+		return nil
 	end
-	if operation.property == "Disabled" then
-		local value = operation.value
-		local stopsCode = type(value) == "table" and value.t == "Bool" and value.v == true
-		return if stopsCode then nil else "Disabled"
+	if stopper == false then
+		-- No value of this property is a stop. It blocks whatever it is set to.
+		return operation.property
 	end
-	return nil
+	local value = operation.value
+	local stopsCode = type(value) == "table" and value.t == stopper.t and value.v == stopper.v
+	return if stopsCode then nil else operation.property
 end
 
 --[[
