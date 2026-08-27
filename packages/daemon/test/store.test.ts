@@ -1,220 +1,62 @@
+/**
+ * `InMemoryDaemonStore` against the shared store suite (ADR-005, M40).
+ *
+ * The cases used to live in this file. They now live in
+ * `../src/store-suite.ts`, because ADR-005's argument for a port with two
+ * adapters is that "adapter parity is testable — one suite, two backends, both
+ * green or the build fails", and a suite that lives inside one adapter's test
+ * file cannot deliver that. The SQLite adapter runs the same array, from the
+ * same module, in `packages/storage-sqlite/test/parity.test.ts`.
+ *
+ * What stays here: the properties that are true of *this* implementation and
+ * are not part of the port's contract — the injected clock, and the fact that a
+ * Map read and write cannot be interleaved without an `await` between them.
+ */
 import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { Link } from '@forgebridge/protocol';
-import { NONCE_ORIGIN } from '../src/envelope.js';
-import { InMemoryDaemonStore, RETENTION, type JournalRecord } from '../src/store.js';
-import { makeChangeSet } from './helpers.js';
-import type { DeliveryPayload } from '../src/wire.js';
+import { DAEMON_STORE_SUITE, suiteLink } from '../src/store-suite.js';
+import { InMemoryDaemonStore } from '../src/store.js';
 
-function makeLink(overrides: Record<string, unknown> = {}) {
-  return Link.parse({
-    id: randomUUID(),
-    projectId: randomUUID(),
-    transport: 'local-daemon',
-    state: 'paired',
-    createdAt: new Date().toISOString(),
-    ...overrides,
-  });
-}
-
-const rollback = (journalId: string): DeliveryPayload => ({
-  kind: 'rollback',
-  journalId,
-  changeSetId: randomUUID(),
-  expectedVersion: 0,
-});
-
-describe('InMemoryDaemonStore deliveries', () => {
-  it('assigns strictly increasing nonces starting above the cursor origin', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-
-    const first = await store.enqueueDelivery(linkId, rollback(randomUUID()));
-    const second = await store.enqueueDelivery(linkId, rollback(randomUUID()));
-
-    expect(first.nonce).toBe(NONCE_ORIGIN + 1);
-    expect(second.nonce).toBe(first.nonce + 1);
-    expect(await store.lastOutboundNonce(linkId)).toBe(second.nonce);
-  });
-
-  it('returns the first delivery above the cursor and nothing when caught up', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-    const first = await store.enqueueDelivery(linkId, rollback(randomUUID()));
-    const second = await store.enqueueDelivery(linkId, rollback(randomUUID()));
-
-    expect((await store.nextDelivery(linkId, 0))?.nonce).toBe(first.nonce);
-    expect((await store.nextDelivery(linkId, first.nonce))?.nonce).toBe(second.nonce);
-    expect(await store.nextDelivery(linkId, second.nonce)).toBeNull();
-  });
-
-  it('keeps the queue bounded — a long-lived daemon must not grow forever', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-    for (let i = 0; i < RETENTION.DELIVERIES_PER_LINK + 20; i += 1) {
-      await store.enqueueDelivery(linkId, rollback(randomUUID()));
-    }
-    // Nonces keep climbing even though the oldest entries were dropped.
-    expect(await store.lastOutboundNonce(linkId)).toBe(RETENTION.DELIVERIES_PER_LINK + 20);
-    expect(await store.nextDelivery(linkId, 0)).not.toBeNull();
-    expect((await store.nextDelivery(linkId, 0))?.nonce).toBe(21);
-  });
-});
-
-describe('InMemoryDaemonStore inbound watermark', () => {
-  it('claims a nonce once and refuses it forever after', async () => {
-    // The replay guard is this one call. A caller that read the watermark and
-    // then wrote it would have a window between the two in which a duplicate
-    // reads the same old value and is admitted as well.
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-
-    expect(await store.tryAdvanceInboundNonce(linkId, 5)).toBe(true);
-    expect(await store.tryAdvanceInboundNonce(linkId, 5)).toBe(false);
-    expect(await store.lastInboundNonce(linkId)).toBe(5);
-  });
-
-  it('never moves backwards, whatever order handlers finish in', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-
-    expect(await store.tryAdvanceInboundNonce(linkId, 5)).toBe(true);
-    expect(await store.tryAdvanceInboundNonce(linkId, 2)).toBe(false);
-
-    expect(await store.lastInboundNonce(linkId)).toBe(5);
-  });
-
-  it('refuses a nonce that is not a non-negative safe integer', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-
-    for (const nonce of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
-      expect(await store.tryAdvanceInboundNonce(linkId, nonce), String(nonce)).toBe(false);
-    }
-    expect(await store.lastInboundNonce(linkId)).toBe(NONCE_ORIGIN);
-  });
-
-  it('tracks each link separately', async () => {
-    const store = new InMemoryDaemonStore();
-    const [one, two] = [randomUUID(), randomUUID()];
-
-    expect(await store.tryAdvanceInboundNonce(one, 3)).toBe(true);
-    expect(await store.tryAdvanceInboundNonce(two, 1)).toBe(true);
-    expect(await store.lastInboundNonce(one)).toBe(3);
-  });
-});
-
-describe('InMemoryDaemonStore changesets', () => {
-  it('refuses to overwrite a changeset id that already exists', async () => {
-    // The id is the handle the diff a human read, the approval and the
-    // ApplyResult all name the work by. A second set written under it inherits
-    // the reviewed one's name and its cleared status, which is a review bypass
-    // rather than an update.
-    const store = new InMemoryDaemonStore();
-    const first = makeChangeSet();
-    await store.putChangeSet(first);
-
-    const swapped = makeChangeSet({
-      id: first.id,
-      projectId: first.projectId,
-      operations: [
-        { op: 'writeScript', path: 'ServerScriptService.Shop', scriptType: 'Script', source: 'print("pwned")' },
-      ],
+describe('InMemoryDaemonStore satisfies the shared store suite', () => {
+  for (const testCase of DAEMON_STORE_SUITE) {
+    it(testCase.name, async () => {
+      // A fresh store per case: a suite whose cases can see each other's writes
+      // is a suite whose failures depend on ordering.
+      try {
+        await testCase.run(new InMemoryDaemonStore());
+      } catch (error) {
+        // The `why` is attached on the way past because a parity failure is
+        // usually read by whoever wrote the *other* adapter.
+        if (error instanceof Error) error.message = `${error.message}\n\nwhy this matters: ${testCase.why}`;
+        throw error;
+      }
     });
-    await expect(store.putChangeSet(swapped)).rejects.toThrow(
-      expect.objectContaining({ code: 'invalid_request' }),
-    );
-    expect((await store.getChangeSet(first.id))?.operations).toEqual(first.operations);
-  });
-
-  it('still lets the status of a stored set move', async () => {
-    // The control: write-once is about content, not about the lifecycle. A set
-    // that could never be marked approved or applied would be a store that
-    // refuses the one mutation the protocol requires.
-    const store = new InMemoryDaemonStore();
-    const changeSet = makeChangeSet();
-    await store.putChangeSet(changeSet);
-
-    expect((await store.setChangeSetStatus(changeSet.id, 'approved'))?.status).toBe('approved');
-    expect((await store.getChangeSet(changeSet.id))?.status).toBe('approved');
-    expect((await store.getChangeSet(changeSet.id))?.operations).toEqual(changeSet.operations);
-  });
+  }
 });
 
-describe('InMemoryDaemonStore journals', () => {
-  it('refuses to overwrite a journal id that already exists', async () => {
-    // The consumer holds the inverses under this id. A second record claiming
-    // it describes a different apply, and writing it would leave the first
-    // apply with no route back at all (THREAT-MODEL T2 layer 5).
-    const store = new InMemoryDaemonStore();
-    const id = randomUUID();
-    const first = makeJournal(id, { versionBefore: 0, versionAfter: 1 });
-    await store.putJournal(first);
-
-    await expect(store.putJournal(makeJournal(id, { versionBefore: 1, versionAfter: 2 }))).rejects.toThrow(
-      expect.objectContaining({ code: 'invalid_request' }),
-    );
-    expect((await store.getJournal(id))?.versionAfter).toBe(1);
-  });
-});
-
-describe('InMemoryDaemonStore project policy', () => {
-  it('reports a project with no policy as null rather than as an empty allowlist', async () => {
-    // "Not configured" and "configured to permit nothing" are different facts,
-    // and only the caller gets to decide what the first one means.
-    const store = new InMemoryDaemonStore();
-    const projectId = randomUUID();
-    expect(await store.getProjectPolicy(projectId)).toBeNull();
-
-    await store.setProjectPolicy(projectId, { allowedPathPrefixes: ['Workspace'], autoApply: null });
-    expect((await store.getProjectPolicy(projectId))?.allowedPathPrefixes).toEqual(['Workspace']);
-  });
-});
-
-function makeJournal(id: string, overrides: Partial<JournalRecord> = {}): JournalRecord {
-  return {
-    id,
-    projectId: randomUUID(),
-    changeSetId: randomUUID(),
-    summary: 'add a shop script',
-    versionBefore: 0,
-    versionAfter: 1,
-    appliedAt: new Date().toISOString(),
-    rollbackRequestedAt: null,
-    rolledBackAt: null,
-    ...overrides,
-  };
-}
-
-describe('InMemoryDaemonStore links and versions', () => {
-  it('reports a project at version 0 before anything is applied', async () => {
-    const store = new InMemoryDaemonStore();
-    expect(await store.getProjectVersion(randomUUID())).toBe(0);
+describe('InMemoryDaemonStore, beyond the shared contract', () => {
+  it('stamps deliveries with the injected clock rather than reading the wall clock', async () => {
+    // Not a suite case: a persistent adapter is free to let SQLite stamp the
+    // row. What the port promises is an ISO timestamp, which the suite checks.
+    const store = new InMemoryDaemonStore({ now: () => Date.parse('2026-02-14T09:00:00.000Z') });
+    const record = await store.enqueueDelivery(randomUUID(), {
+      kind: 'rollback',
+      journalId: randomUUID(),
+      changeSetId: randomUUID(),
+      expectedVersion: 0,
+      restoresToVersion: 0,
+      steps: [{ index: 0, inverse: { inverse: 'deleteCreated', path: 'Workspace.Scratch' } }],
+    });
+    expect(record.createdAt).toBe('2026-02-14T09:00:00.000Z');
   });
 
-  it('finds only paired links for the requested project', async () => {
+  it('holds links by reference-free copy, so a caller mutating its own object cannot rewrite the store', async () => {
     const store = new InMemoryDaemonStore();
-    const projectId = randomUUID();
-    await store.putLink(makeLink({ projectId, state: 'revoked' }));
-    await store.putLink(makeLink({ projectId: randomUUID(), state: 'paired' }));
-    expect(await store.findPairedLink(projectId)).toBeNull();
-
-    const live = makeLink({ projectId, state: 'paired' });
-    await store.putLink(live);
-    expect((await store.findPairedLink(projectId))?.id).toBe(live.id);
-  });
-});
-
-describe('InMemoryDaemonStore console mirror', () => {
-  it('keeps only the most recent messages', async () => {
-    const store = new InMemoryDaemonStore();
-    const linkId = randomUUID();
-    const at = new Date().toISOString();
-    for (let i = 0; i < RETENTION.OUTPUT_PER_LINK + 5; i += 1) {
-      await store.appendOutput(linkId, [{ level: 'print', message: `line ${i}`, at }]);
-    }
-    const recent = await store.recentOutput(linkId, 10);
-    expect(recent).toHaveLength(10);
-    expect(recent.at(-1)?.message).toBe(`line ${RETENTION.OUTPUT_PER_LINK + 4}`);
+    const link = suiteLink({ state: 'paired' });
+    await store.putLink(link);
+    await store.patchLink(link.id, { state: 'revoked' });
+    // The caller's object is untouched: `patchLink` builds a new record.
+    expect(link.state).toBe('paired');
+    expect((await store.getLink(link.id))?.state).toBe('revoked');
   });
 });

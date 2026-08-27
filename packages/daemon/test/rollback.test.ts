@@ -12,7 +12,6 @@ import {
 import { canonicalJson } from '../src/envelope.js';
 import { InMemoryDaemonStore, type JournalRecord } from '../src/store.js';
 import {
-  InMemoryJournalEntryStore,
   journalStateOf,
   planRollback,
   planRollbackFor,
@@ -559,7 +558,10 @@ async function seed(): Promise<{
   consumer: ReferenceConsumer;
 }> {
   const store = new InMemoryDaemonStore();
-  const deps: RollbackDeps = { store, journals: new InMemoryJournalEntryStore(), now: () => Date.now() };
+  // The store is the journal-entry store (M40): the four methods are on
+  // `DaemonStore`, so a daemon handed a persistent adapter keeps its inverses
+  // there rather than in a process-lifetime Map.
+  const deps: RollbackDeps = { store, journals: store, now: () => Date.now() };
 
   const projectId = randomUUID();
   const changeSet = makeChangeSet({ projectId, operations: ROUND_TRIP_OPERATIONS });

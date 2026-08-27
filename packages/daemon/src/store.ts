@@ -4,8 +4,10 @@ import type {
   ApplyResult,
   ChangeSet,
   ChangeSetStatus,
+  JournalEntry,
   Link,
   ProtocolError,
+  RollbackResult,
   Run,
   Validation,
 } from '@forgebridge/protocol';
@@ -85,6 +87,32 @@ export interface LinkPatch {
 }
 
 /**
+ * The inverse operations a consumer captured, and how far a replay of them got.
+ *
+ * Moved onto `DaemonStore` by M40, from the separate in-memory store M11 first
+ * gave it. The reason is exactly the one M11 wrote down: a caller of
+ * `createDaemon` can pass its own `DaemonStore`, so a journal-entry store that
+ * was *not* on that port meant a daemon backed by a durable adapter still kept
+ * its inverses in memory and lost them on restart. That is survivable while
+ * every store in the tree is in-memory; it stops being survivable the moment a
+ * SQLite adapter exists, because "the daemon's state is durable" would then be
+ * true of everything except the one record that makes a destructive apply
+ * reversible.
+ *
+ * Note what this does *not* change about `JournalRecord`: the daemon holds the
+ * handle, the version bracket and now the inverses. It still does not interpret
+ * them — a Roblox model format is the consumer's business (`InverseOperation`
+ * in the protocol).
+ */
+export interface JournalEntryStore {
+  /** Refuses an id already recorded, for the reason `putJournal` does. */
+  putJournalEntry(entry: JournalEntry): Promise<void>;
+  getJournalEntry(id: string): Promise<JournalEntry | null>;
+  putRollbackResult(result: RollbackResult): Promise<void>;
+  getRollbackResult(journalId: string): Promise<RollbackResult | null>;
+}
+
+/**
  * The daemon's persistence seam.
  *
  * Everything is a Promise even though the in-memory implementation is
@@ -92,10 +120,12 @@ export interface LinkPatch {
  * making handlers `await` from day one means swapping the adapter is a
  * one-line change rather than a rewrite of every call site.
  *
- * TODO(M40): `@forgebridge/storage-sqlite` implements this against SQLite under
- * ~/.forgebridge and must pass this package's store test suite unchanged.
+ * Two implementations exist. `InMemoryDaemonStore` below is the default;
+ * `SqliteDaemonStore` in `@forgebridge/storage-sqlite` keeps the same state in a
+ * file under `~/.forgebridge`. Both are held to `DAEMON_STORE_SUITE` in
+ * `./store-suite.ts` — one array, two hosts, both required green (ADR-005).
  */
-export interface DaemonStore {
+export interface DaemonStore extends JournalEntryStore {
   putLink(link: Link): Promise<void>;
   getLink(linkId: string): Promise<Link | null>;
   listLinks(): Promise<Link[]>;
@@ -223,6 +253,8 @@ export class InMemoryDaemonStore implements DaemonStore {
   readonly #inboundNonce = new Map<string, number>();
   readonly #applyResults = new Map<string, ApplyResult>();
   readonly #journals = new Map<string, JournalRecord>();
+  readonly #journalEntries = new Map<string, JournalEntry>();
+  readonly #rollbackResults = new Map<string, RollbackResult>();
   readonly #output = new Map<string, OutputMessage[]>();
   readonly #runs = new Map<string, RunRecord>();
   readonly #now: () => number;
@@ -423,5 +455,36 @@ export class InMemoryDaemonStore implements DaemonStore {
 
   async getRun(runId: string): Promise<RunRecord | null> {
     return this.#runs.get(runId) ?? null;
+  }
+
+  async putJournalEntry(entry: JournalEntry): Promise<void> {
+    if (this.#journalEntries.has(entry.id)) {
+      throw new ForgeBridgeError(
+        'invalid_request',
+        `journal ${entry.id} already carries inverse operations`,
+        'The inverses of an apply are captured once, before it runs; a second upload would replace the only route back.',
+      );
+    }
+    this.#journalEntries.set(entry.id, entry);
+  }
+
+  async getJournalEntry(id: string): Promise<JournalEntry | null> {
+    return this.#journalEntries.get(id) ?? null;
+  }
+
+  /**
+   * Not write-once, unlike the entry it belongs to.
+   *
+   * A rollback can be attempted more than once — a partial replay leaves
+   * inverses unspent, and a second attempt is a legitimate thing for a user to
+   * ask for. What must not be replaced is the *entry*, because that is the only
+   * copy of the operations a second attempt would replay.
+   */
+  async putRollbackResult(result: RollbackResult): Promise<void> {
+    this.#rollbackResults.set(result.journalId, result);
+  }
+
+  async getRollbackResult(journalId: string): Promise<RollbackResult | null> {
+    return this.#rollbackResults.get(journalId) ?? null;
   }
 }

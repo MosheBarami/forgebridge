@@ -2,9 +2,12 @@ import { z } from 'zod';
 import {
   ChangeSet,
   ChangeSetStatus,
+  InverseOperation,
+  LIMITS,
   Link,
   PairingCode,
   ProtocolError,
+  RollbackResult,
   Run,
   TransportKind,
   Validation,
@@ -186,10 +189,93 @@ export type ChangeSetDiff = z.infer<typeof ChangeSetDiff>;
 export const RollbackResponse = z.object({
   journalId: z.string().uuid(),
   changeSetId: z.string().uuid(),
+  /**
+   * Still `dispatched`, and deliberately still only that.
+   *
+   * M11 gave the consumer a way to report completion (`RollbackResult`), which
+   * is a different thing from this response being able to report it. This one is
+   * answered the moment the reversal is queued; the consumer has not polled yet,
+   * let alone replayed anything. `GET /v1/journal/{journalId}` is where the
+   * outcome shows up, and the CLI waits on that rather than on this.
+   */
   status: z.literal('dispatched'),
   nonce: z.number().int().min(0),
+  /** How many inverses were dispatched. The count a consumer will report on. */
+  steps: z.number().int().min(0),
 });
 export type RollbackResponse = z.infer<typeof RollbackResponse>;
+
+/** `POST /v1/journal/{journalId}/entry` — the consumer's inverses are recorded. */
+export const JournalEntryAck = z.object({
+  journalId: z.string().uuid(),
+  changeSetId: z.string().uuid(),
+  /** How many inverse operations this daemon now holds for that apply. */
+  inverses: z.number().int().min(0),
+});
+export type JournalEntryAck = z.infer<typeof JournalEntryAck>;
+
+/**
+ * What a journal is, in one word, wherever it is asked.
+ *
+ * `rollback_partial` is not a decoration on `rolled_back`. A partial reversal
+ * leaves the tree in a state neither the user nor the journal describes, and the
+ * inverses that would have finished the job are spent — so it is its own answer,
+ * and no surface may round it up. `journalStateOf` in `rollback.ts` is the one
+ * function that produces these.
+ */
+export const JournalState = z.enum([
+  'applied',
+  'rollback_requested',
+  'rolled_back',
+  'rollback_partial',
+  'rollback_failed',
+]);
+export type JournalState = z.infer<typeof JournalState>;
+
+/** `POST /v1/journal/{journalId}/rollback-result` — the consumer's report, acknowledged. */
+export const RollbackResultAck = z.object({
+  journalId: z.string().uuid(),
+  changeSetId: z.string().uuid(),
+  state: JournalState,
+  version: z.number().int().min(0),
+});
+export type RollbackResultAck = z.infer<typeof RollbackResultAck>;
+
+/**
+ * `GET /v1/journal/{journalId}` — what happened to one apply, and to any
+ * reversal of it.
+ *
+ * This is the route the CLI, the A2A connector and the Python SDK have all been
+ * missing. Each of them could dispatch a rollback and none of them could find
+ * out whether it worked, so each said "dispatched" and stopped. `result` is the
+ * consumer's own report, verbatim, including the per-inverse failures of a
+ * partial reversal: a summary is not a record, and the one place a user needs to
+ * know exactly which inverse did not replay is the place where the rest of them
+ * already have.
+ */
+export const JournalStateResponse = z.object({
+  journalId: z.string().uuid(),
+  changeSetId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  summary: z.string(),
+  state: JournalState,
+  versionBefore: z.number().int().min(0),
+  versionAfter: z.number().int().min(0),
+  appliedAt: z.string().datetime(),
+  rollbackRequestedAt: z.string().datetime().nullable(),
+  rolledBackAt: z.string().datetime().nullable(),
+  /**
+   * How many inverses this daemon holds, or null when it holds none.
+   *
+   * Null and 0 are different facts and a UI that conflates them misleads: 0
+   * would mean an apply with nothing to undo, while null means the inverses
+   * never left the Studio session — that session may still be able to undo
+   * in-place, and no other route back exists.
+   */
+  inverses: z.number().int().min(0).nullable(),
+  result: RollbackResult.nullable(),
+});
+export type JournalStateResponse = z.infer<typeof JournalStateResponse>;
 
 export const OutputLevel = z.enum(['print', 'info', 'warning', 'error']);
 export type OutputLevel = z.infer<typeof OutputLevel>;
@@ -280,16 +366,47 @@ export interface RunModelClient extends ModelClient {
  * requested therefore has no other way to reach the plugin, so the delivery is
  * tagged rather than being a bare ChangeSet.
  */
+export const RollbackDelivery = z.object({
+  kind: z.literal('rollback'),
+  journalId: z.string().uuid(),
+  changeSetId: z.string().uuid(),
+  /** Refused by the consumer if its tree has moved on. */
+  expectedVersion: z.number().int().min(0),
+  reason: z.string().max(500).optional(),
+  /** The version to restore to. A consumer reports this back as `newVersion`. */
+  restoresToVersion: z.number().int().min(0),
+  /**
+   * The inverses to replay, already in replay order.
+   *
+   * These are what M11 added, and the reason is the whole point of the
+   * milestone: before them a rollback delivery carried the ids and nothing else,
+   * which is everything a consumer needs when it happens to be the same Studio
+   * session that captured the inverses, and nothing like enough when it is not.
+   * Close Studio and the only route back from an apply was gone. The daemon
+   * holds the inverses now (`POST /v1/journal/:id/entry`) and sends them.
+   *
+   * Ordered at dispatch rather than on arrival so the rule — undo the last
+   * operation first — has one implementation instead of one per consumer.
+   *
+   * `index` is an index into the journal's `inverses`, NOT into the ChangeSet's
+   * operations. The two lists differ whenever an apply was partial, and a
+   * consumer that reports outcomes against the wrong one names the wrong
+   * operation as the failure.
+   */
+  steps: z
+    .array(
+      z.object({
+        index: z.number().int().min(0),
+        inverse: InverseOperation,
+      }),
+    )
+    .max(LIMITS.MAX_OPERATIONS),
+});
+export type RollbackDelivery = z.infer<typeof RollbackDelivery>;
+
 export const DeliveryPayload = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('changeset'), changeSet: ChangeSet }),
-  z.object({
-    kind: z.literal('rollback'),
-    journalId: z.string().uuid(),
-    changeSetId: z.string().uuid(),
-    /** Refused by the consumer if its tree has moved on. */
-    expectedVersion: z.number().int().min(0),
-    reason: z.string().max(500).optional(),
-  }),
+  RollbackDelivery,
 ]);
 export type DeliveryPayload = z.infer<typeof DeliveryPayload>;
 

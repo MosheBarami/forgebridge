@@ -3,22 +3,25 @@ import {
   ForgeBridgeError,
   InverseOperation,
   JournalEntry,
-  LIMITS,
   Operation,
   parentOf,
+  rollbackStatusOf,
   type Link,
+  type RollbackResult,
+  type RollbackStatus,
 } from '@forgebridge/protocol';
 import { canonicalJson } from './envelope.js';
-import type { DaemonStore, JournalRecord } from './store.js';
+import { RollbackDelivery } from './wire.js';
+import type { DaemonStore, JournalEntryStore, JournalRecord } from './store.js';
 
 /**
  * Rollback: the second half of the mechanism ADR-012 calls load-bearing.
  *
- * The first half already worked. `POST /v1/journal/:id/rollback` dispatches a
- * reversal to the paired Studio session and answers `202 dispatched`, and every
- * surface above it — CLI, A2A, the Python SDK — is careful to say "dispatched"
- * rather than "rolled back". They are careful because two things were missing,
- * and this file is both of them:
+ * Dispatch already worked: `POST /v1/journal/:id/rollback` queued a reversal for
+ * the paired Studio session and answered `202 dispatched`, and every surface
+ * above it — CLI, A2A, the Python SDK — said "dispatched" rather than "rolled
+ * back" because that was all that was true. Two things were missing, and this
+ * file is both of them:
  *
  *   1. **The journal never travelled.** `ApplyResult` carries a `journalId` and
  *      nothing else, so the inverse operations the plugin captured stayed in the
@@ -26,11 +29,13 @@ import type { DaemonStore, JournalRecord } from './store.js';
  *      from an apply was gone. `JournalEntry` is *already* in the frozen
  *      protocol, with `applied`, `inverses` and the version bracket — it simply
  *      had no endpoint. `recordJournalEntry` gives it one. No protocol addition
- *      is needed for this half; it was a missing route, not a missing type.
+ *      was needed for this half; it was a missing route, not a missing type.
  *
- *   2. **Completion could not be reported.** There is no shape on the wire for
- *      "the reversal of journal X finished". That one is a genuine protocol gap,
- *      and `RollbackResult` below is a local stand-in — see its own comment.
+ *   2. **Completion could not be reported.** There was no shape on the wire for
+ *      "the reversal of journal X finished". That one was a genuine protocol
+ *      gap, and M11 closed it additively: `RollbackResult` now sits in
+ *      `packages/protocol/src/apply.ts` beside `ApplyResult`, and
+ *      `recordRollbackResult` below is the route that receives it.
  *
  * What this file will not do is interpret a Roblox model. `restoreSubtree`
  * carries an opaque `serialised` blob and it stays opaque here: the daemon
@@ -40,91 +45,44 @@ import type { DaemonStore, JournalRecord } from './store.js';
  */
 
 /**
- * The outcome of replaying one inverse operation.
+ * `RollbackOutcome`, `RollbackResult`, `RollbackStatus` and `rollbackStatusOf`
+ * used to be defined here, as a local stand-in for a genuine protocol gap:
+ * there was no shape on the wire for "the reversal of journal X finished", so
+ * `rolledBackAt` could never be stamped and every surface above this daemon said
+ * "dispatched" forever.
  *
- * `index` is an index into the journal's `inverses` array, *not* into the
- * ChangeSet's operations. They are different lists — a journal holds only the
- * operations that actually ran — and a consumer that conflates them reports
- * failures against the wrong operation, which is a worse lie than reporting
- * nothing.
+ * M11 closed it additively — they now live in `packages/protocol/src/apply.ts`
+ * beside `ApplyResult`, which is where a shape both ends of the link have to
+ * agree on belongs, and which is what makes them reachable from the CLI, the A2A
+ * connector and the generated Python models without any of them re-deriving the
+ * schema from this file.
+ *
+ * Re-exported rather than merely imported: this module is where the rollback
+ * mechanism is assembled, and a caller reaching for `RollbackResult` should not
+ * have to know which of the two packages happens to hold the noun.
  */
-export const RollbackOutcome = z.object({
-  index: z.number().int().min(0),
-  ok: z.boolean(),
-  /** Present only when ok is false. Plain language, no Luau stack traces. */
-  error: z.string().max(1000).optional(),
-});
-export type RollbackOutcome = z.infer<typeof RollbackOutcome>;
+export {
+  RollbackOutcome,
+  RollbackResult,
+  rollbackStatusOf,
+  type RollbackStatus,
+} from '@forgebridge/protocol';
 
 /**
- * TODO(M11-protocol): this belongs in `@forgebridge/protocol` beside
- * `ApplyResult`, as an additive sibling. It lives here because that package is
- * frozen to this milestone; the exact schema to add, and why it is a sibling
- * rather than a field on `ApplyResult`, is written out in the M11 report.
+ * The rollback variant of `DeliveryPayload`, re-exported from `wire.ts`.
  *
- * The short version: `ApplyResult` is keyed on `changeSetId` and reports
- * outcomes indexed into that set's operations. A rollback is keyed on a
- * `journalId` and reports outcomes indexed into that journal's inverses. Bolting
- * an optional `rolledBackJournalId` onto `ApplyResult` would make every field on
- * it conditional on a flag, and the one mechanism that must never guess would be
- * read through an `if`.
- */
-export const RollbackResult = z.object({
-  journalId: z.string().uuid(),
-  changeSetId: z.string().uuid(),
-  /** One per inverse attempted, in the order they were replayed. */
-  outcomes: z.array(RollbackOutcome).max(LIMITS.MAX_OPERATIONS),
-  /** The tree version after the reversal. Becomes the next set's baseVersion. */
-  newVersion: z.number().int().min(0),
-  rolledBackAt: z.string().datetime(),
-  /** Plugin build that performed the reversal, for field debugging. */
-  pluginVersion: z.string().max(40),
-});
-export type RollbackResult = z.infer<typeof RollbackResult>;
-
-/**
- * What a rollback achieved.
+ * It used to be declared here, alongside a TODO asking for it to be folded into
+ * the delivery union — because a rollback that is *not* part of that union is a
+ * second, parallel idea of what the daemon can hand a consumer, and the poll can
+ * only ever deliver one of them. M11 did the fold, so `steps` and
+ * `restoresToVersion` now travel on the one payload the plugin already unwraps.
  *
- * `partial` is the one that matters. A rollback that half-restores is worse than
- * one that never ran: the tree is now in a state neither the user nor the
- * journal describes, and the remaining inverses have been consumed. So it is a
- * status of its own rather than being rounded to either neighbour, and
- * `recordRollbackResult` refuses to stamp `rolledBackAt` on it.
+ * It lives in `wire.ts` rather than here because `store.ts` types its delivery
+ * queue on `DeliveryPayload`, and this module imports `store.ts`; declaring the
+ * union member here would make `wire.ts → rollback.ts → store.ts → wire.ts` a
+ * cycle.
  */
-export type RollbackStatus = 'rolled_back' | 'partial' | 'failed';
-
-export function rollbackStatusOf(result: RollbackResult): RollbackStatus {
-  if (result.outcomes.length === 0) return 'failed';
-  if (result.outcomes.every((outcome) => outcome.ok)) return 'rolled_back';
-  return result.outcomes.some((outcome) => outcome.ok) ? 'partial' : 'failed';
-}
-
-/**
- * TODO(M11): fold into `DeliveryPayload` in `wire.ts`, whose `rollback` variant
- * currently carries only the ids and the expected version — which is all a
- * consumer needs when it is the same Studio session that captured the inverses,
- * and nothing like enough when it is not. Owner: whoever holds `wire.ts`; the
- * M11 report names the exact fields.
- *
- * The `steps` are already in replay order. Ordering them at dispatch rather than
- * on arrival means one implementation of the rule instead of one per consumer.
- */
-export const RollbackDelivery = z.object({
-  journalId: z.string().uuid(),
-  changeSetId: z.string().uuid(),
-  expectedVersion: z.number().int().min(0),
-  reason: z.string().max(500).optional(),
-  /** The version to restore to. A consumer reports this back as `newVersion`. */
-  restoresToVersion: z.number().int().min(0),
-  steps: z.array(
-    z.object({
-      /** Index into the journal's `inverses`, which is what outcomes report on. */
-      index: z.number().int().min(0),
-      inverse: InverseOperation,
-    }),
-  ),
-});
-export type RollbackDelivery = z.infer<typeof RollbackDelivery>;
+export { RollbackDelivery } from './wire.js';
 
 /** One inverse, paired with the operation it reverses. */
 export interface RollbackStep {
@@ -314,6 +272,7 @@ export function rollbackDeliveryFor(
   options: { expectedVersion: number; reason?: string },
 ): RollbackDelivery {
   return RollbackDelivery.parse({
+    kind: 'rollback',
     journalId: plan.journalId,
     changeSetId: plan.changeSetId,
     expectedVersion: options.expectedVersion,
@@ -324,54 +283,15 @@ export function rollbackDeliveryFor(
 }
 
 /**
- * TODO(M11): fold into `DaemonStore` in `store.ts`, alongside `putJournal`.
+ * Re-exported from `store.ts`, where M40 moved it.
  *
- * It is a separate seam today only because `store.ts` belongs to another author
- * this milestone, and inventing a second `DaemonStore` here would be worse than
- * a small port that is obviously temporary. The M11 report names the three
- * methods to move.
- *
- * Note what this does *not* change about `JournalRecord`: the daemon still holds
- * the handle and the version bracket, and now also the inverses — because
- * without them a rollback cannot outlive the Studio session that applied the
- * change, which is not a safety net, it is a session feature. It still does not
- * interpret them.
+ * The four methods now sit on `DaemonStore` itself, so a daemon handed a
+ * persistent adapter keeps its inverses in that adapter rather than in a
+ * process-lifetime Map. The name stays here because this file is where the
+ * rollback mechanism is explained, and a reader arriving at `RollbackDeps`
+ * should not have to go looking for what a journal-entry store is.
  */
-export interface JournalEntryStore {
-  /** Refuses an id already recorded, for the reason `putJournal` does. */
-  putJournalEntry(entry: JournalEntry): Promise<void>;
-  getJournalEntry(id: string): Promise<JournalEntry | null>;
-  putRollbackResult(result: RollbackResult): Promise<void>;
-  getRollbackResult(journalId: string): Promise<RollbackResult | null>;
-}
-
-export class InMemoryJournalEntryStore implements JournalEntryStore {
-  readonly #entries = new Map<string, JournalEntry>();
-  readonly #results = new Map<string, RollbackResult>();
-
-  async putJournalEntry(entry: JournalEntry): Promise<void> {
-    if (this.#entries.has(entry.id)) {
-      throw new ForgeBridgeError(
-        'invalid_request',
-        `journal ${entry.id} already carries inverse operations`,
-        'The inverses of an apply are captured once, before it runs; a second upload would replace the only route back.',
-      );
-    }
-    this.#entries.set(entry.id, entry);
-  }
-
-  async getJournalEntry(id: string): Promise<JournalEntry | null> {
-    return this.#entries.get(id) ?? null;
-  }
-
-  async putRollbackResult(result: RollbackResult): Promise<void> {
-    this.#results.set(result.journalId, result);
-  }
-
-  async getRollbackResult(journalId: string): Promise<RollbackResult | null> {
-    return this.#results.get(journalId) ?? null;
-  }
-}
+export type { JournalEntryStore } from './store.js';
 
 export interface RollbackDeps {
   store: DaemonStore;

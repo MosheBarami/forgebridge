@@ -4,7 +4,7 @@ import { connect } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { DENY_ALL_POLICY } from '@forgebridge/core';
 import { LIMITS, PROTOCOL_VERSION, ProtocolError, STRUCTURAL_PROPERTIES, Validation } from '@forgebridge/protocol';
-import type { ChangeSet } from '@forgebridge/protocol';
+import type { ApplyResult, ChangeSet } from '@forgebridge/protocol';
 import { LOOPBACK_HOST, MAX_ERROR_MESSAGE_CHARS } from '../src/http.js';
 import { InMemoryDaemonStore } from '../src/store.js';
 import { DAEMON_VERSION, type ForgeBridgeDaemon } from '../src/server.js';
@@ -802,12 +802,100 @@ describe('GET /v1/changesets/:id/diff', () => {
   });
 });
 
-describe('POST /v1/journal/:id/rollback', () => {
-  it('dispatches a rollback to the paired consumer', async () => {
+/**
+ * The journal entry a plugin uploads after an apply: the inverses it captured
+ * before it touched anything, paired one-to-one with the operations that ran.
+ *
+ * Built from the ChangeSet the daemon actually holds rather than from a literal,
+ * because `recordJournalEntry` compares the two — a fixture that invented its
+ * own operation would be testing the refusal path while claiming to test the
+ * happy one.
+ */
+function journalEntryFor(
+  client: PairedClient,
+  changeSet: ChangeSet,
+  result: ApplyResult,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: result.journalId,
+    projectId: client.projectId,
+    changeSetId: changeSet.id,
+    summary: changeSet.summary,
+    applied: changeSet.operations.map((operation, index) => ({ index, operation })),
+    inverses: changeSet.operations.map((operation) => ({
+      inverse: 'restoreSource',
+      path: operation.path,
+      previousSource: 'print("v1")',
+    })),
+    versionBefore: 0,
+    versionAfter: result.newVersion,
+    appliedAt: result.appliedAt,
+    rolledBackAt: null,
+    ...overrides,
+  };
+}
+
+/** Apply, then upload the inverses — the sequence a plugin performs. */
+async function applied(
+  daemon: ForgeBridgeDaemon,
+): Promise<{ client: PairedClient; changeSet: ChangeSet; result: ApplyResult }> {
+  const client = await pair(daemon);
+  const changeSet = makeChangeSet({ projectId: client.projectId });
+  expect((await submit(daemon, changeSet)).status).toBe(201);
+  expect((await approve(daemon, changeSet.id)).status).toBe(202);
+  const result = makeApplyResult(changeSet.id, { newVersion: 1 });
+  expect((await client.postEnvelope(`/v1/changesets/${changeSet.id}/apply-result`, 1, result)).status).toBe(200);
+  return { client, changeSet, result };
+}
+
+describe('POST /v1/journal/:id/entry', () => {
+  it('takes the inverses off the Studio session that captured them', async () => {
+    // The half of M11 that needed no protocol addition. Before this route the
+    // inverses stayed inside the session that captured them, so closing Studio
+    // was the end of the road back from an apply.
     const daemon = await daemonFor();
-    const { client, changeSetId } = await readyToDeliver(daemon);
-    const result = makeApplyResult(changeSetId, { newVersion: 1 });
-    await client.postEnvelope(`/v1/changesets/${changeSetId}/apply-result`, 1, result);
+    const { client, changeSet, result } = await applied(daemon);
+
+    const response = await client.postEnvelope(
+      `/v1/journal/${result.journalId}/entry`,
+      2,
+      journalEntryFor(client, changeSet, result),
+    );
+    expect(response.status).toBe(200);
+    expect(response.json<{ inverses: number }>().inverses).toBe(changeSet.operations.length);
+  });
+
+  it('refuses an entry whose id is not the one in the path', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await applied(daemon);
+    const response = await client.postEnvelope(
+      `/v1/journal/${randomUUID()}/entry`,
+      2,
+      journalEntryFor(client, changeSet, result),
+    );
+    expect(response.status).toBe(400);
+    expect(response.json<{ message: string }>().message).toContain('does not match the journal in the path');
+  });
+
+  it('refuses an unauthenticated upload — this record decides what is survivable', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await applied(daemon);
+    const response = await raw({
+      port: client.port,
+      method: 'POST',
+      path: `/v1/journal/${result.journalId}/entry`,
+      body: JSON.stringify(journalEntryFor(client, changeSet, result)),
+    });
+    expect(response.status).toBe(401);
+  });
+});
+
+describe('POST /v1/journal/:id/rollback', () => {
+  it('dispatches the inverses themselves, in replay order', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await applied(daemon);
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, changeSet, result));
 
     const response = await raw({
       port: client.port,
@@ -818,23 +906,44 @@ describe('POST /v1/journal/:id/rollback', () => {
     });
 
     expect(response.status).toBe(202);
-    expect(response.json<{ status: string }>().status).toBe('dispatched');
+    expect(response.json<{ status: string; steps: number }>()).toMatchObject({ status: 'dispatched', steps: 1 });
 
+    // The delivery carries the inverses now, not just the ids. That is what
+    // makes a rollback survive the session that applied the change.
     const delivered = await client.poll(1);
     expect(JSON.parse(delivered.json<{ payload: string }>().payload)).toMatchObject({
       kind: 'rollback',
       journalId: result.journalId,
+      restoresToVersion: 0,
+      steps: [{ index: 0, inverse: { inverse: 'restoreSource', path: 'ServerScriptService.Shop' } }],
     });
 
-    // Dispatched is not done: only the consumer holding the inverses can say so.
+    // Dispatched is not done: only the consumer that replays them can say so.
     expect((await daemon.store.getJournal(result.journalId))?.rolledBackAt).toBeNull();
+  });
+
+  it('refuses to dispatch a rollback whose inverses never reached this daemon', async () => {
+    // Fail closed, and say which of the two problems it is. A daemon that
+    // dispatched an empty reversal would have the user watching a rollback that
+    // can never arrive; the refusal names the one route that might still work.
+    const daemon = await daemonFor();
+    const { client, result } = await applied(daemon);
+
+    const response = await raw({
+      port: client.port,
+      method: 'POST',
+      path: `/v1/journal/${result.journalId}/rollback`,
+      headers: producerHeaders(daemon),
+      body: JSON.stringify({ journalId: result.journalId, expectedVersion: 1 }),
+    });
+    expect(response.status).toBe(404);
+    expect(response.json<{ message: string }>().message).toContain('no inverse operations on this daemon');
   });
 
   it('refuses a rollback against a version the project has moved past', async () => {
     const daemon = await daemonFor();
-    const { client, changeSetId } = await readyToDeliver(daemon);
-    const result = makeApplyResult(changeSetId, { newVersion: 1 });
-    await client.postEnvelope(`/v1/changesets/${changeSetId}/apply-result`, 1, result);
+    const { client, changeSet, result } = await applied(daemon);
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, changeSet, result));
 
     const response = await raw({
       port: client.port,
@@ -845,6 +954,182 @@ describe('POST /v1/journal/:id/rollback', () => {
     });
     expect(response.status).toBe(409);
     expect(response.json<{ code: string }>().code).toBe('stale_base');
+  });
+});
+
+describe('POST /v1/journal/:id/rollback-result', () => {
+  /** Dispatch a rollback and hand back what a consumer needs to report on it. */
+  async function dispatched(daemon: ForgeBridgeDaemon) {
+    const { client, changeSet, result } = await applied(daemon);
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, changeSet, result));
+    const response = await raw({
+      port: client.port,
+      method: 'POST',
+      path: `/v1/journal/${result.journalId}/rollback`,
+      headers: producerHeaders(daemon),
+      body: JSON.stringify({ journalId: result.journalId, expectedVersion: 1 }),
+    });
+    expect(response.status).toBe(202);
+    return { client, changeSet, result };
+  }
+
+  function report(changeSet: ChangeSet, result: ApplyResult, outcomes: { index: number; ok: boolean; error?: string }[]) {
+    return {
+      journalId: result.journalId,
+      changeSetId: changeSet.id,
+      outcomes,
+      newVersion: 2,
+      rolledBackAt: new Date().toISOString(),
+      pluginVersion: '0.1.0',
+    };
+  }
+
+  it('closes the loop every surface above the daemon was saying "dispatched" about', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await dispatched(daemon);
+
+    const response = await client.postEnvelope(
+      `/v1/journal/${result.journalId}/rollback-result`,
+      3,
+      report(changeSet, result, [{ index: 0, ok: true }]),
+    );
+    expect(response.status).toBe(200);
+    expect(response.json<{ state: string; version: number }>()).toMatchObject({ state: 'rolled_back', version: 2 });
+    expect((await daemon.store.getJournal(result.journalId))?.rolledBackAt).not.toBeNull();
+  });
+
+  it('reports a partial reversal as partial and leaves rolledBackAt null', async () => {
+    // The outcome that must never be rounded up. Half a tree restored is a state
+    // neither the user nor the journal describes, and the inverses that would
+    // have finished the job are spent.
+    const daemon = await daemonFor();
+    const changeSet = makeChangeSet({
+      operations: [
+        { op: 'writeScript', path: 'ServerScriptService.Shop', scriptType: 'Script', source: 'print("a")' },
+        { op: 'writeScript', path: 'ServerScriptService.Till', scriptType: 'Script', source: 'print("b")' },
+      ],
+    });
+    const client = await pair(daemon);
+    const owned = makeChangeSet({ ...changeSet, projectId: client.projectId });
+    expect((await submit(daemon, owned)).status).toBe(201);
+    expect((await approve(daemon, owned.id)).status).toBe(202);
+    const result = makeApplyResult(owned.id, {
+      newVersion: 1,
+      outcomes: [
+        { index: 0, ok: true },
+        { index: 1, ok: true },
+      ],
+    });
+    await client.postEnvelope(`/v1/changesets/${owned.id}/apply-result`, 1, result);
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, owned, result));
+    expect(
+      (
+        await raw({
+          port: client.port,
+          method: 'POST',
+          path: `/v1/journal/${result.journalId}/rollback`,
+          headers: producerHeaders(daemon),
+          body: JSON.stringify({ journalId: result.journalId, expectedVersion: 1 }),
+        })
+      ).status,
+    ).toBe(202);
+
+    const response = await client.postEnvelope(
+      `/v1/journal/${result.journalId}/rollback-result`,
+      3,
+      report(owned, result, [
+        { index: 0, ok: true },
+        { index: 1, ok: false, error: 'the script was already gone' },
+      ]),
+    );
+    expect(response.json<{ state: string }>().state).toBe('rollback_partial');
+    expect((await daemon.store.getJournal(result.journalId))?.rolledBackAt).toBeNull();
+  });
+
+  it('refuses a reversal nobody asked for', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await applied(daemon);
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, changeSet, result));
+
+    const response = await client.postEnvelope(
+      `/v1/journal/${result.journalId}/rollback-result`,
+      3,
+      report(changeSet, result, [{ index: 0, ok: true }]),
+    );
+    expect(response.status).toBe(400);
+    expect(response.json<{ message: string }>().message).toContain('no rollback was requested');
+  });
+
+  it('refuses an unauthenticated report — it is what stamps a journal reversed', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await dispatched(daemon);
+    const response = await raw({
+      port: client.port,
+      method: 'POST',
+      path: `/v1/journal/${result.journalId}/rollback-result`,
+      body: JSON.stringify(report(changeSet, result, [{ index: 0, ok: true }])),
+    });
+    expect(response.status).toBe(401);
+    expect((await daemon.store.getJournal(result.journalId))?.rolledBackAt).toBeNull();
+  });
+});
+
+describe('GET /v1/journal/:id', () => {
+  it('walks a journal from applied to requested to rolled back', async () => {
+    const daemon = await daemonFor();
+    const { client, changeSet, result } = await applied(daemon);
+    const read = async () =>
+      (
+        await raw({
+          port: client.port,
+          method: 'GET',
+          path: `/v1/journal/${result.journalId}`,
+          headers: producerHeaders(daemon),
+        })
+      ).json<{ state: string; inverses: number | null; result: { outcomes: unknown[] } | null }>();
+
+    // Null, not zero: the inverses have not been uploaded, which is a different
+    // fact from an apply with nothing to undo.
+    expect(await read()).toMatchObject({ state: 'applied', inverses: null, result: null });
+
+    await client.postEnvelope(`/v1/journal/${result.journalId}/entry`, 2, journalEntryFor(client, changeSet, result));
+    expect((await read()).inverses).toBe(1);
+
+    await raw({
+      port: client.port,
+      method: 'POST',
+      path: `/v1/journal/${result.journalId}/rollback`,
+      headers: producerHeaders(daemon),
+      body: JSON.stringify({ journalId: result.journalId, expectedVersion: 1 }),
+    });
+    expect((await read()).state).toBe('rollback_requested');
+
+    await client.postEnvelope(`/v1/journal/${result.journalId}/rollback-result`, 3, {
+      journalId: result.journalId,
+      changeSetId: changeSet.id,
+      outcomes: [{ index: 0, ok: true }],
+      newVersion: 2,
+      rolledBackAt: new Date().toISOString(),
+      pluginVersion: '0.1.0',
+    });
+
+    const final = await read();
+    expect(final.state).toBe('rolled_back');
+    // The consumer's own report, verbatim. A summary is not a record: the one
+    // moment a user needs to know which inverse failed is the moment the rest
+    // of them did not.
+    expect(final.result?.outcomes).toEqual([{ index: 0, ok: true }]);
+  });
+
+  it('is producer surface — it names what changed in the user\'s place', async () => {
+    const daemon = await daemonFor();
+    const { client, result } = await applied(daemon);
+    const response = await raw({
+      port: client.port,
+      method: 'GET',
+      path: `/v1/journal/${result.journalId}`,
+    });
+    expect(response.status).toBe(401);
   });
 });
 

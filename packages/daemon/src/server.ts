@@ -6,6 +6,7 @@ import {
   ApplyResult,
   ChangeSet,
   ForgeBridgeError,
+  JournalEntry,
   LIMITS,
   Link,
   PLUGIN_VERSION_HEADER,
@@ -14,6 +15,7 @@ import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
   RollbackRequest,
+  RollbackResult,
   deletionCount,
   isCompatible,
   isDestructive,
@@ -66,6 +68,15 @@ import {
   type RunRecord,
 } from './store.js';
 import {
+  journalStateOf,
+  planRollbackFor,
+  recordJournalEntry,
+  recordRollbackResult,
+  rollbackDeliveryFor,
+  type JournalEntryStore,
+  type RollbackDeps,
+} from './rollback.js';
+import {
   EVENT_STREAM_KEEP_ALIVE_MS,
   RunEventLogs,
   beginEventStream,
@@ -78,6 +89,7 @@ import {
   ApproveRequest,
   ChangeSetDiff,
   DeliveryPayload,
+  JournalStateResponse,
   ModelsSnapshot,
   OutputBatch,
   PairRequest,
@@ -316,6 +328,22 @@ export class ForgeBridgeDaemon {
    */
   readonly #keyring = new Map<string, Buffer>();
 
+  /**
+   * The inverse operations, on the same store as everything else (M40).
+   *
+   * A getter rather than a field: `this.store` is assigned in the constructor
+   * body, and a field initialiser would run before that and capture undefined.
+   *
+   * They used to live in a separate in-memory store, which meant a daemon
+   * handed a persistent `DaemonStore` still lost its inverses on restart — a
+   * durable daemon whose one non-durable record was the only route back from a
+   * destructive apply. `DaemonStore` carries them now, so a caller that passes
+   * `@forgebridge/storage-sqlite` gets a rollback that outlives the process.
+   */
+  get #journals(): JournalEntryStore {
+    return this.store;
+  }
+
   constructor(options: DaemonOptions = {}) {
     this.store = options.store ?? new InMemoryDaemonStore({ now: options.now ?? Date.now });
     this.defaultProjectId = options.projectId ?? randomUUID();
@@ -508,9 +536,31 @@ export class ForgeBridgeDaemon {
       return this.#applyResult(req, res, cors, null);
     }
 
-    if (resource === 'journal' && rest[1] === 'rollback' && rest.length === 2 && method === 'POST') {
-      this.#assertProducer(req);
-      return this.#rollback(req, res, rest[0] as string, cors);
+    if (resource === 'journal') {
+      const id = rest[0];
+      // A read of one apply and any reversal of it. Producer surface: it names
+      // what was changed in the user's place and carries the consumer's own
+      // report of what a rollback did or did not undo.
+      if (id && rest.length === 1 && method === 'GET') {
+        this.#assertProducer(req);
+        return this.#journalState(res, id, cors);
+      }
+      if (id && rest[1] === 'rollback' && rest.length === 2 && method === 'POST') {
+        this.#assertProducer(req);
+        return this.#rollback(req, res, id, cors);
+      }
+      // The two below are consumer surface, enveloped and MAC'd like
+      // `apply-result`, and for a stronger reason than symmetry. The first
+      // writes the record that decides whether a destructive apply is
+      // survivable; the second is the only thing that can stamp a journal
+      // reversed. A process that can reach loopback must be able to write
+      // neither.
+      if (id && rest[1] === 'entry' && rest.length === 2 && method === 'POST') {
+        return this.#journalEntry(req, res, id, cors);
+      }
+      if (id && rest[1] === 'rollback-result' && rest.length === 2 && method === 'POST') {
+        return this.#rollbackResult(req, res, id, cors);
+      }
     }
 
     if (resource === 'output' && rest.length === 0) {
@@ -1473,32 +1523,175 @@ export class ForgeBridgeDaemon {
       );
     }
 
-    const link = await this.#requirePairedLink(journal.projectId);
-    const delivery = await this.#enqueue(link.id, {
-      kind: 'rollback',
-      journalId: journal.id,
-      changeSetId: journal.changeSetId,
-      expectedVersion: current,
-      ...(body.reason ? { reason: body.reason } : {}),
-    });
+    // The plan is built — and can refuse — before anything is dispatched or any
+    // timestamp is moved. Every way a journal can be unreplayable is a reason to
+    // send nothing at all: a reversal that discovers one halfway through has
+    // already half-restored the tree, which is the state ADR-012 is least able
+    // to help with. `planRollbackFor` also refuses when this daemon holds no
+    // inverses for the apply, and says so in the words that send a user to the
+    // right place — that Studio session may still be able to undo in-session,
+    // and nothing else can.
+    const plan = await planRollbackFor(this.#rollbackDeps(), journalId);
 
-    // Dispatched, not done. The inverse operations live on the consumer that
-    // captured them, so only the consumer can say a rollback completed.
-    //
-    // TODO(M11): the protocol has no way for a consumer to report a completed
-    // rollback — `ApplyResult` cannot say "this was the inverse of journal X",
-    // so `rolledBackAt` stays null and the UI must show "requested". Owner: the
-    // protocol maintainer, as an additive field on ApplyResult or a sibling
-    // RollbackResult. Inferring completion from the next ApplyResult would be a
-    // heuristic on the one mechanism that must never guess.
+    const link = await this.#requirePairedLink(journal.projectId);
+
+    // Stamped before the delivery is enqueued, not after, and the ordering is
+    // load-bearing rather than tidy. `recordRollbackResult` refuses a reversal
+    // nobody asked for — that is what stops a consumer undoing approved work on
+    // its own initiative — and it decides that by reading this timestamp. A
+    // consumer that polled, replayed and reported between the enqueue and this
+    // write would have its legitimate result refused, and the inverses it just
+    // spent would be recorded nowhere. The opposite failure is survivable: a
+    // journal marked requested whose enqueue then threw is one the user can
+    // simply ask to roll back again.
     await this.store.patchJournal(journal.id, {
       rollbackRequestedAt: new Date(this.#now()).toISOString(),
+    });
+
+    // Dispatched, not done — and now that is a statement about timing rather
+    // than about the protocol. The inverses travel with the delivery, the
+    // consumer replays them, and it reports back to
+    // `POST /v1/journal/:id/rollback-result`. Until that report arrives the
+    // honest word is still "requested", which is what `GET /v1/journal/:id`
+    // answers and what the CLI waits on.
+    const delivery = await this.#enqueue(
+      link.id,
+      rollbackDeliveryFor(plan, {
+        expectedVersion: current,
+        ...(body.reason ? { reason: body.reason } : {}),
+      }),
+    );
+
+    this.#logger.info('rollback dispatched', {
+      journalId: journal.id,
+      changeSetId: journal.changeSetId,
+      steps: plan.steps.length,
+      restoresToVersion: plan.restoresToVersion,
     });
 
     writeJson(
       res,
       202,
-      { journalId: journal.id, changeSetId: journal.changeSetId, status: 'dispatched', nonce: delivery.nonce },
+      {
+        journalId: journal.id,
+        changeSetId: journal.changeSetId,
+        status: 'dispatched',
+        nonce: delivery.nonce,
+        steps: plan.steps.length,
+      },
+      cors,
+    );
+  }
+
+  /**
+   * `POST /v1/journal/:id/entry` — the consumer uploading the inverses it
+   * captured before it applied anything.
+   *
+   * This is the half of M11 that needed no protocol addition: `JournalEntry` was
+   * always in the frozen contract and simply had no route, so the inverses stayed
+   * in the Studio session that captured them and a closed Studio was the end of
+   * the road back from an apply.
+   *
+   * Every check lives in `recordJournalEntry`, which compares the entry against
+   * the apply this daemon actually witnessed rather than believing it.
+   */
+  async #journalEntry(
+    req: IncomingMessage,
+    res: ServerResponse,
+    journalId: string,
+    cors: Record<string, string>,
+  ): Promise<void> {
+    const { link, payload } = await this.#openFromConsumer(req, LIMITS.MAX_CHANGESET_BYTES);
+    const entry = parseOrThrow(JournalEntry, payload, 'journal entry');
+    if (entry.id !== journalId) {
+      throw new ForgeBridgeError('invalid_request', 'journal entry does not match the journal in the path');
+    }
+
+    const ack = await recordJournalEntry(this.#rollbackDeps(), link, entry);
+    this.#logger.info('journal inverses recorded', ack);
+    writeJson(res, 200, ack, cors);
+  }
+
+  /**
+   * `POST /v1/journal/:id/rollback-result` — the consumer reporting a reversal.
+   *
+   * The report the CLI, the A2A connector and the Python SDK were all saying
+   * "dispatched" for want of. A partial reversal is reported as `partial` and
+   * leaves `rolledBackAt` null, because the entry is then neither reversed nor
+   * intact and a timestamp saying otherwise would be the journal's own record
+   * lying about the one thing it exists to be right about.
+   */
+  async #rollbackResult(
+    req: IncomingMessage,
+    res: ServerResponse,
+    journalId: string,
+    cors: Record<string, string>,
+  ): Promise<void> {
+    const { link, payload } = await this.#openFromConsumer(req, LIMITS.MAX_CHANGESET_BYTES);
+    const result = parseOrThrow(RollbackResult, payload, 'rollback result');
+    if (result.journalId !== journalId) {
+      throw new ForgeBridgeError('invalid_request', 'rollback result does not match the journal in the path');
+    }
+
+    const ack = await recordRollbackResult(this.#rollbackDeps(), link, result);
+    await this.store.patchLink(link.id, {
+      lastSeenAt: result.rolledBackAt,
+      pluginVersion: result.pluginVersion,
+    });
+
+    this.#logger.info('rollback result recorded', {
+      journalId: ack.journalId,
+      status: ack.status,
+      reversed: result.outcomes.filter((outcome) => outcome.ok).length,
+      of: result.outcomes.length,
+      newVersion: ack.version,
+    });
+
+    // `state` rather than `status`: it is the same vocabulary `GET
+    // /v1/journal/:id` answers in, and two words for one fact is how three
+    // surfaces came to describe a rollback three different ways.
+    const record = await this.store.getJournal(result.journalId);
+    writeJson(
+      res,
+      200,
+      {
+        journalId: ack.journalId,
+        changeSetId: ack.changeSetId,
+        state: record ? journalStateOf(record, result) : ack.status,
+        version: ack.version,
+      },
+      cors,
+    );
+  }
+
+  /** `GET /v1/journal/:id` — what happened to one apply, and to any reversal. */
+  async #journalState(res: ServerResponse, journalId: string, cors: Record<string, string>): Promise<void> {
+    const record = await this.store.getJournal(journalId);
+    if (!record) throw new ForgeBridgeError('not_found', 'no such journal entry');
+
+    const entry = await this.#journals.getJournalEntry(journalId);
+    const result = await this.#journals.getRollbackResult(journalId);
+
+    writeJson(
+      res,
+      200,
+      JournalStateResponse.parse({
+        journalId: record.id,
+        changeSetId: record.changeSetId,
+        projectId: record.projectId,
+        summary: record.summary,
+        state: journalStateOf(record, result),
+        versionBefore: record.versionBefore,
+        versionAfter: record.versionAfter,
+        appliedAt: record.appliedAt,
+        rollbackRequestedAt: record.rollbackRequestedAt,
+        rolledBackAt: record.rolledBackAt,
+        // Null, not 0, when the inverses never reached this daemon. The two are
+        // different facts: 0 is an apply with nothing to undo, null is an apply
+        // whose only route back stayed inside a Studio session.
+        inverses: entry ? entry.inverses.length : null,
+        result,
+      }),
       cors,
     );
   }
@@ -1644,6 +1837,11 @@ export class ForgeBridgeDaemon {
    */
   #assertProducer(req: IncomingMessage): void {
     assertProducerToken(this.producerToken, headerValue(req, PRODUCER_TOKEN_HEADER));
+  }
+
+  /** The three things `rollback.ts` needs, assembled in one place. */
+  #rollbackDeps(): RollbackDeps {
+    return { store: this.store, journals: this.#journals, now: this.#now };
   }
 
   async #requirePairedLink(projectId: string): Promise<Link> {
