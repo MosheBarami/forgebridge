@@ -24,8 +24,15 @@ export const STALENESS_THRESHOLD_DAYS = 14;
  * Resolved against this module's own URL so the same path works from `src` under
  * vitest and from `dist` in a published install. A `process.cwd()`-relative path
  * would resolve to whatever directory the daemon happened to start in.
+ *
+ * `.href` rather than the `URL` object, and that is not redundant. `fileURLToPath`
+ * accepts either, but it identifies a `URL` by realm, so a bundler that supplies
+ * its own `URL` implementation hands `node:url` an object it refuses with
+ * "Received an instance of URL" — which is what `next build` did to the models
+ * settings page. A string carries no realm, so it is the form that survives
+ * being bundled by something we do not control.
  */
-export const CATALOG_PATH = fileURLToPath(new URL('../data/catalog.json', import.meta.url));
+export const CATALOG_PATH = fileURLToPath(new URL('../data/catalog.json', import.meta.url).href);
 
 export interface Staleness {
   syncedAt: Date;

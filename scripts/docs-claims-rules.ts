@@ -106,7 +106,7 @@ export function collectDocs(root: string): Doc[] {
     .map((rel) => ({ path: rel, text: readFileSync(path.join(root, rel), 'utf8') }));
 }
 
-function readManifest(file: string): { name?: string; scripts?: Record<string, string>; bin?: Record<string, string> } | null {
+function readManifest(file: string): { name?: string; scripts?: Record<string, string>; bin?: Record<string, string>; workspaces?: string[] } | null {
   if (!existsSync(file)) return null;
   try {
     return JSON.parse(readFileSync(file, 'utf8'));
@@ -115,22 +115,48 @@ function readManifest(file: string): { name?: string; scripts?: Record<string, s
   }
 }
 
-export function collectRepoFacts(root: string): RepoFacts {
-  const packagesDir = path.join(root, 'packages');
-  const packageNames = existsSync(packagesDir)
-    ? readdirSync(packagesDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name)
-    : [];
+/**
+ * The directories the root manifest actually treats as workspaces, e.g.
+ * `packages` and `apps` for `["packages/*", "apps/*"]`.
+ *
+ * Read from the manifest rather than written down here, because it has already
+ * been wrong once: the list was `packages` alone, `apps/` arrived with the web
+ * app, and D5 then reported `npm run dev` as a script no manifest declares —
+ * while `apps/web/package.json` declared it three lines from where the gate was
+ * looking. A gate that knows a subset of the workspace is a gate that fails on
+ * the next directory somebody adds.
+ */
+function workspaceDirs(rootManifest: ReturnType<typeof readManifest>): string[] {
+  const globs = rootManifest?.workspaces ?? [];
+  return [...new Set(globs.map((glob) => glob.split('/')[0] ?? '').filter((dir) => dir !== ''))];
+}
 
-  const packages = new Set(
-    packageNames.filter((name) => existsSync(path.join(packagesDir, name, 'package.json'))),
+/** Directory names carrying a package.json directly under `parent`. */
+function manifestDirs(parent: string): string[] {
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((name) => existsSync(path.join(parent, name, 'package.json')));
+}
+
+export function collectRepoFacts(root: string): RepoFacts {
+  const rootManifest = readManifest(path.join(root, 'package.json'));
+
+  // `packages` stays packages-only: it answers "does `packages/<name>` name a
+  // real package?" for D1, and `apps/web` is not `packages/web`.
+  const packages = new Set(manifestDirs(path.join(root, 'packages')));
+
+  // Manifests, though, are every workspace's. `npmScripts` and `binNames` are
+  // claims about what this repository can be asked to run, and `apps/web`
+  // answering `npm run dev` is as true as `packages/cli` answering `npm test`.
+  const workspaceManifests = workspaceDirs(rootManifest).flatMap((dir) =>
+    manifestDirs(path.join(root, dir)).map((name) => readManifest(path.join(root, dir, name, 'package.json'))),
   );
 
-  const manifests = [
-    readManifest(path.join(root, 'package.json')),
-    ...[...packages].map((name) => readManifest(path.join(packagesDir, name, 'package.json'))),
-  ].filter((m): m is NonNullable<typeof m> => m !== null);
+  const manifests = [rootManifest, ...workspaceManifests].filter(
+    (m): m is NonNullable<typeof m> => m !== null,
+  );
 
   const npmScripts = new Set(manifests.flatMap((m) => Object.keys(m.scripts ?? {})));
   const binNames = new Set(manifests.flatMap((m) => Object.keys(m.bin ?? {})));

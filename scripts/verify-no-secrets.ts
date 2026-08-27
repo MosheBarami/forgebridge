@@ -68,8 +68,20 @@ export const RULE_TEXT: Record<SecretRule, string> = {
   S4: 'committed environment file',
 };
 
+/**
+ * Build output and vendored trees. Nothing here is authored, so a hit in one of
+ * them is a finding about a generator rather than about this repository.
+ *
+ * `.next` and `out` join the list for the web app: `next build` writes the
+ * absolute path of the machine that ran it into its generated route types, and
+ * S3 is right to call that a machine-local path — it is simply not our file.
+ * Every name here is already in a `.gitignore`, which is the same judgement
+ * made twice; a gate that scanned them would fail on any developer's laptop the
+ * moment they built.
+ */
 const SKIP_DIRS = new Set([
   'node_modules', 'dist', 'build', 'coverage', '.turbo', '.git', '.venv', '__pycache__',
+  '.next', 'out',
 ]);
 
 /**
