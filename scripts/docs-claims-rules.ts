@@ -141,12 +141,24 @@ function workspaceDirs(rootManifest: ReturnType<typeof readManifest>): string[] 
 }
 
 /** Directory names carrying a package.json directly under `parent`. */
-function manifestDirs(parent: string): string[] {
-  if (!existsSync(parent)) return [];
-  return readdirSync(parent, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .filter((name) => existsSync(path.join(parent, name, 'package.json')));
+/** What counts as a package manifest in this repository. */
+const MANIFEST_FILES = ['package.json', 'pyproject.toml'] as const;
+
+function manifestDirs(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) =>
+      // A manifest, not specifically a package.json. `packages/sdk-python` is a
+      // real workspace member with 143 tests and a pyproject.toml, and reading
+      // only package.json made D1 report it as a package that does not exist —
+      // so a document naming it correctly was the thing that failed. A gate
+      // whose idea of "package" is narrower than the repository's will keep
+      // firing on true statements, which is how a gate gets switched off.
+      MANIFEST_FILES.some((manifest) => existsSync(path.join(dir, entry.name, manifest))),
+    )
+    .map((entry) => entry.name)
+    .sort();
 }
 
 export function collectRepoFacts(root: string): RepoFacts {

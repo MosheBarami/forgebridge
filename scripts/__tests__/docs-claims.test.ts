@@ -623,6 +623,18 @@ describe('D1 — a document that names packages/<x> names a real package', () =>
   it('names no package that has no manifest, without a milestone marker', () => {
     expect(report(checkPackageExistence(DOCS, FACTS))).toBe('');
   });
+
+  it('counts a Python package as a package', () => {
+    // `packages/sdk-python` carries a pyproject.toml, not a package.json, and
+    // reading only package.json made D1 report a true statement about it as a
+    // violation. A gate whose idea of a package is narrower than the repository's
+    // fires on correct documentation, which is how a gate gets switched off.
+    expect(FACTS.packages.has('sdk-python')).toBe(true);
+  });
+
+  it('still refuses a directory with no manifest of any kind — the control', () => {
+    expect(FACTS.packages.has('ghost')).toBe(false);
+  });
 });
 
 describe('D2 — a tool claimed "in CI" is a tool some workflow runs', () => {
