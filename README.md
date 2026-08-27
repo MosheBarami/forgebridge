@@ -149,18 +149,40 @@ cd plugin && rojo build --output ForgeBridge.rbxm
 #    Roblox asks once for permission to let the plugin reach that address.
 #    The plugin explains what it is about to ask for before that dialog appears.
 
-# 4. Review and apply. Every command takes --json for scripting.
+# 4. Run a prompt. Prints every model the router tries, as it tries them.
+npx forgebridge run "add a purchase handler to the shop"
+#    Ends at a changeset id in "validated". Nothing has touched the place.
+
+# 5. Review and apply. Every command takes --json for scripting.
 npx forgebridge status
 npx forgebridge diff <changeset-id>    # review before anything touches the place
 npx forgebridge apply <changeset-id>
 npx forgebridge rollback <journal-id> --expected-version <n>
 ```
 
-> **`forgebridge run` refuses, on purpose.** There is no run endpoint on the `/v1` surface
-> for it to call, and inventing one inside a connector is what ADR-009 forbids. Until M09
-> lands that route, a ChangeSet reaches the daemon from an MCP client, from an A2A agent,
-> or from anything that can POST to `127.0.0.1` — and `diff`, `apply` and `rollback` above
-> work on it. The command exists and says this rather than appearing to work.
+> **`forgebridge run` proposes; it never applies.** A run leaves a ChangeSet in
+> `validated` and prints the id, how to review it, and how a human approves it. There is no
+> `--yes`: that flag would be the off switch for the only gate between a model and your
+> place. It prints every model the router tried as it tries them, and again as one line
+> when it is done — `glm-5.2:free → rate-limited → minimax-m3:free` — because a model
+> swapped in without an attempt beside it is a silent substitution.
+
+That summary line is not an illustration. It is the shape of a real run made on 2026-08-27
+against OpenRouter's free tier, which fell through two models to reach a third:
+
+```
+models     z-ai/glm-5.2:free → rate-limited → nvidia/nemotron-3-super-120b-a12b:free → invalid-output → liquid/lfm-2.5-2.6b:free
+changeset  b000a62e-e6d4-42c5-9d29-ac59759a66b9  validated
+validation luau ok, policy ok
+           computed by forgebridge-daemon@0.1.0
+```
+
+Three properties of that run are worth naming, because each is a thing the pipeline is *for*.
+Every model reached is in `run.attempts` with its outcome, including the two that failed — the
+fallback is recorded, not just performed. The verdict is the daemon's: a ChangeSet submitted
+with its own `validation: ok` over unparseable Luau is re-judged and comes back `fail`, and
+`approve` refuses it. And the run stopped at `awaiting-approval` — the ChangeSet was never
+applied, because no code path from a run to an apply exists to take.
 
 ### Bring your own model
 
@@ -180,19 +202,19 @@ this lose trust.
 
 One core, five front doors — MCP, A2A, REST (the daemon today, a relay at M17), the CLI, and
 the SDKs. MCP is the primary connector (ADR-009), so an editor that speaks it reaches
-ForgeBridge through these eleven tools, which is the surface `packages/mcp` registers today:
+ForgeBridge through these twelve tools, which is the surface `packages/mcp` registers today:
 
 ```
 forge.list_projects        forge.read_tree         forge.read_script
-forge.propose_changeset    forge.diff_changeset    forge.apply_changeset
-forge.run_tests            forge.rollback          forge.tail_output
-forge.list_models          forge.link_status
+forge.start_run            forge.propose_changeset forge.diff_changeset
+forge.apply_changeset      forge.run_tests         forge.rollback
+forge.tail_output          forge.list_models       forge.link_status
 ```
 
 `propose_` and `apply_` are separate calls on purpose. An agent proposes; a human or a policy
 approves; only then does anything touch your place. A producer cannot approve its own work.
 
-Three of the eleven — `read_tree`, `read_script`, `run_tests` — refuse today, because the
+Three of the twelve — `read_tree`, `read_script`, `run_tests` — refuse today, because the
 `/v1` endpoints behind them do not exist yet (M09/M13/M31/M41); each refusal names the code
 and tells the model to ask you instead. And **no editor on that list has actually been tried**:
 what has been verified is a run against the reference MCP SDK's own client. M31 is the
@@ -291,9 +313,8 @@ row whose right-hand column is a bare milestone — `examples/`, `apps/web/` —
 that stays empty or absent until that milestone lands.
 
 A milestone number is not a claim of completeness: `packages/mcp` has not been tried from any of
-the editors M26 names, `packages/a2a` cannot drive a full run because no `/v1` route exposes one,
-and `forgebridge run` refuses for the same reason. Each row in
-[`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
+the editors M26 names, and no connector can read a tree snapshot, because no `/v1` route serves
+one. Each row in [`docs/MILESTONES.md`](docs/MILESTONES.md) says what its package still owes.
 
 `apps/relay/`, `packages/sdk-ts/` and `packages/opencloud/` appear in the diagram above and
 do not exist as directories at all — M17, M29 and M48 respectively.

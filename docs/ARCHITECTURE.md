@@ -203,12 +203,12 @@ the same claim.
 |---|---|---|---|
 | **REST** | `packages/daemon` | shipping | anything that can do HTTP, on `127.0.0.1` |
 | **REST + OpenAPI 3.1** | `apps/relay` | M17 — absent | the same surface, over a relay. The OpenAPI document it must serve is generated (M08) and committed at `packages/protocol/schema/openapi.json` |
-| **MCP** (stdio + streamable HTTP) | `packages/mcp` | built; eleven tools over both transports, verified against the reference SDK client. **No editor in the next column has been tried** (M26, M31) | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
-| **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, message and task methods. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
-| **CLI** | `packages/cli` | built; every subcommand but `run`, which has no `/v1` route to call and refuses out loud (M09, M28) | shells, CI, Codex/Copilot CLI, scripting |
-| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client, unpublished (M30). TypeScript: absent | embedding ForgeBridge in other products |
+| **MCP** (stdio + streamable HTTP) | `packages/mcp` | built; twelve tools over both transports, verified against the reference SDK client and against the M31 conformance suite on a live daemon. **No editor in the next column has been tried** (M26, M31) | Claude Code / Claude Desktop, Cursor, Windsurf, Cline, Roo, Kilo, Continue, OpenCode, Copilot agent mode, ChatGPT connectors |
+| **A2A** (agent card + tasks) | `packages/a2a` | built against A2A `v1.0.1`; card at `/.well-known/agent-card.json`, seven skills, message and task methods, conformant against the M31 suite. Streaming and push are declared unsupported and answer the required error (M27) | agent-to-agent orchestration, multi-agent frameworks |
+| **CLI** | `packages/cli` | built; every subcommand, `run` included — it streams the plan and the attempt log off `POST /v1/runs` and never approves. Conformant against the M31 suite | shells, CI, Codex/Copilot CLI, scripting |
+| **SDKs** | `packages/sdk-ts` (M29 — absent), `packages/sdk-python` | Python: generated pydantic models and the producer half of the client — `propose_changeset`, `start_run`, `approve_changeset` — unpublished, and not yet wired into the M31 suite (M30). TypeScript: absent | embedding ForgeBridge in other products |
 
-The MCP tool surface below is the shipped one — these are the eleven names
+The MCP tool surface below is the shipped one — these are the twelve names
 `packages/mcp/src/tools.ts` registers, and a live client has listed them. Three of them
 (`read_tree`, `read_script`, `run_tests`) refuse today, because the `/v1` endpoints they
 would call do not exist yet; each refusal names the code and tells the model to ask the
@@ -216,10 +216,14 @@ human instead:
 
 ```
 forge.list_projects        forge.read_tree         forge.read_script
-forge.propose_changeset    forge.diff_changeset    forge.apply_changeset
-forge.run_tests            forge.rollback          forge.tail_output
-forge.list_models          forge.link_status
+forge.start_run            forge.propose_changeset forge.diff_changeset
+forge.apply_changeset      forge.run_tests         forge.rollback
+forge.tail_output          forge.list_models       forge.link_status
 ```
+
+`start_run` and `propose_changeset` end in the same place — a ChangeSet the daemon
+validated and nobody approved — and differ only in who wrote the operations: the daemon's
+own model, or the model calling the tool. Neither is a route past the gate.
 
 `propose_` and `apply_` are deliberately separate calls: an external agent proposes,
 a human (or a policy) approves, and only then does anything touch the place. That guarantee
@@ -327,7 +331,7 @@ and tests in it:
 | `packages/luau-analysis/` | The Luau linter: a tokenizer, a block recogniser, eight rules, and an `analyse` that never reports a pass for a source it could not read. `packages/daemon` calls it on every ChangeSet. |
 | `packages/mcp/` | The MCP server: eleven tools over stdio and streamable HTTP, with the SDK confined to `src/server.ts` and everything above it tested against a double. |
 | `packages/a2a/` | The A2A connector: Agent Card, message and task methods over JSON-RPC, and an approval seam that makes apply unreachable without a human grant. |
-| `packages/cli/` | `forgebridge` — `daemon`, `link`, `status`, `diff`, `apply`, `rollback`, `models`, with `--json` output and distinct exit codes. `run` refuses (M09). |
+| `packages/cli/` | `forgebridge` — `daemon`, `link`, `status`, `models`, `run`, `diff`, `apply`, `rollback`, with `--json` output and distinct exit codes. `run` streams the plan and the attempt log, and never approves. |
 | `packages/sdk-python/` | The generated pydantic models and a thin `/v1` client, with ruff and pytest. Not published (M30). |
 | `plugin/` | The Studio plugin in Luau — transport, diff, approve, apply, journal — and a Luau test suite run by hand (in CI: M41). |
 | `scripts/` + `.github/workflows/` | The gates: boundaries, brand-asset provenance, key custody, secret scanning, DCO, and their own tests. `ci.yml`, `catalog-drift.yml`, `dco.yml` — there is no release workflow (M49). |

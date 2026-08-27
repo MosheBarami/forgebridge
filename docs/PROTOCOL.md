@@ -233,6 +233,10 @@ GET    /v1/health
 GET    /v1/link                       → link status, transport, plugin version
 POST   /v1/link/pair                  → { pairingCode } → { linkId, sessionKeyId }
 GET    /v1/link/poll?since=<cursor>   → long-poll: next ChangeSet for the plugin
+POST   /v1/runs                       → producer submits a prompt; the run proposes a
+                                        ChangeSet and stops at the approval gate
+GET    /v1/runs/:id                   → the run, with every model it tried
+GET    /v1/runs/:id/events?since=<n>  → text/event-stream: stages, plan, each attempt
 POST   /v1/changesets                 → producer submits a ChangeSet
 GET    /v1/changesets/:id/diff        → rendered diff for review
 POST   /v1/changesets/:id/approve
@@ -250,6 +254,13 @@ router in `packages/daemon/src/server.ts`, and fails if the two disagree — the
 the winner of any such disagreement, and this page the bug. `POST /v1/apply-result` and
 `GET /v1/output` are here because of exactly that: the daemon has served both since M14 and
 this table listed neither until the comparison existed to notice.
+
+`POST /v1/runs` is the only route that calls a language model, and it is still not a route
+that applies anything: it proposes a ChangeSet in `validated` and stops. Approving one is
+`POST /v1/changesets/:id/approve`, which is a separate call requiring the content digest of
+a diff a human read (ADR-012). The run's response and its event stream both carry the full
+`ModelAttempt` list — every model the router tried and why it moved on — because a fallback
+the caller cannot see is a silent substitution (ADR-008).
 
 The plugin only ever calls `poll`, `apply-result`, and `output` — and it calls them against a
 **single stable base address**, because Roblox grants plugin HTTP permission per web address and
