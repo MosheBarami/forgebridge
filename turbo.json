@@ -4,6 +4,19 @@
     "build":     { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^build"], "outputs": [] },
     "lint":      { "outputs": [] },
-    "test":      { "dependsOn": ["^build"], "outputs": ["coverage/**"] }
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"],
+      // Turborepo 2.x runs tasks in strict env mode: a task sees only the
+      // variables declared here. `packages/conformance` shells out to a Python
+      // interpreter for the fourth connector, and when it cannot reach one it
+      // tells the reader to "name another interpreter with the
+      // FORGEBRIDGE_PYTHON environment variable". Undeclared, that sentence was
+      // false through `npm run test` — turbo dropped the variable and the
+      // suggested fix changed nothing. Declared here it is also part of the
+      // task hash, so switching interpreters re-runs the suite instead of
+      // replaying a cached result from the previous one.
+      "env": ["FORGEBRIDGE_PYTHON"]
+    }
   }
 }

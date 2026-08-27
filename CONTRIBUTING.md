@@ -136,6 +136,26 @@ Two things `npm run check` does not give you, despite appearances:
   **typecheck · test · build** job. Run `npm run check` first if you are running it by hand.
   A contributor who runs only `check` passes locally and fails in CI.
 
+- **`npm run test` needs a Python 3.10+ interpreter**, and will fail without one rather than
+  skip. `packages/conformance` runs the whole connector matrix against `packages/sdk-python`
+  (M30 — a Python package, so it has a `pyproject.toml` and no `package.json`)
+  through a subprocess driver, because the one connector that shares neither this suite's
+  language nor its error class is the one worth running. A cross-language test that skips itself
+  is indistinguishable from a passing one in a log, so it does not skip. Set it up once:
+
+  ```sh
+  # The M30 SDK, installed editable so the conformance driver can import it.
+  python3.10 -m venv .venv && .venv/bin/python -m pip install -e "packages/sdk-python[dev]"
+  FORGEBRIDGE_PYTHON=$PWD/.venv/bin/python npm run test
+  ```
+
+  `FORGEBRIDGE_PYTHON` is declared on the `test` task in `turbo.json`. It has to be: turbo 2.x
+  runs tasks in strict env mode and passes through only what a task declares, so before it was
+  declared the failure message told you to set a variable that turbo then dropped — the
+  suggested fix changed nothing, twice, before anybody looked at why. If your `python3` is
+  already 3.10+ with the SDK installed, you need none of this; CI pins 3.10, the oldest version
+  the M30 package `packages/sdk-python` claims to support.
+
 If you change a Zod schema in `packages/protocol/src`, run `npm run generate:schemas` and commit
 what it writes. The generated files under `packages/protocol/schema/` and the generated
 `models.py` under `packages/sdk-python` are part of the same change as the schema edit (M08);
