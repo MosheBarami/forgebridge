@@ -7,6 +7,7 @@ export * from './validate.js';
 export * from './prompt.js';
 export * from './pipeline.js';
 export * from './run.js';
+export * from './telemetry/index.js';
 
 /**
  * Two interfaces in this package are called `ModelClient`, and both are real.

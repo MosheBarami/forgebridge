@@ -36,8 +36,8 @@ The local daemon has no relay at all, which is why it is the default and the rec
 | Keys stored server-side | There is no column for them. The schema cannot hold one — checked on every commit by `scripts/verify-no-key-storage.ts` rules K1 (no persisted shape declares a credential-shaped field) and K4 (no shape the daemon persists holds a provider key). |
 | Browser sends key to our API | Browser BYOK routes through the **local daemon**, never our origin — the daemon is the only egress that ever holds a user key (ADR-006). Checked today by `scripts/verify-no-key-storage.ts` rule K3, which fails the build if a credential-shaped value is passed to a disk, database, **response**, log or telemetry call anywhere under `packages/`. That is a static read of call sites, not an observed request. The CSP `connect-src` that excludes our own API for key-bearing calls is design, not code: `apps/web` is not in this tree yet (M32–M39). The runtime assertion — a request captured on the wire and shown to carry no key-shaped string — is owed (M43). |
 | Key in `localStorage` readable by XSS | **Design, unbuilt (M32–M39).** There is no browser client in this repository — `apps/` does not exist — so no key is stored in a browser today. When it lands: browser keys are to be WebCrypto **non-extractable** where the provider allows it, otherwise an AES-GCM blob in IndexedDB whose wrapping key is non-extractable, so that XSS can *use* a key in-session but cannot *read* one out. |
-| Key in a log or trace | Two halves, one of which exists. **Today**: K3 again, statically — every log and telemetry call under `packages/` is inspected and a credential-shaped argument fails the build. **Not today**: `TelemetryPort` requires every adapter to run attributes, events and exceptions through a shared redactor, and that redactor is not written — `TODO(M44)` says so in `packages/core/src/ports/telemetry.ts`, alongside the test that feeds known key formats through every log path. A static check that nothing credential-*shaped* is passed to a logger is not a demonstration that a redactor scrubs one that is (M44). |
-| Key in a crash report | **Design, unbuilt (M44).** No telemetry adapter exists — only the `TelemetryPort` interface, which every core call site takes as optional so that "off by default" is structural rather than a flag (ADR-011). When adapters land, the Sentry one runs `beforeSend` scrubbing and self-hosters get OTel behind the same redactor. |
+| Key in a log or trace | Both halves now exist. **Statically**: K3 — every log and telemetry call under `packages/` is inspected and a credential-shaped argument fails the build. **At runtime**: the shared redactor in `packages/core/src/ports/redact.ts`, applied at the port by `redactedTelemetry`, so an adapter is never handed an unscrubbed attribute, event, exception, status message or metric label. `packages/core/test/redact.test.ts` is the demonstration: seventeen credential formats — an OpenRouter `sk-or-` key, a bearer header, a PEM private-key block, a JWT, ten other published provider prefixes, a URL carrying credentials in its userinfo and in a query parameter, and the daemon's own producer token registered by exact value — are pushed through every entry point the port has and through both shipped adapters, and asserted absent from the bytes that would go on the wire. The same file asserts the other half of the standard: a run id, a content digest, a model id, an npm integrity hash and a sentence containing the words "api key" come back byte-for-byte. What the redactor does **not** cover is stated in its header — a credential with no published shape, in a bare string, under a blandly named attribute, that no host registered. |
+| Key in a crash report | Two adapters exist and both are wrapped in the redactor by their own constructors, so a caller cannot obtain an unwrapped one: `otlpTelemetry` (OTLP/HTTP+JSON over `fetch`, no vendor dependency) and `errorReporterTelemetry` (an injected error-reporting client — a Sentry module object satisfies it structurally, so the vendor stays at the edge). A thrown value never reaches either: `recordException` hands the adapter three redacted strings rather than the object, because an `Error` subclass can carry a response body or a set of request headers that a reporter would serialise. Vendor `beforeSend` scrubbing is *not* the mechanism and could not be — by the time it runs the value is already inside the process that exports it. Telemetry remains off unless an operator names a collector: `telemetryFromEnvironment` returns `undefined` with no endpoint configured, so a default install has no adapter rather than a disabled one (ADR-011). |
 
 The gate those rows lean on prints its own limits on every run, and they bound what this
 table may claim: it does not cover `plugin/` (Luau), `scripts/`, **runtime behaviour**,
@@ -45,8 +45,10 @@ adapters not yet written, or any credential carried in a blandly named `string`.
 T1 has today is a set of *shape* claims, and they are real ones: no persisted shape
 declares a credential field, no `StoragePort` method carries one, and no call site under
 `packages/` hands one to a disk, database, response, log or telemetry sink. What it does
-not have is a single assertion about a running process. Those are owed under **M43** (the
-threat model's claims backed by tests) and **M44** (the redactor and the log-path test).
+not have is a broad set of assertions about a running process; those are owed under
+**M43** (the threat model's claims backed by tests). The one runtime assertion T1 does now
+have is the redactor's, and it is bounded to what crosses `TelemetryPort` — it says nothing
+about a value written to disk or returned in a response, which remain shape claims.
 Run `npm run verify:no-key-storage` and read its summary rather than taking this
 paragraph's word for it.
 
@@ -81,13 +83,27 @@ The model is an untrusted caller. Layered defence:
 4. **Human approval** — default ON. Auto-apply is opt-in, per project, scoped to a path
    prefix, and never covers `deleteInstance`.
 5. **Journal + rollback** — the plugin captures the inverse of every operation *before* it
-   runs, and every apply is one `ChangeHistoryService` recording, so <kbd>Ctrl</kbd>+<kbd>Z</kbd>
-   takes a whole ChangeSet back; an apply Studio will not let it record is refused outright.
-   This is the real safety net, and the others reduce how often it is needed rather than
-   replacing it. One limit, stated because a safety net nobody has measured is not one:
-   the inverses live in the Studio session that applied the change, because `ApplyResult`
-   has nowhere on the wire to carry them (TODO(M11) in `plugin/src/Journal.luau`).
-   Cross-session rollback is **M11**.
+   runs, and every apply and every rollback is one `ChangeHistoryService` recording, so
+   <kbd>Ctrl</kbd>+<kbd>Z</kbd> takes a whole ChangeSet back; an apply Studio will not let
+   it record is refused outright, and so is a reversal. This is the real safety net, and
+   the others reduce how often it is needed rather than replacing it.
+
+   **M11** made it outlive the session. The plugin uploads the inverses to
+   `POST /v1/journal/:id/entry` after each apply, a rollback delivery carries them back,
+   and `POST /v1/journal/:id/rollback-result` reports how far the replay got — so closing
+   Studio is no longer the end of the road back. Measured rather than asserted: the round
+   trip in `plugin/tests/RollbackSpec.luau` applies a set using every operation the
+   protocol has and asserts the tree is the exact structure it was before, including a
+   `deleteInstance` whose inverse carries a serialised subtree.
+
+   Two limits, stated because a safety net nobody has measured is not one. A partial
+   reversal is a real outcome and is reported as `rollback_partial` rather than rounded to
+   either neighbour: the place is then in a state neither the apply nor the rollback
+   describes, and the inverses that would have finished the job are spent. And a restored
+   deletion is a rebuild, not a resurrection — Luau has no property reflection, so the
+   durable record carries structure, names, attributes, tags, script sources and a fixed
+   list of engine properties (TODO(M15) in `plugin/src/Journal.luau`), which the same suite
+   pins in both directions.
 
 ## T3 — Prompt injection
 

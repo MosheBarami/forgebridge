@@ -35,14 +35,26 @@ Two observability paths to keep working. OTel's ergonomics are worse than a nati
 the redaction logic must be implemented once at the port rather than inherited from a
 vendor's defaults.
 
+Building on the *semantics* rather than on `@opentelemetry/*` is a further trade this ADR
+did not spell out and M44 had to make: `packages/core` keeps its single dependency and B2
+stays enforceable, at the cost of an OTLP/HTTP+JSON exporter this project maintains itself.
+That exporter is deliberately small — batch, `fetch`, no timers — and a deployment that
+wants the full SDK can still install one behind the same port.
+
 ## Consequences
 - **Positive**: neutral, self-hostable, standards-based; one trace across four processes.
 - **Negative**: more setup; redaction is our responsibility.
-- **Mitigation, planned — M44, and neither half exists yet**: a shared redactor at the port,
-  with a test that feeds known secret formats through every log path (see `THREAT-MODEL.md`
-  T1). Today `packages/core/src/ports/telemetry.ts` declares the port and carries a
-  `TODO(M44)` where the redactor belongs; nothing redacts anything, and there is no such test.
-  Read this row as the decision's obligation, not as a control that is in force.
+- **Mitigation, in force since M44**: the shared redactor is
+  `packages/core/src/ports/redact.ts`, applied at the port by `redactedTelemetry`, and both
+  shipped adapters wrap themselves in it in their own constructors so that no caller can
+  obtain an unwrapped one. `packages/core/test/redact.test.ts` feeds seventeen known
+  credential formats through every entry point the port has and through both adapters, and
+  asserts none survives to the wire — alongside the controls that keep it from being
+  fail-noisy (a run id, a content digest, a model id and an npm integrity hash come back
+  unchanged). What it does not cover is stated in the redactor's own header.
+- **Off by default, structurally**: `telemetryFromEnvironment` returns `undefined` unless an
+  operator names a collector, and every `TelemetryPort` in the core is optional, so there is
+  no `enabled: false` anywhere for a later refactor to invert.
 
 ## Revisit trigger
 If OTel instrumentation cost exceeds its debugging value after a year, keep the port and

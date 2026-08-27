@@ -40,6 +40,12 @@ import {
   type CompletionResponse,
   type ModelClient,
 } from './ports/model.js';
+import {
+  TELEMETRY,
+  type Span,
+  type SpanContext,
+  type TelemetryPort,
+} from './ports/telemetry.js';
 
 /**
  * `executeRun` — a prompt in, a validated ChangeSet out, and nothing applied.
@@ -91,6 +97,15 @@ export interface RunRequest {
   /** Hosts scripts in this ChangeSet may reach. Empty means none. */
   allowedHttpHosts?: readonly string[];
   /**
+   * The producer's span, when it sent one.
+   *
+   * This is the producer -> core edge of M44's trace. A daemon parses the
+   * incoming `traceparent` with `parseTraceparent` and passes the result
+   * through; that function returns null for a header it cannot read, and null
+   * arrives here as "start a new trace" rather than as a fabricated parent.
+   */
+  parentTrace?: SpanContext | null;
+  /**
    * A description of the place, passed to the model as context.
    *
    * TODO(M09): core does not render one. `StoragePort.trees.get` returns a
@@ -117,6 +132,13 @@ export interface RunDeps {
   /** Written into `Validation.computedBy`. The build that computed the verdict. */
   computedBy?: string;
   onEvent?: RunEventSink;
+  /**
+   * Absent means no telemetry, which is the default for a local or self-hosted
+   * install (ADR-011). Optional rather than a flag so that "off by default" is
+   * a property of the type: there is no value of this field that means
+   * "configured but disabled", and so nothing for a later refactor to invert.
+   */
+  telemetry?: TelemetryPort;
   analysisTimeoutMs?: number;
   maxOutputTokens?: number;
   temperature?: number;
@@ -156,6 +178,12 @@ export interface RunResult {
   skipped: SkippedCandidate[];
   ordering?: OrderingReport;
   failure?: ProtocolError;
+  /**
+   * The run span's identity, when telemetry is installed. The caller
+   * propagates it onward — onto the transport hop, and into the record of the
+   * run — so that one trace spans producer, core and transport.
+   */
+  trace?: SpanContext;
 }
 
 const MAX_PARSE_ISSUES_REPORTED = 20;
@@ -191,14 +219,55 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
   let plan: RunPlan = { steps: [] };
   let skipped: SkippedCandidate[] = [];
 
+  /**
+   * The run span (M44, ADR-011).
+   *
+   * Started before anything can fail so that a run which dies in its first
+   * stage still produces a span saying so. `request.parentTrace` is the
+   * producer's context, which makes this span a child of the producer's work
+   * rather than the root of an unrelated trace.
+   *
+   * Optional throughout: with no adapter installed `deps.telemetry` is
+   * undefined and every line below is a no-op. That is what "off by default is
+   * structural" means in practice.
+   */
+  const span: Span | undefined = deps.telemetry?.startSpan(
+    'forgebridge.run',
+    {
+      [TELEMETRY.RUN_ID]: run.id,
+      [TELEMETRY.PROJECT_ID]: run.projectId,
+      [TELEMETRY.ROUTING_POLICY]: request.routingPolicy,
+      [TELEMETRY.BASE_VERSION]: request.baseVersion,
+      ...(run.producer ? { [TELEMETRY.PRODUCER]: run.producer.kind } : {}),
+    },
+    { parent: request.parentTrace ?? null },
+  );
+  const trace: SpanContext | undefined = span?.context();
+
+  /** A child span, or undefined when no telemetry is installed. */
+  const childSpan = (name: string, attributes: Record<string, string | number | boolean> = {}):
+    | Span
+    | undefined =>
+    deps.telemetry?.startSpan(
+      name,
+      { [TELEMETRY.RUN_ID]: run.id, ...attributes },
+      { parent: trace ?? null },
+    );
+
+  const withTrace = (result: RunResult): RunResult => (trace ? { ...result, trace } : result);
+
   const emit = (event: RunEvent): void => {
     if (!deps.onEvent) return;
     try {
       deps.onEvent(event);
-    } catch {
+    } catch (error) {
       // A sink is an observer. A run that died because something watching it
-      // threw would be the observation changing the result, and there is no
-      // telemetry port in this signature to report it to.
+      // threw would be the observation changing the result — so the throw is
+      // swallowed here and recorded on the span instead, where it is visible
+      // to whoever is debugging the producer without being able to fail the
+      // run. With no telemetry installed it is swallowed outright, which is
+      // the price of the port being optional.
+      span?.recordException(error);
     }
   };
 
@@ -206,6 +275,7 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
     const from = run.stage;
     assertTransition(from, to);
     run.stage = to;
+    span?.addEvent('stage', { from, [TELEMETRY.STAGE]: to });
     emit({ type: 'stage', at: now(), from, stage: to });
   };
 
@@ -213,8 +283,10 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
     if (!isTerminal(run.stage)) advance('failed');
     run.status = 'failed';
     run.finishedAt = now();
+    span?.setStatus('error', failure.message);
+    span?.setAttributes({ [TELEMETRY.ERROR_CODE]: failure.code });
     emit({ type: 'failed', at: now(), failure });
-    return { run, plan, skipped, ...partial, failure };
+    return withTrace({ run, plan, skipped, ...partial, failure });
   };
 
   /**
@@ -226,13 +298,23 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
     if (!isTerminal(run.stage)) advance('cancelled');
     run.status = 'cancelled';
     run.finishedAt = now();
+    // Not `setStatus('error')`: a run somebody stopped on purpose is not a
+    // failure, and a dashboard that counts it as one reports an error rate
+    // made of user decisions.
+    span?.addEvent('cancelled');
     emit({ type: 'cancelled', at: now(), reason });
-    return { run, plan, skipped, ...partial, failure: { code: 'invalid_request', message: reason } };
+    return withTrace({ run, plan, skipped, ...partial, failure: { code: 'invalid_request', message: reason } });
   };
 
   try {
     advance('planning');
-    plan = planFor(request, policy, deps, clock());
+    const planSpan = childSpan('forgebridge.run.plan');
+    try {
+      plan = planFor(request, policy, deps, clock());
+      planSpan?.setAttributes({ 'forgebridge.plan.steps': plan.steps.length });
+    } finally {
+      planSpan?.end();
+    }
     emit({ type: 'plan', at: now(), plan });
 
     advance('generating');
@@ -261,14 +343,48 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
           provider: model.provider,
           attemptIndex: context.attemptIndex,
         });
-        return await generateChangeSet(model, {
-          request,
-          promptContext,
-          deps,
-          now,
-          signal: context.signal ?? request.signal,
-          createdAt: now(),
+        // One span per attempt, not one per run. ADR-008 makes the attempt list
+        // the run's permanent record; a trace that showed "generating" as a
+        // single opaque box would answer "the run was slow" and never "the
+        // first provider hung for ninety seconds and the second one refused".
+        const attemptSpan = childSpan('forgebridge.model.attempt', {
+          [TELEMETRY.MODEL_ID]: model.id,
+          [TELEMETRY.MODEL_PROVIDER]: model.provider,
+          'forgebridge.attempt.index': context.attemptIndex,
         });
+        const startedAt = clock();
+        try {
+          const result = await generateChangeSet(model, {
+            request,
+            promptContext,
+            deps,
+            now,
+            signal: context.signal ?? request.signal,
+            createdAt: now(),
+          });
+          attemptSpan?.setAttributes({ [TELEMETRY.ATTEMPT_OUTCOME]: result.outcome });
+          // `refused` and `invalid-output` are the model declining or
+          // misfiring, not this process erroring; only a provider or transport
+          // failure marks the span itself errored, so an alert on span status
+          // does not fire on a content filter.
+          if (result.outcome !== 'ok') {
+            attemptSpan?.addEvent('attempt-not-ok', {
+              [TELEMETRY.ATTEMPT_OUTCOME]: result.outcome,
+              ...(result.note ? { 'forgebridge.attempt.note': result.note } : {}),
+            });
+          }
+          return result;
+        } catch (error) {
+          attemptSpan?.recordException(error);
+          attemptSpan?.setStatus('error');
+          throw error;
+        } finally {
+          deps.telemetry?.histogram('forgebridge.model.attempt.duration', clock() - startedAt, {
+            [TELEMETRY.MODEL_ID]: model.id,
+            [TELEMETRY.MODEL_PROVIDER]: model.provider,
+          });
+          attemptSpan?.end();
+        }
       },
     );
 
@@ -288,6 +404,15 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
     const set = routed.output;
     const ordering = routed.ordering;
 
+    // The join key. From here on every span in this trace names the ChangeSet,
+    // which is what makes "one trace answers what happened to this ChangeSet"
+    // true for the approve and apply that arrive in a later request: they are
+    // a different trace, joined to this one on this attribute.
+    span?.setAttributes({
+      [TELEMETRY.CHANGE_SET_ID]: set.id,
+      [TELEMETRY.OPERATION_COUNT]: set.operations.length,
+    });
+
     advance('validating');
 
     if (!withinSizeLimit(set)) {
@@ -303,15 +428,29 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
       );
     }
 
-    const decision = checkPolicy(set, policy);
-    const luau = await analyseChangeSet(set, {
-      analyser: deps.analyser,
-      allowedHttpHosts: request.allowedHttpHosts ?? [],
-      budget: {
-        timeoutMs: deps.analysisTimeoutMs ?? DEFAULT_ANALYSIS_TIMEOUT_MS,
-        maxOutputBytes: MAX_SANDBOX_OUTPUT_BYTES,
-      },
+    const validateSpan = childSpan('forgebridge.run.validate', {
+      [TELEMETRY.CHANGE_SET_ID]: set.id,
+      [TELEMETRY.OPERATION_COUNT]: set.operations.length,
     });
+    let decision: PolicyDecision;
+    let luau: Validation['luau'];
+    try {
+      decision = checkPolicy(set, policy);
+      luau = await analyseChangeSet(set, {
+        analyser: deps.analyser,
+        allowedHttpHosts: request.allowedHttpHosts ?? [],
+        budget: {
+          timeoutMs: deps.analysisTimeoutMs ?? DEFAULT_ANALYSIS_TIMEOUT_MS,
+          maxOutputBytes: MAX_SANDBOX_OUTPUT_BYTES,
+        },
+      });
+      validateSpan?.setAttributes({
+        'forgebridge.validation.policy': decision.policy.status,
+        'forgebridge.validation.luau': luau.status,
+      });
+    } finally {
+      validateSpan?.end();
+    }
 
     const validation: Validation = {
       luau,
@@ -349,12 +488,23 @@ export async function executeRun(request: RunRequest, deps: RunDeps): Promise<Ru
     advance('awaiting-approval');
     // `status` stays `running`: the run has not finished, it is waiting for a
     // person. A run marked succeeded here would claim work that never happened.
-    return { run, plan, changeSet: validated, validation, decision, skipped, ordering };
+    // The span is not `ok` either, for the same reason — it ends where the run
+    // does, at a gate, and calling that a success would report an approval
+    // nobody has given.
+    return withTrace({ run, plan, changeSet: validated, validation, decision, skipped, ordering });
   } catch (error) {
     // `internal` never carries an internal detail on the wire (protocol/errors.ts);
-    // the real message belongs in the caller's telemetry, not in a response.
-    void error;
+    // the real message belongs in telemetry — which, now that this function has
+    // a port for it, is where it goes. `recordException` runs the value through
+    // the port's redactor first, so a provider error quoting an Authorization
+    // header does not reach an exporter intact (THREAT-MODEL T1).
+    span?.recordException(error);
     return fail({ code: 'internal', message: 'the run failed unexpectedly' });
+  } finally {
+    deps.telemetry?.histogram('forgebridge.run.duration', clock() - Date.parse(run.startedAt), {
+      [TELEMETRY.STAGE]: run.stage,
+    });
+    span?.end();
   }
 }
 

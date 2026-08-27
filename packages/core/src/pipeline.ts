@@ -29,7 +29,17 @@ import {
   type RoutingPolicy,
   type RoutingRequirements,
 } from './router.js';
-import type { SandboxPort, Span, StoragePort, TelemetryPort, TestReport, TransportPort } from './ports/index.js';
+import type {
+  Attributes,
+  SandboxPort,
+  Span,
+  SpanContext,
+  StoragePort,
+  TelemetryPort,
+  TestReport,
+  TransportPort,
+} from './ports/index.js';
+import { TELEMETRY } from './ports/telemetry.js';
 
 /**
  * The run pipeline, as a state machine over the protocol's `RunStage`.
@@ -177,6 +187,13 @@ export interface RunInput {
   candidates: readonly ModelCandidate[];
   /** Hosts scripts in this ChangeSet may reach. Empty means none. */
   allowedHttpHosts?: readonly string[];
+  /**
+   * The producer's span, when it sent one — the producer -> core edge of the
+   * trace (M44). Parsed from an incoming `traceparent` with
+   * `parseTraceparent`, which returns null for a header it cannot read; null
+   * starts a new trace rather than inventing a parent.
+   */
+  parentTrace?: SpanContext | null;
   signal?: AbortSignal;
 }
 
@@ -232,11 +249,16 @@ export class RunPipeline {
 
     await this.#deps.storage.runs.create(run);
 
-    const span = this.#deps.telemetry?.startSpan('forgebridge.run', {
-      'forgebridge.run.id': run.id,
-      'forgebridge.project.id': run.projectId,
-      'forgebridge.routing.policy': input.routingPolicy,
-    });
+    const span = this.#deps.telemetry?.startSpan(
+      'forgebridge.run',
+      {
+        [TELEMETRY.RUN_ID]: run.id,
+        [TELEMETRY.PROJECT_ID]: run.projectId,
+        [TELEMETRY.ROUTING_POLICY]: input.routingPolicy,
+        ...(run.producer ? { [TELEMETRY.PRODUCER]: run.producer.kind } : {}),
+      },
+      { parent: input.parentTrace ?? null },
+    );
 
     try {
       const requirements = input.requirements ?? DEFAULT_PIPELINE_REQUIREMENTS;
@@ -338,7 +360,24 @@ export class RunPipeline {
     }
 
     await this.#advance(run, 'applying');
-    return await this.#apply(run, { ...set, status: 'approved' }, policyDecision);
+
+    // A span of its own, and the reason is worth stating: approval arrives in a
+    // different request — usually minutes later, from a human — so it cannot be
+    // a child of the run span, which ended when the run reached the gate. The
+    // two traces are joined by `forgebridge.changeset.id`, which both carry.
+    // Presenting this as a child of a trace that has already ended would be a
+    // parent link to a span nobody can fetch.
+    const applySpan = this.#deps.telemetry?.startSpan('forgebridge.approve', {
+      [TELEMETRY.RUN_ID]: run.id,
+      [TELEMETRY.PROJECT_ID]: run.projectId,
+      [TELEMETRY.CHANGE_SET_ID]: set.id,
+      [TELEMETRY.OPERATION_COUNT]: set.operations.length,
+    });
+    try {
+      return await this.#apply(run, { ...set, status: 'approved' }, policyDecision, undefined, applySpan);
+    } finally {
+      applySpan?.end();
+    }
   }
 
   async reject(runId: string, reason: string): Promise<RunState> {
@@ -366,6 +405,17 @@ export class RunPipeline {
   }
 
   // ── internals ────────────────────────────────────────────────────────────
+
+  /**
+   * A span beneath `parent`, or undefined when no telemetry is installed.
+   *
+   * `parent?.context() ?? null` and not `undefined`: the port reads null as
+   * "start a new trace", and a caller that has no parent must say so rather
+   * than let an adapter guess. See `SpanOptions` in `ports/telemetry.ts`.
+   */
+  #child(parent: Span | undefined, name: string, attributes: Attributes = {}): Span | undefined {
+    return this.#deps.telemetry?.startSpan(name, attributes, { parent: parent?.context() ?? null });
+  }
 
   #routerRequest(input: RunInput, requirements: RoutingRequirements) {
     return {
@@ -418,6 +468,15 @@ export class RunPipeline {
     }
 
     const set = parsed.data;
+
+    // The join key: every span from here on names the ChangeSet, so a query on
+    // this attribute answers "what happened to this ChangeSet" even across the
+    // trace boundary that `approve()` — a later request — necessarily creates.
+    span?.setAttributes({
+      [TELEMETRY.CHANGE_SET_ID]: set.id,
+      [TELEMETRY.OPERATION_COUNT]: set.operations.length,
+      [TELEMETRY.BASE_VERSION]: set.baseVersion,
+    });
 
     if (!withinSizeLimit(set)) {
       return await this.#fail(
@@ -524,14 +583,44 @@ export class RunPipeline {
     }
 
     await this.#deps.storage.changeSets.setStatus(set.id, 'applying', 'approved');
-    await this.#deps.transport.deliver(link, set);
 
+    // The core -> transport edge of M44's trace. Two spans and not one: a
+    // delivery that was queued in four milliseconds and a Studio session that
+    // took ninety seconds to answer are different facts, and a single
+    // `forgebridge.apply` span would report their sum and let nobody tell
+    // which happened.
+    const transportInfo = this.#deps.transport.describe();
+    const transportAttributes: Attributes = {
+      [TELEMETRY.CHANGE_SET_ID]: set.id,
+      [TELEMETRY.RUN_ID]: run.id,
+      [TELEMETRY.LINK_ID]: link.id,
+      [TELEMETRY.TRANSPORT_KIND]: transportInfo.kind,
+    };
+    const deliverSpan = this.#child(span, 'forgebridge.transport.deliver', transportAttributes);
+    try {
+      const receipt = await this.#deps.transport.deliver(link, set);
+      deliverSpan?.setAttributes({ [TELEMETRY.DELIVERY_NONCE]: receipt.nonce });
+    } catch (error) {
+      deliverSpan?.recordException(error);
+      deliverSpan?.setStatus('error');
+      throw error;
+    } finally {
+      deliverSpan?.end();
+    }
+
+    const awaitSpan = this.#child(span, 'forgebridge.transport.await-apply', transportAttributes);
     let reported: unknown;
     try {
       reported = await this.#deps.transport.awaitApplyResult(set.id, {
         timeoutMs: this.#deps.applyTimeoutMs ?? DEFAULT_APPLY_TIMEOUT_MS,
       });
     } catch (error) {
+      awaitSpan?.recordException(error);
+      // `error` on the transport span, and a *failed run* below — but the
+      // ChangeSet's status stays `applying`. All three are the same fact said
+      // at three altitudes: we have no result, which is not the same as
+      // nothing having been applied.
+      awaitSpan?.setStatus('error');
       span?.recordException(error);
       // The status stays `applying`. A timeout tells us we have no result, not
       // that nothing was applied, and marking it `failed` would invent a fact
@@ -546,6 +635,8 @@ export class RunPipeline {
         undefined,
         base,
       );
+    } finally {
+      awaitSpan?.end();
     }
 
     // The consumer is across a trust boundary like everything else.
