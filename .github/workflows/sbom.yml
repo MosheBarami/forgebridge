@@ -1,0 +1,177 @@
+name: SBOM
+
+# A software bill of materials for ForgeBridge, in both formats a consumer is
+# likely to have a scanner for: CycloneDX and SPDX.
+#
+# ── Why `npm sbom` and not an SBOM action ────────────────────────────────────
+#
+# The generator is npm's own `npm sbom`, which reads the installed tree. That is
+# a deliberate choice over `anchore/sbom-action` or a Syft container: this
+# repository keeps `npm audit` at zero and adds dependencies grudgingly, and an
+# SBOM job whose own supply chain is a third-party action and a container image
+# is a strange thing to put at the end of a supply-chain milestone. `npm` is
+# already the thing that resolved every package in the lockfile; asking it what
+# it resolved adds nothing to the trusted set.
+#
+# ── Why it runs on push and not only on a release ────────────────────────────
+#
+# THREAT-MODEL T6 used to say "SBOM per release — M42, and it needs the release
+# pipeline in M49 to have somewhere to publish to." That was true and it was
+# also how a job stays unwritten for three milestones. So the generation runs on
+# every push to `main` and on every pull request, where it can actually fail;
+# the release-attach half runs only on a published release and, until M49 tags
+# one, has never run. Both halves are stated that way in T6 rather than
+# collapsed into "SBOM: done".
+#
+# The generated document is uploaded as a build artifact on every run, so a
+# reader can download the bill of materials for any commit on `main` without
+# waiting for a release.
+#
+# ── The trigger that will not fire, and what to do about it ──────────────────
+#
+# A GitHub release created by another workflow using the default `GITHUB_TOKEN`
+# does **not** raise the `release` event — GitHub suppresses it precisely so
+# workflows cannot cascade. `.github/workflows/release.yml` (M49) creates the
+# release that way, so the `attach` job below will not start on its own when
+# that pipeline runs. Rather than leave that to be discovered on release day,
+# `workflow_dispatch` takes a `tag`: attaching by hand is one dispatch, and the
+# cleaner fix — the release workflow calling this one, or uploading the SBOM
+# itself — is a change to a file this one does not own.
+# TODO(M49): decide which of the two, in the release pipeline.
+#
+# Pins: `actions/checkout` v7, `actions/setup-node` v7, `actions/upload-artifact`
+# v7 and `actions/download-artifact` v8 are the current majors, each checked
+# against its own releases page on 2026-08-27. `scripts/workflow-rules.ts` rule
+# W1 fails the build on an unpinned `uses:`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          An existing release tag to attach the generated SBOM to. Leave it
+          empty to generate and upload the documents as an artifact only.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  generate:
+    name: Generate and check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm sbom` reads the installed tree, not the lockfile alone, so the
+      # install has to happen first. `npm ci` and not `npm install`, for the
+      # same reason CI does it: the lockfile is the input, not a suggestion.
+      - run: npm ci
+
+      - name: Generate CycloneDX and SPDX
+        # `--omit dev` because the bill of materials that matters to somebody
+        # running ForgeBridge is what ships, not what built it. The dev tree is
+        # covered by `.github/workflows/dependency-review.yml` and by
+        # `npm audit`; a runtime SBOM that lists vitest tells a consumer's
+        # scanner about software they never execute.
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          npm sbom --sbom-format cyclonedx --sbom-type application --omit dev > sbom/forgebridge.cdx.json
+          npm sbom --sbom-format spdx --sbom-type application --omit dev > sbom/forgebridge.spdx.json
+
+      - name: Check the documents say something
+        # A generator that writes a syntactically valid document with nothing in
+        # it is the SBOM version of a gate that cannot fail: a consumer scanning
+        # it finds no vulnerable packages because it finds no packages. This
+        # refuses an empty or malformed bill of materials rather than publishing
+        # one.
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+
+            const cyclonedx = JSON.parse(readFileSync("sbom/forgebridge.cdx.json", "utf8"));
+            if (cyclonedx.bomFormat !== "CycloneDX") {
+              throw new Error(`expected a CycloneDX document, got bomFormat=${cyclonedx.bomFormat}`);
+            }
+            const components = Array.isArray(cyclonedx.components) ? cyclonedx.components.length : 0;
+            if (components === 0) {
+              throw new Error("the CycloneDX document lists no components");
+            }
+
+            const spdx = JSON.parse(readFileSync("sbom/forgebridge.spdx.json", "utf8"));
+            const packages = Array.isArray(spdx.packages) ? spdx.packages.length : 0;
+            if (packages === 0) {
+              throw new Error("the SPDX document lists no packages");
+            }
+
+            console.log(`sbom: CycloneDX ${cyclonedx.specVersion} with ${components} components; SPDX with ${packages} packages.`);
+          '
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom/
+          if-no-files-found: error
+          retention-days: 90
+
+  attach:
+    name: Attach to the release
+    # A published release, or a dispatch naming an existing tag. Until M49 tags
+    # one, this job has never run — said here rather than in a milestone row,
+    # because a job nobody has exercised is worth knowing about at the place it
+    # would run.
+    # The `workflow_dispatch` half is spelled out rather than left to
+    # `inputs.tag != ''` alone: on a push `inputs` is null, and relying on how
+    # GitHub casts null in a comparison is the kind of implicit behaviour that
+    # decides whether a job with `contents: write` runs.
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    needs: generate
+    runs-on: ubuntu-latest
+    permissions:
+      # The one place in these four workflows that needs write, and only to add
+      # two files to a release that a human has already published.
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          if [ -z "${tag}" ]; then
+            echo "::error::No release tag to attach to."
+            exit 1
+          fi
+          gh release upload "${tag}" \
+            sbom/forgebridge.cdx.json \
+            sbom/forgebridge.spdx.json \
+            --clobber \
+            --repo "${{ github.repository }}"

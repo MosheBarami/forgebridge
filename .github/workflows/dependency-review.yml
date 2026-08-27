@@ -1,0 +1,68 @@
+name: Dependency review
+
+# The third leg of M42's supply-chain work, and the only one that runs *before*
+# a dependency lands rather than after.
+#
+# `npm audit` is at zero in this tree and stays there because somebody keeps
+# looking; that is a check on what is already installed. This job reads the
+# dependency *diff* of a pull request — what `package-lock.json` gains — and
+# refuses a pull request that introduces a package with a known advisory. The
+# distinction matters for a repository people are invited to run locally with
+# their API keys in the keychain: the cheapest moment to refuse a compromised
+# transitive dependency is the moment it is proposed.
+#
+# ── Why the licence deny-list is safe here ───────────────────────────────────
+#
+# This action reviews only the packages a pull request *adds or changes*, not
+# the installed tree. A copyleft licence already present in the graph would not
+# fire — which is why a deny-list can be added without first auditing 200
+# existing packages, and why it is honest to say this rule is about what arrives
+# next rather than about what is here. ForgeBridge is MIT (LICENSE, NOTICE) and
+# is meant to be embeddable in closed products; a new strong-copyleft
+# dependency is a licensing decision, not a routine bump, and it should arrive
+# as a red check and a conversation.
+#
+# ── What this job needs from the repository, and cannot assert ───────────────
+#
+# It reads the GitHub dependency graph, which is on by default for public
+# repositories. If it is ever turned off the action fails rather than passing
+# empty — which is the right direction, and is a property of the action rather
+# than something this file enforces.
+#
+# Pins: `actions/checkout` v7 and `actions/dependency-review-action` v5 are the
+# current majors, checked against each action's own releases page on 2026-08-27.
+# `scripts/workflow-rules.ts` rule W1 fails the build on an unpinned `uses:`.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review the dependency diff
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only so the summary can be left as a comment when the check fails. A
+      # refusal that a contributor has to open the Actions log to understand is
+      # a refusal that gets re-run rather than read.
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/dependency-review-action@v5
+        with:
+          # Moderate, not high. A tool that runs on a developer's machine with
+          # their provider keys reachable does not get to treat a moderate
+          # advisory as noise.
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+          # See the note above: this applies to newly added dependencies only.
+          deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later

@@ -1,0 +1,107 @@
+name: Semgrep
+
+# The other half of "no SAST runs in this repository" ceasing to be true
+# (THREAT-MODEL T6). CodeQL is in `.github/workflows/codeql.yml`.
+#
+# ── Why these rules and not a stock pack ─────────────────────────────────────
+#
+# A downloaded "javascript security" ruleset finds `eval`, SQL concatenation and
+# hardcoded JWT secrets. This repository has none of those. What it has is a
+# short list of defect shapes that five rounds of adversarial review kept
+# producing, and none of them is in anyone's default pack:
+#
+#   a check that returns a pass because it could not run;
+#   a verdict that falls back to `ok` when nothing computed one;
+#   a credential handed to a log, a response, or a telemetry attribute;
+#   a privileged ChangeSet transition that names the wrong predecessor;
+#   a set delivered to Studio from a function that never claimed it.
+#
+# `scripts/semgrep/rules/forgebridge.yml` is those five, with the reasoning for
+# each one and the limits of each one written beside it.
+#
+# ── Why the self-test step exists ────────────────────────────────────────────
+#
+# A gate that cannot fail is decoration. `semgrep --test` reads the annotations
+# in `scripts/semgrep/tests/forgebridge.ts` — a planted violation of every rule
+# marked `ruleid:`, and beside each one the legitimate shape it is most
+# confusable with marked `ok:` — and fails if a rule misses its violation *or*
+# reports its control. It runs before the scan, because a clean scan from rules
+# that match nothing is indistinguishable from a clean scan from rules that
+# work. `scripts/workflow-rules.ts` rule W5 fails the build if this file ever
+# stops doing that, or stops running the two in that order.
+#
+# The scan excludes `scripts/semgrep` on the command line rather than through a
+# `paths:` entry in the rules, because a `paths:` exclusion applies in `--test`
+# mode too and would quietly stop the self-test from testing anything.
+#
+# ── Pins ─────────────────────────────────────────────────────────────────────
+#
+# `actions/checkout` v7 and `actions/setup-python` v7 are the current majors,
+# checked against each action's own releases page on 2026-08-27. semgrep is
+# pinned to an exact release, not a range: this job can block a merge, so the
+# tool deciding that is a version somebody chose. `scripts/workflow-rules.ts`
+# rules W1 and W3 fail the build if either pin is loosened.
+# TODO(M42): full commit-SHA pins for the actions, and a hash-pinned
+# requirements file for semgrep, both of which need a bot to keep current.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Wednesdays, 05:41 UTC. Off the hour, and on a different day from CodeQL,
+    # so two long scheduled jobs do not contend for the same runner minute.
+    - cron: '41 5 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Promise 3 is "no telemetry by default". Semgrep sends usage metrics for
+  # registry-hosted configs by default; these rules are local, so it would not,
+  # but a project that says that sentence should not depend on a default staying
+  # what it is today. Set in both the forms semgrep reads.
+  SEMGREP_SEND_METRICS: 'off'
+  DO_NOT_TRACK: 1
+
+jobs:
+  semgrep:
+    name: ForgeBridge rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # Not the 3.10 that `ci.yml` pins. That version is chosen to match the
+          # oldest interpreter `packages/sdk-python` claims to support, which is
+          # a fact about the package; this job runs a tool, and the tool's own
+          # wheels are what constrain it.
+          python-version: '3.12'
+
+      - name: Install semgrep
+        run: python -m pip install --disable-pip-version-check "semgrep==1.175.0"
+
+      - name: Self-test the rules — plant a violation of each, and its control
+        # Exits non-zero when a rule misses its planted violation or reports its
+        # control. This is the step that makes the next one worth reading.
+        run: semgrep --test --config scripts/semgrep/rules scripts/semgrep/tests
+
+      - name: Scan
+        # `--error` because without it semgrep prints findings and exits 0.
+        # `--exclude scripts/semgrep` because the fixtures deliberately contain
+        # a violation of every rule.
+        run: >-
+          semgrep
+          --config scripts/semgrep/rules
+          --error
+          --metrics=off
+          --exclude scripts/semgrep
+          --exclude node_modules
+          --exclude dist
+          .

@@ -1,0 +1,168 @@
+# ForgeBridge's own Semgrep rules.
+#
+# Not a stock pack. A downloaded ruleset for "JavaScript security" finds `eval`
+# and SQL concatenation, and this repository has neither; what it has is a
+# specific set of defects that five rounds of adversarial review kept producing,
+# and none of them is in anyone's default pack. Each rule below is one of those
+# shapes, written from a defect that was actually found here:
+#
+#   FB1  a check that returns a pass because it could not run
+#        — "I do not understand this" and "this is safe" were the same answer.
+#   FB2  a verdict that falls back to `ok` when nothing computed one
+#        — the same defect written as a default rather than as a catch.
+#   FB3  a credential handed to a log, a response or a telemetry attribute
+#        — THREAT-MODEL T1. `scripts/verify-no-key-storage.ts` rule K3 covers
+#          `packages/` only and says so; this rule reaches `apps/` and `scripts/`.
+#   FB4  a privileged ChangeSet transition that names the wrong predecessor
+#        — approval is a compare-and-swap (ADR-012, THREAT-MODEL T2 layer 4).
+#          `setStatus(id, 'approved', <not 'validated'>)` is an approval that can
+#          be applied twice or applied to a set nobody validated.
+#   FB5  a ChangeSet delivered to Studio from a function that never claimed it
+#        — the apply path skipping the approval check, THREAT-MODEL T3 bullet 3.
+#
+# Every rule ships with the legitimate shape it is most confusable with as a
+# control, in `forgebridge.ts` beside this file, marked `ok:`. Run both halves:
+#
+#   semgrep --test --config scripts/semgrep/forgebridge.yml scripts/semgrep
+#   semgrep --config scripts/semgrep/forgebridge.yml --error --exclude scripts/semgrep .
+#
+# The `--test` run is what makes these rules a gate rather than a decoration: it
+# plants a violation of every rule and fails if the rule does not report it, and
+# plants the control and fails if the rule does.
+#
+# Limits, stated because a rule whose reach is unstated is a rule people
+# over-trust. This is a syntactic matcher, not a dataflow analysis: FB3 sees a
+# credential that is still *named* like one, and a value copied into a blandly
+# named local reaches a log unremarked. FB5 reads one function body — a deliver
+# reached through a helper two calls away is outside it. Neither of those is a
+# reason to weaken the rules; they are the reason the runtime checks in
+# `packages/core/test/redact.test.ts` and the pipeline's own tests exist.
+
+rules:
+  # ── FB1 ──────────────────────────────────────────────────────────────────
+  - id: forgebridge-fail-open-catch
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      This catch block reports a pass for a check that threw. A check that could
+      not run has not found anything, which is not the same as having found
+      nothing: return a failing or refusing verdict from the catch, the way
+      packages/luau-analysis/src/analyse.ts does. THREAT-MODEL rule 1: fail closed.
+    metadata:
+      category: security
+      confidence: HIGH
+      references:
+        - docs/THREAT-MODEL.md
+    patterns:
+      - pattern-either:
+          - pattern: |
+              try { ... } catch($E) { ... return "ok"; }
+          - pattern: |
+              try { ... } catch($E) { ... return { ..., status: "ok" }; }
+          - pattern: |
+              try { ... } catch($E) { ... return { ..., ok: true }; }
+          - pattern: |
+              try { ... } catch($E) { ... return { ..., valid: true }; }
+          - pattern: |
+              try { ... } catch($E) { ... return { ..., allowed: true }; }
+          - pattern: |
+              try { ... } catch($E) { ... return { ..., approved: true }; }
+
+  # ── FB2 ──────────────────────────────────────────────────────────────────
+  - id: forgebridge-verdict-defaults-to-pass
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A verdict is defaulting to a pass when nothing computed one. `?? "ok"` and
+      `|| "ok"` turn "no analyser was configured" into "the analyser approved":
+      see packages/core/src/validate.ts, which returns `warn` with a reason
+      instead. THREAT-MODEL rule 1: fail closed.
+    metadata:
+      category: security
+      confidence: MEDIUM
+      references:
+        - docs/THREAT-MODEL.md
+    pattern-either:
+      - pattern: $X ?? "ok"
+      - pattern: $X || "ok"
+      - pattern: '$X ?? { ..., status: "ok" }'
+      - pattern: '$X || { ..., status: "ok" }'
+
+  # ── FB3 ──────────────────────────────────────────────────────────────────
+  - id: forgebridge-credential-to-sink
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A credential-named value is being handed to a log, a response or a
+      telemetry attribute. The user's API key is asset 1 in THREAT-MODEL T1 and a
+      leak costs them real money. Redact at the port
+      (packages/core/src/ports/redact.ts), or do not pass it.
+    metadata:
+      category: security
+      confidence: HIGH
+      references:
+        - docs/THREAT-MODEL.md
+    patterns:
+      - pattern-either:
+          - pattern: console.$M(..., $CRED, ...)
+          - pattern: console.$M(..., $OBJ.$CRED, ...)
+          - pattern: process.stdout.write(..., $CRED, ...)
+          - pattern: process.stderr.write(..., $CRED, ...)
+          - pattern: process.stdout.write(..., $OBJ.$CRED, ...)
+          - pattern: process.stderr.write(..., $OBJ.$CRED, ...)
+          - pattern: $RES.end(..., $CRED, ...)
+          - pattern: $RES.end(..., $OBJ.$CRED, ...)
+          - pattern: $RES.write(..., $CRED, ...)
+          - pattern: $RES.write(..., $OBJ.$CRED, ...)
+          - pattern: '$SPAN.setAttributes({ ..., $K: $CRED })'
+          - pattern: '$SPAN.setAttributes({ ..., $K: $OBJ.$CRED })'
+          - pattern: '$SPAN.addEvent($NAME, { ..., $K: $CRED })'
+          - pattern: '$SPAN.addEvent($NAME, { ..., $K: $OBJ.$CRED })'
+      - metavariable-regex:
+          metavariable: $CRED
+          regex: (?i)^(api_?key|apikey|secret|client_?secret|password|passwd|private_?key|access_?token|auth_?token|bearer_?token|refresh_?token|session_?key|service_?role_?key|credential|credentials)$
+
+  # ── FB4 ──────────────────────────────────────────────────────────────────
+  - id: forgebridge-privileged-status-transition
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      This ChangeSet transition names the wrong predecessor. `setStatus` is a
+      compare-and-swap precisely so two approvals cannot both win and so a set
+      nobody validated cannot be approved: `approved` comes from `validated`,
+      `applying` from `approved`, `applied` from `applying`, and nothing else.
+      THREAT-MODEL T2 layer 4, ADR-012.
+    metadata:
+      category: security
+      confidence: HIGH
+      references:
+        - docs/THREAT-MODEL.md
+    patterns:
+      - pattern-either:
+          - pattern: $S.setStatus($ID, "approved", ...)
+          - pattern: $S.setStatus($ID, "applying", ...)
+          - pattern: $S.setStatus($ID, "applied", ...)
+      - pattern-not: $S.setStatus($ID, "approved", "validated")
+      - pattern-not: $S.setStatus($ID, "applying", "approved")
+      - pattern-not: $S.setStatus($ID, "applied", "applying")
+
+  # ── FB5 ──────────────────────────────────────────────────────────────────
+  - id: forgebridge-deliver-without-claiming-approval
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A ChangeSet is delivered to a consumer from a function that never claimed
+      it out of `approved`. Proposing and applying are separate calls with an
+      approval in between (THREAT-MODEL T3), and the claim is what enforces the
+      split: deliver only after `setStatus(id, "applying", "approved")` returned
+      in this same function.
+    metadata:
+      category: security
+      confidence: MEDIUM
+      references:
+        - docs/THREAT-MODEL.md
+    patterns:
+      - pattern: $T.deliver($LINK, $SET)
+      - pattern-not-inside: |
+          $S.setStatus(..., "applying", "approved");
+          ...

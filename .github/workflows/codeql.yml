@@ -1,0 +1,128 @@
+name: CodeQL
+
+# THREAT-MODEL T6 said "Semgrep and CodeQL — M42. No SAST runs in this
+# repository." for two review rounds. This file is half of making that sentence
+# false in the right direction; `.github/workflows/semgrep.yml` is the other
+# half. They are separate on purpose: CodeQL is a whole-program dataflow engine
+# with a large query set and a long runtime, Semgrep here is five hand-written
+# syntactic rules that finish in seconds, and putting them in one job would mean
+# a contributor waits ten minutes to learn about a typo in a rule.
+#
+# ── Why this job can fail, and how ───────────────────────────────────────────
+#
+# `github/codeql-action/analyze` uploads to the repository's Security tab and,
+# by itself, fails nothing: the step succeeds whether it found one alert or a
+# hundred, and the alerts sit in a tab that blocks no merge until somebody
+# configures branch protection to require the code-scanning check. A scanner in
+# that state is exactly the shape this repository keeps calling out — a control
+# in a list of controls that stops nothing.
+#
+# So the analysis also writes its SARIF to a file, and `scripts/check-sarif.ts`
+# decides the job. It blocks on a result whose rule carries a
+# `security-severity` at or above 7.0 (CVSS "high"), and — the fail-closed half
+# — on any result whose severity it could not resolve. Results below the
+# threshold are printed and do not block; they are in the Security tab, which is
+# where the upload put them. `scripts/__tests__/check-sarif.test.ts` plants a
+# high-severity report, an unresolvable one, a malformed one and an empty one
+# and proves each is refused, with a clean report and a genuinely low-severity
+# one as controls.
+#
+# ── Action pins ──────────────────────────────────────────────────────────────
+#
+# Every `uses:` below is pinned to a major that was checked against the action's
+# own releases page on 2026-08-27: `actions/checkout` v7, `actions/setup-node`
+# v7, `github/codeql-action` v4 (v3 is still maintained; v4 is current).
+# `ci.yml` and `catalog-drift.yml` still pin the v4/v4 generation — bumping
+# those is a change to files this one does not own, and mixing majors is the
+# honest state rather than a claim that the repository is uniformly current.
+# `scripts/workflow-rules.ts` rule W1 fails the build on an unpinned `uses:`.
+# TODO(M42): move to full commit-SHA pins, which need a bot to keep them
+# current; a tag can be moved and a commit cannot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Tuesdays, 04:23 UTC. Off the hour for the same reason `catalog-drift.yml`
+    # is: scheduled runs at :00 queue behind everyone else's cron. The schedule
+    # matters independently of the PR runs — CodeQL ships new queries, so a
+    # tree that has not changed can still acquire a finding.
+    - cron: '23 4 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  analyze:
+    name: Analyse TypeScript
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The one scope this job needs beyond read: it lets the action write code
+      # scanning alerts. It is not repository write — it cannot push, cannot
+      # open a pull request and cannot publish.
+      security-events: write
+      # Read-only, and required for the action to correlate a pull-request run
+      # with the base branch's analysis.
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          # One language identifier covers both halves of this tree: the
+          # TypeScript in `packages/` and `apps/`, and the JavaScript that
+          # `.mjs` config files are.
+          languages: javascript-typescript
+          # There is nothing to compile for an interpreted language, and saying
+          # so explicitly stops the action from attempting an autobuild that
+          # would fail on a monorepo with twelve workspaces.
+          build-mode: none
+          # The default suite plus the extended security queries. Not
+          # `security-and-quality`: the quality half is a style opinion, and a
+          # security gate that also blocks on style is a gate people learn to
+          # override.
+          queries: security-extended
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:javascript-typescript'
+          # Written to a file as well as uploaded, so the step below can read
+          # it. `upload` keeps its default (`always`), so the Security tab still
+          # receives everything including the results that do not block.
+          output: sarif-results
+
+      # tsx is a devDependency, so the gate below needs an install. It is placed
+      # after the analysis so a dependency problem cannot be mistaken for a
+      # finding.
+      - run: npm ci
+
+      - name: Block on high-severity and on unresolvable results
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          reports=(sarif-results/*.sarif)
+          if [ ${#reports[@]} -eq 0 ]; then
+            # A scan that wrote nothing has not found nothing. Refuse rather
+            # than let an empty directory read as a clean bill of health.
+            echo "::error::CodeQL produced no SARIF report; the analysis did not run."
+            exit 1
+          fi
+          for report in "${reports[@]}"; do
+            echo "── ${report}"
+            npx tsx scripts/check-sarif.ts "${report}"
+          done
