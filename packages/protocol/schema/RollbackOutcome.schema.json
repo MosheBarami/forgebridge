@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "RollbackOutcome.schema.json",
+  "title": "RollbackOutcome",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string",
+      "maxLength": 1000
+    }
+  },
+  "required": [
+    "index",
+    "ok"
+  ],
+  "additionalProperties": true
+}

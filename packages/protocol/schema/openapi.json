@@ -917,7 +917,7 @@
       "post": {
         "operationId": "requestRollback",
         "summary": "Dispatch a rollback of a journalled apply",
-        "description": "Dispatched, not done: the inverse operations live on the consumer that captured them, so only the consumer can say a rollback completed. TODO(M11) in the daemon tracks the missing completion report.",
+        "description": "Dispatched, not done: the delivery carries the inverse operations, and the consumer replays them and reports separately to POST /v1/journal/{journalId}/rollback-result. Refused when this transport holds no inverses for the apply — a reversal it cannot send is not one it will pretend to dispatch.",
         "responses": {
           "202": {
             "description": "Queued for the consumer",
@@ -1037,6 +1037,381 @@
         "security": [
           {
             "producerToken": []
+          }
+        ]
+      }
+    },
+    "/v1/journal/{journalId}": {
+      "get": {
+        "operationId": "getJournal",
+        "summary": "What happened to one apply, and to any reversal of it",
+        "description": "Producer surface: it names what was changed in the user's place and carries the consumer's own report of what a rollback did or did not undo. `rollback_partial` is a state of its own and must not be rounded to either neighbour — some inverses replayed and some did not, and the ones that would have finished the job are spent.",
+        "responses": {
+          "200": {
+            "description": "The journal, and the rollback result if one was reported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalStateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "journalId",
+            "in": "path",
+            "required": true,
+            "description": "The journal id an ApplyResult reported",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "security": [
+          {
+            "producerToken": []
+          }
+        ]
+      }
+    },
+    "/v1/journal/{journalId}/entry": {
+      "post": {
+        "operationId": "recordJournalEntry",
+        "summary": "Consumer uploads the inverse operations it captured",
+        "description": "Enveloped and MAC'd. The body is a DeliveryEnvelope whose payload is a JournalEntry. This is what takes the inverses off the session that captured them, so a rollback can outlive it. The entry is checked against the apply this transport witnessed rather than believed, and validated as a replay at upload rather than weeks later when it is needed.",
+        "responses": {
+          "200": {
+            "description": "Recorded, with the number of inverses now held",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JournalEntryAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "journalId",
+            "in": "path",
+            "required": true,
+            "description": "Must equal the JournalEntry's own id",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "A sealed envelope whose payload is a JournalEntry",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryEnvelope"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "linkId": [],
+            "linkMac": []
+          }
+        ]
+      }
+    },
+    "/v1/journal/{journalId}/rollback-result": {
+      "post": {
+        "operationId": "reportRollbackResult",
+        "summary": "Consumer reports how far a reversal got",
+        "description": "Enveloped and MAC'd. The body is a DeliveryEnvelope whose payload is a RollbackResult. A partial reversal is a legal outcome and is recorded as `rollback_partial`, which leaves `rolledBackAt` null: the entry is neither reversed nor intact. Refused when no rollback was dispatched — a consumer does not start one.",
+        "responses": {
+          "200": {
+            "description": "Recorded, with the journal's new state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RollbackResultAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "journalId",
+            "in": "path",
+            "required": true,
+            "description": "Must equal the RollbackResult's own journalId",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "A sealed envelope whose payload is a RollbackResult",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryEnvelope"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "linkId": [],
+            "linkMac": []
           }
         ]
       }
@@ -2280,38 +2655,7 @@
             "additionalProperties": true
           },
           {
-            "type": "object",
-            "properties": {
-              "kind": {
-                "type": "string",
-                "const": "rollback"
-              },
-              "journalId": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-              },
-              "changeSetId": {
-                "type": "string",
-                "format": "uuid",
-                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-              },
-              "expectedVersion": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "reason": {
-                "type": "string",
-                "maxLength": 500
-              }
-            },
-            "required": [
-              "kind",
-              "journalId",
-              "changeSetId",
-              "expectedVersion"
-            ],
-            "additionalProperties": true
+            "$ref": "#/components/schemas/RollbackDelivery"
           }
         ],
         "discriminator": {
@@ -2700,6 +3044,128 @@
           "versionBefore",
           "versionAfter",
           "appliedAt"
+        ],
+        "additionalProperties": true
+      },
+      "JournalEntryAck": {
+        "type": "object",
+        "properties": {
+          "journalId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "inverses": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "journalId",
+          "changeSetId",
+          "inverses"
+        ],
+        "additionalProperties": true
+      },
+      "JournalState": {
+        "type": "string",
+        "enum": [
+          "applied",
+          "rollback_requested",
+          "rolled_back",
+          "rollback_partial",
+          "rollback_failed"
+        ]
+      },
+      "JournalStateResponse": {
+        "type": "object",
+        "properties": {
+          "journalId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JournalState"
+          },
+          "versionBefore": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "versionAfter": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "appliedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+          },
+          "rollbackRequestedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+          },
+          "rolledBackAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+          },
+          "inverses": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RollbackResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "journalId",
+          "changeSetId",
+          "projectId",
+          "summary",
+          "state",
+          "versionBefore",
+          "versionAfter",
+          "appliedAt",
+          "rollbackRequestedAt",
+          "rolledBackAt",
+          "inverses",
+          "result"
         ],
         "additionalProperties": true
       },
@@ -3476,6 +3942,88 @@
         ],
         "additionalProperties": true
       },
+      "RollbackDelivery": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "rollback"
+          },
+          "journalId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "restoresToVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "inverse": {
+                  "$ref": "#/components/schemas/InverseOperation"
+                }
+              },
+              "required": [
+                "index",
+                "inverse"
+              ],
+              "additionalProperties": true
+            },
+            "maxItems": 500
+          }
+        },
+        "required": [
+          "kind",
+          "journalId",
+          "changeSetId",
+          "expectedVersion",
+          "restoresToVersion",
+          "steps"
+        ],
+        "additionalProperties": true
+      },
+      "RollbackOutcome": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "index",
+          "ok"
+        ],
+        "additionalProperties": true
+      },
       "RollbackRequest": {
         "type": "object",
         "properties": {
@@ -3519,13 +4067,91 @@
           "nonce": {
             "type": "integer",
             "minimum": 0
+          },
+          "steps": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
           "journalId",
           "changeSetId",
           "status",
-          "nonce"
+          "nonce",
+          "steps"
+        ],
+        "additionalProperties": true
+      },
+      "RollbackResult": {
+        "type": "object",
+        "properties": {
+          "journalId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RollbackOutcome"
+            },
+            "maxItems": 500
+          },
+          "newVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rolledBackAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+          },
+          "pluginVersion": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "journalId",
+          "changeSetId",
+          "outcomes",
+          "newVersion",
+          "rolledBackAt",
+          "pluginVersion"
+        ],
+        "additionalProperties": true
+      },
+      "RollbackResultAck": {
+        "type": "object",
+        "properties": {
+          "journalId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "state": {
+            "$ref": "#/components/schemas/JournalState"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "journalId",
+          "changeSetId",
+          "state",
+          "version"
         ],
         "additionalProperties": true
       },

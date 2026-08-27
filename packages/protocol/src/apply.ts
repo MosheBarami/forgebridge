@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Operation } from './operation.js';
+import { LIMITS } from './limits.js';
 
 export const OperationOutcome = z.object({
   index: z.number().int().min(0),
@@ -77,3 +78,87 @@ export const RollbackRequest = z.object({
   reason: z.string().max(500).optional(),
 });
 export type RollbackRequest = z.infer<typeof RollbackRequest>;
+
+/**
+ * The outcome of replaying one inverse operation.
+ *
+ * `index` is an index into the journal's `inverses` array, NOT into the
+ * ChangeSet's operations. They are different lists — a journal holds only the
+ * operations that actually ran — and a consumer that conflates them reports
+ * failures against the wrong operation, which is a worse lie than reporting
+ * nothing.
+ *
+ * Structurally identical to `OperationOutcome` and deliberately not an alias of
+ * it: the two count in different lists, and a shared name is how a reader comes
+ * to believe they index the same thing.
+ */
+export const RollbackOutcome = z.object({
+  index: z.number().int().min(0),
+  ok: z.boolean(),
+  /** Present only when ok is false. Plain language, no Luau stack traces. */
+  error: z.string().max(1000).optional(),
+});
+export type RollbackOutcome = z.infer<typeof RollbackOutcome>;
+
+/**
+ * What the consumer reports back after replaying a journal's inverses.
+ *
+ * ADDITIVE, and a sibling of `ApplyResult` rather than a field on it. The two
+ * are keyed on different things and index into different lists: an `ApplyResult`
+ * is keyed on `changeSetId` and its outcomes index that set's operations, while
+ * this is keyed on `journalId` and its outcomes index that journal's `inverses`.
+ * Bolting an optional `rolledBackJournalId` onto `ApplyResult` would make every
+ * other field on it conditional on a flag, and the one mechanism that must never
+ * guess would then be read through an `if`.
+ *
+ * Until this existed there was no shape on the wire for "the reversal of journal
+ * X finished", so `JournalEntry.rolledBackAt` stayed null forever and every
+ * surface above the daemon — the CLI, the A2A connector, the Python SDK — could
+ * only ever say "dispatched".
+ *
+ * A partial reversal is a legal outcome and is reported as one, for the reason
+ * `ApplyResult` reports a partial apply: it is the honest answer, and it is
+ * worse than either neighbour. The tree is then in a state neither the user nor
+ * the journal describes and the remaining inverses have been consumed, so a
+ * recipient must be able to tell it from a clean reversal. See
+ * `rollbackStatusOf`, which is the one reading of these outcomes.
+ */
+export const RollbackResult = z.object({
+  journalId: z.string().uuid(),
+  /** The apply being reversed. Checked against the journal, never believed. */
+  changeSetId: z.string().uuid(),
+  /** One per inverse attempted, in the order they were replayed. */
+  outcomes: z.array(RollbackOutcome).max(LIMITS.MAX_OPERATIONS),
+  /** The tree version after the reversal. Becomes the next set's baseVersion. */
+  newVersion: z.number().int().min(0),
+  rolledBackAt: z.string().datetime(),
+  /** Plugin build that performed the reversal, for field debugging. */
+  pluginVersion: z.string().max(40),
+});
+export type RollbackResult = z.infer<typeof RollbackResult>;
+
+/**
+ * What a rollback achieved, in one word.
+ *
+ * `partial` is the one that matters, and it is a status of its own rather than
+ * being rounded to either neighbour. Rounding it up to `rolled_back` would tell
+ * a user their place is back the way it was when it is not; rounding it down to
+ * `failed` would tell them nothing happened when something did, and the inverses
+ * that would have undone it are spent.
+ */
+export type RollbackStatus = 'rolled_back' | 'partial' | 'failed';
+
+/**
+ * Read a `RollbackResult` as a status.
+ *
+ * Stated once, here, because three surfaces were each answering this question
+ * slightly differently. An empty outcome list is `failed`, not `rolled_back`:
+ * "no inverse was replayed" is the shape of a consumer that could not start, and
+ * `every()` over an empty array is true — which is exactly how a fail-closed
+ * check turns into "I found no problem, so this is fine".
+ */
+export function rollbackStatusOf(result: RollbackResult): RollbackStatus {
+  if (result.outcomes.length === 0) return 'failed';
+  if (result.outcomes.every((outcome) => outcome.ok)) return 'rolled_back';
+  return result.outcomes.some((outcome) => outcome.ok) ? 'partial' : 'failed';
+}

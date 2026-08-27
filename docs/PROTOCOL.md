@@ -243,7 +243,11 @@ POST   /v1/changesets/:id/approve
 POST   /v1/changesets/:id/apply-result → plugin reports ApplyResult
 POST   /v1/apply-result               → the same, unparameterised: an ApplyResult
                                         already names its own changeSetId
-POST   /v1/journal/:id/rollback
+POST   /v1/journal/:id/rollback       → producer dispatches a reversal; the inverses
+                                        travel with the delivery
+GET    /v1/journal/:id                → what happened to one apply, and to any reversal
+POST   /v1/journal/:id/entry          → plugin uploads the inverses it captured
+POST   /v1/journal/:id/rollback-result → plugin reports how far a reversal got
 POST   /v1/output                     → plugin mirrors Studio console back
 GET    /v1/output?link=<linkId>       → producer reads that console back
 GET    /v1/models                     → registry snapshot + live health
@@ -262,7 +266,16 @@ a diff a human read (ADR-012). The run's response and its event stream both carr
 `ModelAttempt` list — every model the router tried and why it moved on — because a fallback
 the caller cannot see is a silent substitution (ADR-008).
 
-The plugin only ever calls `poll`, `apply-result`, and `output` — and it calls them against a
+The three journal routes are M11's. `POST /v1/journal/:id/entry` is what takes the inverse
+operations off the Studio session that captured them — without it a closed Studio was the end
+of the road back from an apply — and `POST /v1/journal/:id/rollback-result` is how a reversal
+is reported, which is what lets `GET /v1/journal/:id` answer anything other than "requested".
+`rollback_partial` is one of the five states it answers with and is never rounded to either
+neighbour: some inverses replayed and some did not, so the tree is in a state neither the user
+nor the journal describes, and the inverses that would have finished the job are spent.
+
+The plugin only ever calls `poll`, `apply-result`, `journal/:id/entry`,
+`journal/:id/rollback-result` and `output` — and it calls them against a
 **single stable base address**, because Roblox grants plugin HTTP permission per web address and
 every new address costs the user another prompt. Everything else is for producers and UIs. Keeping the plugin's surface this small is deliberate: it is the piece
 that is hardest to update in the field.

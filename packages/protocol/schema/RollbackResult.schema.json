@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "RollbackResult.schema.json",
+  "title": "RollbackResult",
+  "$comment": "Generated from packages/protocol/src by scripts/generate-schemas.ts. Do not edit.",
+  "type": "object",
+  "properties": {
+    "journalId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "changeSetId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RollbackOutcome"
+      },
+      "maxItems": 500
+    },
+    "newVersion": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "rolledBackAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "pluginVersion": {
+      "type": "string",
+      "maxLength": 40
+    }
+  },
+  "required": [
+    "journalId",
+    "changeSetId",
+    "outcomes",
+    "newVersion",
+    "rolledBackAt",
+    "pluginVersion"
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "RollbackOutcome": {
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      },
+      "required": [
+        "index",
+        "ok"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

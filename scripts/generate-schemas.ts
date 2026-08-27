@@ -952,9 +952,10 @@ const ROUTES: readonly Route[] = [
     operationId: 'requestRollback',
     summary: 'Dispatch a rollback of a journalled apply',
     description:
-      'Dispatched, not done: the inverse operations live on the consumer that captured them, ' +
-      'so only the consumer can say a rollback completed. TODO(M11) in the daemon tracks the ' +
-      'missing completion report.',
+      'Dispatched, not done: the delivery carries the inverse operations, and the consumer ' +
+      'replays them and reports separately to POST /v1/journal/{journalId}/rollback-result. ' +
+      'Refused when this transport holds no inverses for the apply — a reversal it cannot ' +
+      'send is not one it will pretend to dispatch.',
     auth: 'producer',
     parameters: [
       { name: 'journalId', in: 'path', required: true, description: 'Must equal the request body\'s journalId', schema: UUID_SCHEMA },
@@ -962,6 +963,66 @@ const ROUTES: readonly Route[] = [
     requestBody: { schema: 'RollbackRequest', description: 'The journal to reverse and the version it expects' },
     responses: [
       { status: 202, description: 'Queued for the consumer', schema: 'RollbackResponse' },
+      ...ERROR_RESPONSES,
+    ],
+  },
+  {
+    method: 'get',
+    path: '/v1/journal/{journalId}',
+    operationId: 'getJournal',
+    summary: 'What happened to one apply, and to any reversal of it',
+    description:
+      'Producer surface: it names what was changed in the user\'s place and carries the ' +
+      'consumer\'s own report of what a rollback did or did not undo. `rollback_partial` is a ' +
+      'state of its own and must not be rounded to either neighbour — some inverses replayed ' +
+      'and some did not, and the ones that would have finished the job are spent.',
+    auth: 'producer',
+    parameters: [
+      { name: 'journalId', in: 'path', required: true, description: 'The journal id an ApplyResult reported', schema: UUID_SCHEMA },
+    ],
+    responses: [
+      { status: 200, description: 'The journal, and the rollback result if one was reported', schema: 'JournalStateResponse' },
+      ...ERROR_RESPONSES,
+    ],
+  },
+  {
+    method: 'post',
+    path: '/v1/journal/{journalId}/entry',
+    operationId: 'recordJournalEntry',
+    summary: 'Consumer uploads the inverse operations it captured',
+    description:
+      'Enveloped and MAC\'d. The body is a DeliveryEnvelope whose payload is a JournalEntry. ' +
+      'This is what takes the inverses off the session that captured them, so a rollback can ' +
+      'outlive it. The entry is checked against the apply this transport witnessed rather ' +
+      'than believed, and validated as a replay at upload rather than weeks later when it is ' +
+      'needed.',
+    auth: 'consumer',
+    parameters: [
+      { name: 'journalId', in: 'path', required: true, description: 'Must equal the JournalEntry\'s own id', schema: UUID_SCHEMA },
+    ],
+    requestBody: { schema: 'DeliveryEnvelope', description: 'A sealed envelope whose payload is a JournalEntry' },
+    responses: [
+      { status: 200, description: 'Recorded, with the number of inverses now held', schema: 'JournalEntryAck' },
+      ...ERROR_RESPONSES,
+    ],
+  },
+  {
+    method: 'post',
+    path: '/v1/journal/{journalId}/rollback-result',
+    operationId: 'reportRollbackResult',
+    summary: 'Consumer reports how far a reversal got',
+    description:
+      'Enveloped and MAC\'d. The body is a DeliveryEnvelope whose payload is a RollbackResult. ' +
+      'A partial reversal is a legal outcome and is recorded as `rollback_partial`, which ' +
+      'leaves `rolledBackAt` null: the entry is neither reversed nor intact. Refused when no ' +
+      'rollback was dispatched — a consumer does not start one.',
+    auth: 'consumer',
+    parameters: [
+      { name: 'journalId', in: 'path', required: true, description: 'Must equal the RollbackResult\'s own journalId', schema: UUID_SCHEMA },
+    ],
+    requestBody: { schema: 'DeliveryEnvelope', description: 'A sealed envelope whose payload is a RollbackResult' },
+    responses: [
+      { status: 200, description: 'Recorded, with the journal\'s new state', schema: 'RollbackResultAck' },
       ...ERROR_RESPONSES,
     ],
   },

@@ -11,7 +11,7 @@ which is strictly worse than having no copy at all.
 
 ## What is here
 
-- `<Name>.schema.json` — one self-contained JSON Schema (draft 2020-12) for each of the 52
+- `<Name>.schema.json` — one self-contained JSON Schema (draft 2020-12) for each of the 54
   top-level types `@forgebridge/protocol` exports. Each file inlines the definitions it
   references under `$defs`, so a consumer needs exactly one file and no resolver.
 - `openapi.json` — one OpenAPI 3.1 document for the `/v1` surface. Its paths are read off
