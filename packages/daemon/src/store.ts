@@ -1,8 +1,16 @@
 import type { ProjectPolicy } from '@forgebridge/core';
 import { ForgeBridgeError } from '@forgebridge/protocol';
-import type { ApplyResult, ChangeSet, ChangeSetStatus, Link } from '@forgebridge/protocol';
+import type {
+  ApplyResult,
+  ChangeSet,
+  ChangeSetStatus,
+  Link,
+  ProtocolError,
+  Run,
+  Validation,
+} from '@forgebridge/protocol';
 import { NONCE_ORIGIN } from './envelope.js';
-import type { DeliveryPayload, OutputMessage } from './wire.js';
+import type { DeliveryPayload, ModelOrdering, OutputMessage, SkippedModel } from './wire.js';
 
 /**
  * State the daemon keeps for a link. `sessionKey` is deliberately absent: keys
@@ -33,6 +41,39 @@ export interface JournalRecord {
   appliedAt: string;
   rollbackRequestedAt: string | null;
   rolledBackAt: string | null;
+}
+
+/**
+ * What the daemon keeps about a run, and the whole of what `GET /v1/runs/:id`
+ * answers from.
+ *
+ * `run.attempts` is the point of the record. ADR-008 calls the attempt list the
+ * run's permanent record, which means it has to outlive the request that
+ * produced it — a caller whose connection dropped mid-run must still be able to
+ * ask which models were tried and why the router moved on.
+ *
+ * What is deliberately *not* here: the prompt's generated source as it
+ * streamed, and the model's partial output. Those live on the in-memory event
+ * log in `runs.ts` for as long as somebody is watching, and are then gone. The
+ * finished ChangeSet is addressed by `changeSetId` and stored once, where the
+ * diff and the approval read it — holding a second copy here would be two
+ * records of one proposal that can disagree.
+ */
+export interface RunRecord {
+  run: Run;
+  /** The run's plan for itself, as the core produced it before calling any model. */
+  plan: { steps: string[] };
+  /** The set this run proposed, or null when it produced none. Never `approved`. */
+  changeSetId: string | null;
+  /** What `POST /v1/changesets/:id/approve` will require back. Null with no set. */
+  contentDigest: string | null;
+  /** The verdict this daemon computed. Never a model's own. */
+  validation: Validation | null;
+  /** Candidates the breaker or the attempt budget kept out. Never counted as attempts. */
+  skipped: SkippedModel[];
+  ordering: ModelOrdering | null;
+  failure: ProtocolError | null;
+  updatedAt: string;
 }
 
 export interface LinkPatch {
@@ -138,6 +179,20 @@ export interface DaemonStore {
 
   appendOutput(linkId: string, messages: readonly OutputMessage[]): Promise<void>;
   recentOutput(linkId: string, limit: number): Promise<OutputMessage[]>;
+
+  /**
+   * Write the record for a run, creating or replacing it.
+   *
+   * The write-once rule that governs `putChangeSet` and `putJournal` does not
+   * apply here, and the difference is not an oversight. Those two ids name
+   * something a *caller* minted and that later steps are bound to — a proposal
+   * a human read, a set of inverses only the consumer holds. A run id is minted
+   * by this daemon for a run this daemon is executing, and the record is
+   * rewritten as that run moves through its stages. Nothing outside the process
+   * can write one, so there is no proposal to swap under a reviewer.
+   */
+  putRun(record: RunRecord): Promise<void>;
+  getRun(runId: string): Promise<RunRecord | null>;
 }
 
 /**
@@ -148,6 +203,14 @@ export interface DaemonStore {
 export const RETENTION = {
   DELIVERIES_PER_LINK: 64,
   OUTPUT_PER_LINK: 500,
+  /**
+   * Runs kept per daemon. A run record is small — a plan, an attempt list and
+   * some ids — but unbounded is unbounded, and a producer scripting a hundred
+   * runs an hour would otherwise grow this map for as long as the process is
+   * up. The ChangeSets those runs proposed are not evicted with them: a set is
+   * addressed by its own id and outlives the run that produced it.
+   */
+  RUNS: 200,
 } as const;
 
 export class InMemoryDaemonStore implements DaemonStore {
@@ -161,6 +224,7 @@ export class InMemoryDaemonStore implements DaemonStore {
   readonly #applyResults = new Map<string, ApplyResult>();
   readonly #journals = new Map<string, JournalRecord>();
   readonly #output = new Map<string, OutputMessage[]>();
+  readonly #runs = new Map<string, RunRecord>();
   readonly #now: () => number;
 
   constructor(options: { now?: () => number } = {}) {
@@ -341,5 +405,23 @@ export class InMemoryDaemonStore implements DaemonStore {
   async recentOutput(linkId: string, limit: number): Promise<OutputMessage[]> {
     const buffer = this.#output.get(linkId) ?? [];
     return buffer.slice(Math.max(0, buffer.length - limit));
+  }
+
+  async putRun(record: RunRecord): Promise<void> {
+    // Re-inserted rather than written over, so a run still being executed sits
+    // at the young end of the retention window. A plain `set` leaves an
+    // existing key where it was first inserted, which would let a burst of
+    // newer runs evict the record of a run that has not finished yet.
+    this.#runs.delete(record.run.id);
+    this.#runs.set(record.run.id, record);
+    while (this.#runs.size > RETENTION.RUNS) {
+      const oldest = this.#runs.keys().next();
+      if (oldest.done) break;
+      this.#runs.delete(oldest.value);
+    }
+  }
+
+  async getRun(runId: string): Promise<RunRecord | null> {
+    return this.#runs.get(runId) ?? null;
   }
 }

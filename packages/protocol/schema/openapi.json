@@ -1266,6 +1266,375 @@
         "x-forgebridge-undocumented": "served by the router since M14; add it to the endpoint table"
       }
     },
+    "/v1/runs": {
+      "post": {
+        "operationId": "startRun",
+        "summary": "Turn a prompt into a proposed ChangeSet",
+        "description": "Runs the pipeline in `@forgebridge/core`: plan, route over the candidate models, generate, validate. It stops at `awaiting-approval` and there is no argument that takes it further — the set it stores is `validated`, and applying it means calling `POST /v1/changesets/{changeSetId}/approve` with the digest of a diff a human read (ADR-012).\n\nThe response carries `run.attempts`: every model the router tried, in order, with why it moved on. That list is the run's permanent record and is returned in full whether the run succeeded, failed or was cancelled — a fallback the caller cannot see is a silent substitution (ADR-008).\n\nA run that produced nothing still answers 201 with `failure` set, because a `ProtocolError` body has nowhere to carry the attempt list. The 4xx and 5xx below are the things that stopped a run from starting: no model client, no reachable candidate, a stale `baseVersion`.\n\nWith `stream: true` the answer is a `text/event-stream` instead. Its frames are `run` (a whole RunResponse, first and last), one frame per core `RunEvent` under that event's own type — `stage`, `plan`, `model-attempt-started`, `output-delta`, `model-attempt`, `model-skipped`, `validation`, `change-set`, `cancelled`, `failed` — each carrying its index as the SSE id, and `error` carrying a ProtocolError if the request itself fails after the stream opened. Two `validation` frames are normal: the core computes one through its analyser port, and the daemon computes the one it stands behind over every source the set carries. `computedBy` says which.",
+        "responses": {
+          "200": {
+            "description": "The streamed form, when `stream` is true",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The run, with its full attempt list. Nothing has been applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "The prompt, and how to route it",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "producerToken": []
+          }
+        ]
+      }
+    },
+    "/v1/runs/{runId}": {
+      "get": {
+        "operationId": "getRun",
+        "summary": "A run and every model it tried",
+        "description": "Answers during a run as well as after it. `changeSetStatus` is read from the ChangeSet itself rather than copied onto the run, so a set that has since been approved and applied reports that.",
+        "responses": {
+          "200": {
+            "description": "The run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "description": "The run id",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          }
+        ],
+        "security": [
+          {
+            "producerToken": []
+          }
+        ]
+      }
+    },
+    "/v1/runs/{runId}/events": {
+      "get": {
+        "operationId": "watchRun",
+        "summary": "Replay and follow a run as it happens",
+        "description": "Same frames as the streamed form of `POST /v1/runs`. Opens with a `run` frame so a client that arrives late knows what the events are about, replays the retained events from `?since=`, then follows until the run ends.\n\nThe log is in memory and capped: `output-delta` frames are broadcast and never retained, and a run old enough to have been evicted answers with the run record and a `closed` frame rather than stopping quietly. Nothing the stream can lose is missing from the record — the attempt list is on the `run` frame.",
+        "responses": {
+          "200": {
+            "description": "The event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_request — the body failed schema validation, or a path and body disagree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "link_unauthenticated — missing or wrong producer token, link header or MAC",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "not_approved or policy_violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "stale_base, link_unpaired or replay_detected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "too_large — beyond a protocol limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "426": {
+            "description": "unsupported_version — the caller declared an incompatible protocol major",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal — never carries an internal detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtocolError"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "description": "The run id",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Replay retained events from this index. Absent means from the beginning.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "security": [
+          {
+            "producerToken": []
+          }
+        ]
+      }
+    },
     "/v1/models": {
       "get": {
         "operationId": "getModels",
@@ -2522,6 +2891,40 @@
         ],
         "additionalProperties": true
       },
+      "ModelOrdering": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/RoutingPolicyName"
+          },
+          "candidatesConsidered": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidatesEligible": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "policy",
+          "candidatesConsidered",
+          "candidatesEligible",
+          "order"
+        ],
+        "additionalProperties": true
+      },
       "ModelsSnapshot": {
         "type": "object",
         "properties": {
@@ -3126,6 +3529,16 @@
         ],
         "additionalProperties": true
       },
+      "RoutingPolicyName": {
+        "type": "string",
+        "enum": [
+          "free-first",
+          "fastest",
+          "cheapest",
+          "best",
+          "pinned"
+        ]
+      },
       "Run": {
         "type": "object",
         "properties": {
@@ -3215,6 +3628,103 @@
         ],
         "additionalProperties": true
       },
+      "RunResponse": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/Run"
+          },
+          "plan": {
+            "type": "object",
+            "properties": {
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "steps"
+            ],
+            "additionalProperties": true
+          },
+          "changeSetId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "changeSetStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChangeSetStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contentDigest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "validation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Validation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedModel"
+            }
+          },
+          "ordering": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelOrdering"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProtocolError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "run",
+          "plan",
+          "changeSetId",
+          "changeSetStatus",
+          "contentDigest",
+          "validation",
+          "skipped",
+          "ordering",
+          "failure"
+        ],
+        "additionalProperties": true
+      },
       "RunStage": {
         "type": "string",
         "enum": [
@@ -3281,6 +3791,109 @@
           "path",
           "property",
           "value"
+        ],
+        "additionalProperties": true
+      },
+      "SkipReasonName": {
+        "type": "string",
+        "enum": [
+          "circuit-open",
+          "attempt-budget"
+        ]
+      },
+      "SkippedModel": {
+        "type": "object",
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "provider": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "reason": {
+            "$ref": "#/components/schemas/SkipReasonName"
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "retryAfterMs": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "modelId",
+          "provider",
+          "reason",
+          "detail"
+        ],
+        "additionalProperties": true
+      },
+      "StartRunRequest": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50000
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/RoutingPolicyName",
+            "default": "free-first"
+          },
+          "pinnedModel": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "baseVersion": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxAttempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false
+          },
+          "producer": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "web",
+                  "mcp",
+                  "a2a",
+                  "cli",
+                  "sdk",
+                  "rest"
+                ]
+              },
+              "client": {
+                "type": "string",
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "prompt"
         ],
         "additionalProperties": true
       },

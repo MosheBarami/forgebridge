@@ -23,14 +23,30 @@ import {
   type ChangeSetStatus,
   type Operation,
 } from '@forgebridge/protocol';
-import { DENY_ALL_POLICY, checkPolicy, type ProjectPolicy } from '@forgebridge/core';
+import {
+  CircuitBreaker,
+  DEFAULT_PIPELINE_REQUIREMENTS,
+  DENY_ALL_POLICY,
+  ModelRouter,
+  assertTransition,
+  checkPolicy,
+  executeRun,
+  isTerminal,
+  type AnalysisReport,
+  type AnalysisRequest,
+  type LuauAnalysisPort,
+  type ModelCandidate,
+  type ProjectPolicy,
+  type RunEvent,
+} from '@forgebridge/core';
 import { analyse, normaliseHost } from '@forgebridge/luau-analysis';
-import type { Finding, Validation } from '@forgebridge/protocol';
+import type { Finding, ProtocolError, Run, Validation } from '@forgebridge/protocol';
 import { PRODUCER_TOKEN_HEADER, assertProducerToken, mintProducerToken } from './auth.js';
 import { NONCE_ORIGIN, canonicalJson, openEnvelope, sealEnvelope, verifyRequestMac } from './envelope.js';
 import {
   LOOPBACK_HOST,
   corsHeadersFor,
+  errorPayload,
   headerValue,
   hostIsLoopback,
   originIsAllowed,
@@ -41,7 +57,22 @@ import {
   writeJson,
 } from './http.js';
 import { PairingService, type IssuedPairingCode } from './pairing.js';
-import { InMemoryDaemonStore, type DaemonStore, type DeliveryRecord, type JournalRecord } from './store.js';
+import {
+  InMemoryDaemonStore,
+  type DaemonStore,
+  type DeliveryRecord,
+  type JournalRecord,
+  type RunRecord,
+} from './store.js';
+import {
+  EVENT_STREAM_KEEP_ALIVE_MS,
+  RunEventLogs,
+  beginEventStream,
+  endEventStream,
+  writeEventFrame,
+  writeKeepAlive,
+  type RunEventLog,
+} from './runs.js';
 import {
   ApproveRequest,
   ChangeSetDiff,
@@ -49,9 +80,14 @@ import {
   ModelsSnapshot,
   OutputBatch,
   PairRequest,
+  RunResponse,
+  StartRunRequest,
+  type ModelOrdering,
   type ModelsPort,
   type OperationDiff,
   type OutputMessage,
+  type RunModelClient,
+  type SkippedModel,
 } from './wire.js';
 
 /**
@@ -85,6 +121,23 @@ export const POLL_TIMEOUT_MS = 25_000;
 const LINK_HEADER = 'X-ForgeBridge-Link';
 const MAC_HEADER = 'X-ForgeBridge-Mac';
 const OUTPUT_READ_LIMIT = 200;
+
+/**
+ * A run request is a prompt and a handful of scalars. The prompt is capped by
+ * `Run.prompt` at 50,000 characters, so this is that with room for the rest and
+ * for multi-byte text — not a number anyone should have to tune.
+ */
+const RUN_REQUEST_BYTES = 256 * 1024;
+
+/**
+ * How long `GET /v1/runs/:id/events` will follow a run before closing.
+ *
+ * A ceiling rather than a timeout: a run that has genuinely been generating for
+ * ten minutes is a run whose watcher should reconnect with `?since=` rather
+ * than hold a socket indefinitely, and a run that leaked without closing its
+ * log would otherwise hold one forever.
+ */
+const RUN_STREAM_MAX_MS = 10 * 60_000;
 
 /**
  * Domain separator for the content digest, in the style of the envelope MACs.
@@ -147,6 +200,18 @@ export interface DaemonOptions {
   projectId?: string;
   store?: DaemonStore;
   models?: ModelsPort;
+  /**
+   * What `POST /v1/runs` calls to reach a language model.
+   *
+   * Absent by default, and absent means the run route answers
+   * `provider_unconfigured` rather than half-working: a daemon with no adapter
+   * wired in cannot produce a ChangeSet from a prompt, and every other route on
+   * this surface goes on working without one. `bin.ts` wires the OpenRouter
+   * adapter when the process starts; a self-hoster pointing at a different
+   * provider supplies their own implementation here and changes nothing else
+   * (ADR-005).
+   */
+  modelClient?: RunModelClient;
   /**
    * The path policy used for any project the store has no policy for.
    *
@@ -219,6 +284,19 @@ export class ForgeBridgeDaemon {
   readonly #server: Server;
   readonly #pairing: PairingService;
   readonly #models: ModelsPort;
+  readonly #modelClient: RunModelClient | undefined;
+  /**
+   * One router, and therefore one circuit breaker, for the life of the process.
+   *
+   * A breaker per run would learn nothing: the whole point of suppressing a
+   * provider that has failed three times is that the *next* run does not pay to
+   * rediscover it (ADR-008). Sharing it is also what makes `skipped` on a run
+   * response mean something — a candidate suppressed here was suppressed
+   * because of what happened on an earlier run, which the caller can see.
+   */
+  readonly #router: ModelRouter;
+  readonly #runLogs = new RunEventLogs();
+  readonly #analyser: LuauAnalysisPort;
   readonly #allowedOrigins: readonly string[];
   readonly #allowedHttpHosts: readonly string[];
   readonly #logger: DaemonLogger;
@@ -241,6 +319,7 @@ export class ForgeBridgeDaemon {
     this.store = options.store ?? new InMemoryDaemonStore({ now: options.now ?? Date.now });
     this.defaultProjectId = options.projectId ?? randomUUID();
     this.#models = options.models ?? unconfiguredModels;
+    this.#modelClient = options.modelClient;
     this.#allowedOrigins = options.allowedOrigins ?? [];
     // Normalised on the way in, so a caller that passed a URL, a port or an
     // uppercase name gets the allowlist it meant rather than one matching
@@ -255,6 +334,8 @@ export class ForgeBridgeDaemon {
     this.producerToken = options.producerToken ?? mintProducerToken();
     this.#startedAtMs = this.#now();
     this.#pairing = new PairingService({ now: this.#now });
+    this.#router = new ModelRouter({ breaker: new CircuitBreaker({}, this.#now), clock: this.#now });
+    this.#analyser = luauAnalyserFor(this.#allowedHttpHosts);
     this.#server = createServer((req, res) => {
       void this.#handle(req, res);
     });
@@ -286,6 +367,10 @@ export class ForgeBridgeDaemon {
     // on connections that are healthy and idle by design.
     for (const waiter of [...this.#waiters]) waiter.settle(null);
     this.#waiters.clear();
+    // Followers of a run are held open exactly like a poll is, and for the same
+    // reason a poll is released here: a close() that waited them out would take
+    // as long as the longest run anybody is watching.
+    this.#runLogs.closeAll();
     this.#keyring.clear();
     await new Promise<void>((resolve) => {
       this.#server.close(() => resolve());
@@ -439,6 +524,25 @@ export class ForgeBridgeDaemon {
 
     if (resource === 'models' && rest.length === 0 && method === 'GET') {
       return this.#models_(res, cors);
+    }
+
+    // Producer surface, all three. A run reads the project's policy, spends the
+    // operator's model credit, and serves back the script source a model wrote
+    // into their place — there is nothing public about any of it.
+    if (resource === 'runs') {
+      if (rest.length === 0 && method === 'POST') {
+        this.#assertProducer(req);
+        return this.#startRun(req, res, cors);
+      }
+      const id = rest[0];
+      if (id && rest.length === 1 && method === 'GET') {
+        this.#assertProducer(req);
+        return this.#runStatus(res, id, cors);
+      }
+      if (id && rest[1] === 'events' && rest.length === 2 && method === 'GET') {
+        this.#assertProducer(req);
+        return this.#runEvents(req, res, url, id, cors);
+      }
     }
 
     throw new ForgeBridgeError('not_found', 'unknown path');
@@ -854,6 +958,413 @@ export class ForgeBridgeDaemon {
     writeJson(res, 202, { changeSetId: changeSet.id, status: 'approved', nonce: delivery.nonce }, cors);
   }
 
+  /**
+   * `POST /v1/runs` — a prompt in, a proposed ChangeSet out, nothing applied.
+   *
+   * The whole of the work is `executeRun` in `@forgebridge/core`; this handler
+   * is the transport around it. What it adds is the four things the core cannot
+   * know: which project, which tree version, which models this daemon can
+   * actually reach, and what verdict this daemon is willing to stand behind.
+   *
+   * It never approves and it cannot. The set it stores lands in `validated`,
+   * approval is `POST /v1/changesets/:id/approve` and requires the content
+   * digest of a diff someone read, and there is no argument to this route that
+   * reaches either (ADR-012). The separation is the same one that makes an
+   * external agent safe to permit at all, and a run route that "just applied
+   * it" would remove the reason the rest of this file is careful.
+   *
+   * **A failed run is a successful request.** A run that tried five models and
+   * got five rate limits answers 201 with `failure` set and every attempt
+   * listed, not 429 — because a `ProtocolError` body has nowhere to put the
+   * attempt list, and the attempt list is the entire point (ADR-008). Only the
+   * things that stopped a run from *starting* — no model client, no candidate,
+   * a stale base version — are HTTP errors, and each is refused before a token
+   * is spent.
+   */
+  async #startRun(req: IncomingMessage, res: ServerResponse, cors: Record<string, string>): Promise<void> {
+    const body = parseOrThrow(StartRunRequest, await readJson(req, RUN_REQUEST_BYTES), 'run request');
+    const projectId = body.projectId ?? this.defaultProjectId;
+
+    if (body.policy === 'pinned' && !body.pinnedModel) {
+      // The router refuses this too, but it refuses it as a failed run with an
+      // empty attempt list. Refusing here costs the caller nothing and reads as
+      // what it is: a request that does not say what it wants.
+      throw new ForgeBridgeError(
+        'invalid_request',
+        "routing policy 'pinned' requires pinnedModel",
+        'Name the model to pin, or choose another policy — pinned disables fallback entirely.',
+      );
+    }
+
+    const client = await this.#requireModelClient();
+    const candidates = await this.#candidatesFor(client);
+
+    const baseVersion = await this.store.getProjectVersion(projectId);
+    if (body.baseVersion !== undefined && body.baseVersion !== baseVersion) {
+      // Checked before the model is called rather than after. A run built on a
+      // version the producer no longer holds is a run whose output will be
+      // refused at submit, and paying for the tokens first helps nobody.
+      throw new ForgeBridgeError(
+        'stale_base',
+        `this run was requested against version ${body.baseVersion}; the project is at ${baseVersion}`,
+        `Re-read the project version and resubmit with ${baseVersion}, or omit baseVersion to build against it.`,
+      );
+    }
+
+    const policy = (await this.store.getProjectPolicy(projectId)) ?? this.#defaultPolicy;
+    const runId = randomUUID();
+    const startedAt = new Date(this.#now()).toISOString();
+
+    const queued: RunRecord = {
+      run: {
+        id: runId,
+        projectId,
+        prompt: body.prompt,
+        stage: 'queued',
+        status: 'running',
+        attempts: [],
+        changeSetIds: [],
+        ...(body.producer ? { producer: body.producer } : {}),
+        startedAt,
+        finishedAt: null,
+      },
+      plan: { steps: [] },
+      changeSetId: null,
+      contentDigest: null,
+      validation: null,
+      skipped: [],
+      ordering: null,
+      failure: null,
+      updatedAt: startedAt,
+    };
+    // Written before the first model is called so `GET /v1/runs/:id` answers
+    // *during* the run, not only after it. A run only addressable once it is
+    // over is a run nobody can watch.
+    await this.store.putRun(queued);
+
+    const log = this.#runLogs.open(runId);
+    const controller = new AbortController();
+    // A caller that hung up is a caller who is not reading the answer. Carrying
+    // on would spend their credit on output nobody will see; the run is
+    // recorded as `cancelled`, which is a different fact from `failed`.
+    const onHangUp = (): void => controller.abort();
+    res.once('close', onHangUp);
+
+    const streaming = body.stream;
+    const stopStreaming = streaming
+      ? this.#streamRun(res, cors, log, await this.#runResponse(queued))
+      : (): void => {};
+
+    try {
+      const result = await executeRun(
+        {
+          runId,
+          projectId,
+          prompt: body.prompt,
+          baseVersion,
+          policy,
+          routingPolicy: body.policy,
+          ...(body.pinnedModel ? { pinnedModelId: body.pinnedModel } : {}),
+          // The core's own answer to what this pipeline needs of a model: tool
+          // calling and structured output. Restating it looser here would be
+          // this file overruling the engine about the engine.
+          requirements: DEFAULT_PIPELINE_REQUIREMENTS,
+          candidates,
+          allowedHttpHosts: this.#allowedHttpHosts,
+          ...(body.producer ? { producer: body.producer } : {}),
+          ...(body.maxAttempts !== undefined ? { maxAttempts: body.maxAttempts } : {}),
+          signal: controller.signal,
+          // No `treeSummary`. This daemon holds a version number, not a tree —
+          // the same gap `ChangeSetDiff.treeAware: false` records — so the model
+          // is told the paths it may write to and nothing about what is already
+          // there. TODO(M09): when a consumer reports a tree snapshot, render it
+          // here rather than letting a model guess at a place it cannot see.
+        },
+        {
+          models: client,
+          router: this.#router,
+          analyser: this.#analyser,
+          clock: this.#now,
+          newId: () => randomUUID(),
+          onEvent: (event) => {
+            log.publish(event);
+          },
+        },
+      );
+
+      const settled = await this.#settleRun(result, projectId, log);
+      const response = await this.#runResponse(settled);
+
+      // A caller that hung up mid-run has already had the run recorded for it;
+      // writing to a socket it closed is how one abandoned request becomes an
+      // unhandled error event on a daemon that was otherwise fine.
+      if (res.writableEnded || res.destroyed) return;
+
+      if (streaming) {
+        writeEventFrame(res, 'run', response);
+        endEventStream(res);
+      } else {
+        writeJson(res, 201, response, cors);
+      }
+    } catch (error) {
+      if (!streaming) throw error;
+      // The headers went out with the first frame, so there is no status left
+      // to set. The stream says what happened in the same vocabulary a JSON
+      // caller would have received and then closes.
+      if (!(error instanceof ForgeBridgeError)) {
+        this.#logger.error('run failed after the stream opened', { runId, error: String(error) });
+      }
+      writeEventFrame(res, 'error', errorPayload(error));
+      endEventStream(res);
+    } finally {
+      res.removeListener('close', onHangUp);
+      stopStreaming();
+      log.close();
+    }
+  }
+
+  /**
+   * Open the streamed form of a run and follow it.
+   *
+   * The first frame is the whole run record, so a client that reconnects or
+   * arrives late is never reading events without knowing what they are about.
+   * Every subsequent frame is one `RunEvent` from the core, under its own event
+   * name and carrying its index as the SSE id — which is the cursor
+   * `GET /v1/runs/:id/events?since=` takes.
+   */
+  #streamRun(
+    res: ServerResponse,
+    cors: Record<string, string>,
+    log: RunEventLog,
+    initial: RunResponse,
+  ): () => void {
+    beginEventStream(res, cors);
+    writeEventFrame(res, 'run', initial);
+
+    const unsubscribe = log.subscribe((recorded) => {
+      writeEventFrame(res, recorded.event.type, recorded.event, recorded.index);
+    });
+    const keepAlive = setInterval(() => writeKeepAlive(res), EVENT_STREAM_KEEP_ALIVE_MS);
+    keepAlive.unref?.();
+
+    return () => {
+      unsubscribe();
+      clearInterval(keepAlive);
+    };
+  }
+
+  /**
+   * Store what the run produced, and compute the verdict this daemon stands
+   * behind.
+   *
+   * The core has already computed one, through the analyser port, and this
+   * recomputes it. Not out of distrust: the port hands the analyser one source
+   * per `writeScript` operation, and a `createInstance` carrying a `Source`
+   * property installs Luau by another route — `luauVerdict` reads both, and a
+   * set whose only script arrived that way would otherwise reach an approver
+   * marked `validated` with nothing having read it (THREAT-MODEL T2 layer 2).
+   *
+   * The two verdicts cannot contradict each other, only differ in reach: they
+   * run the same analyser over the same allowlist, and this one sees a superset
+   * of the sources. So this is never weaker than the core's, and a watcher that
+   * saw both sees the same verdict twice whenever a set carries no `Source`
+   * property — told apart by `computedBy`, which names which of the two
+   * computed it.
+   */
+  async #settleRun(
+    result: Awaited<ReturnType<typeof executeRun>>,
+    projectId: string,
+    log: RunEventLog,
+  ): Promise<RunRecord> {
+    const at = new Date(this.#now()).toISOString();
+    let run: Run = result.run;
+    let failure: ProtocolError | null = result.failure ?? null;
+    let changeSetId: string | null = null;
+    let contentDigest: string | null = null;
+    let validation: Validation | null = null;
+
+    const set = result.changeSet;
+    if (set) {
+      const verdict = await this.#validate(set);
+      const current = await this.store.getProjectVersion(projectId);
+      const stale = current !== set.baseVersion;
+      const rejected = verdict.luau.status === 'fail' || verdict.policy.status === 'fail';
+
+      // `validated` only when the run actually reached `awaiting-approval`.
+      // The core hands back the offending set on some of its own failures too —
+      // a set past the protocol's size limit is the clearest — and storing one
+      // of those as `validated` would leave a ChangeSet that failed its run
+      // sitting in the one status an approver is allowed to act on.
+      //
+      // `stale` and `rejected` are both statuses `#approve` refuses, so the set
+      // is stored either way: a producer that wants to know what was generated
+      // and why it will not be applied reads the diff, which is the only place
+      // the findings are legible.
+      const stored: ChangeSet = {
+        ...set,
+        validation: verdict,
+        status: stale ? 'stale' : rejected || failure ? 'rejected' : 'validated',
+      };
+      await this.store.putChangeSet(stored);
+
+      // The core appends the id once it has a verdict of its own; on the paths
+      // where it failed before that, the run would otherwise name no set while
+      // this record names one.
+      if (!run.changeSetIds.includes(stored.id)) {
+        run = { ...run, changeSetIds: [...run.changeSetIds, stored.id] };
+      }
+
+      changeSetId = stored.id;
+      contentDigest = changeSetContentDigest(stored.operations);
+      validation = verdict;
+      log.publish({ type: 'validation', at, changeSetId: stored.id, validation: verdict });
+
+      if (stale) {
+        failure = {
+          code: 'stale_base',
+          message: `the project moved to version ${current} while this run was generating against ${set.baseVersion}`,
+          remedy: 'Start a fresh run; a ChangeSet is never rebased for the producer.',
+        };
+      } else if (rejected) {
+        failure = {
+          code: verdict.policy.status === 'fail' ? 'policy_violation' : 'invalid_request',
+          message:
+            verdict.policy.status === 'fail'
+              ? `this ChangeSet is outside the project's allowed paths: ${verdict.policy.violations[0] ?? ''}`.slice(0, 500)
+              : 'static analysis rejected the generated Luau',
+          remedy: `Read the findings on GET /v1/changesets/${stored.id}/diff.`,
+        };
+      }
+
+      if (failure && !isTerminal(run.stage)) {
+        // `awaiting-approval → failed` is a legal edge, and taking it through
+        // the state machine rather than around it is what keeps the stage on a
+        // stored run something a reader can trust.
+        assertTransition(run.stage, 'failed');
+        run = { ...run, stage: 'failed', status: 'failed', finishedAt: at };
+        log.publish({ type: 'failed', at, failure });
+      }
+    }
+
+    const record: RunRecord = {
+      run,
+      plan: { steps: [...result.plan.steps] },
+      changeSetId,
+      contentDigest,
+      validation,
+      skipped: result.skipped.map((entry) => ({ ...entry })) as SkippedModel[],
+      ordering: (result.ordering ?? null) as ModelOrdering | null,
+      failure,
+      updatedAt: at,
+    };
+    await this.store.putRun(record);
+
+    this.#logger.info('run finished', {
+      runId: run.id,
+      stage: run.stage,
+      status: run.status,
+      attempts: run.attempts.length,
+      skipped: record.skipped.length,
+      changeSetId,
+    });
+
+    return record;
+  }
+
+  async #runStatus(res: ServerResponse, runId: string, cors: Record<string, string>): Promise<void> {
+    writeJson(res, 200, await this.#runResponse(await this.#requireRun(runId)), cors);
+  }
+
+  /**
+   * `GET /v1/runs/:id/events` — replay, then follow.
+   *
+   * A run's event log is in memory and capped, so this can only ever serve what
+   * is still resident. It says so with a `closed` frame rather than ending
+   * quietly, because a stream that stops without a word is indistinguishable
+   * from a stream that has more to say. Whatever the log has lost, the `run`
+   * frame it opens with carries the attempt list in full — that part is the
+   * record, and it is never the stream's to lose.
+   */
+  async #runEvents(
+    req: IncomingMessage,
+    res: ServerResponse,
+    url: URL,
+    runId: string,
+    cors: Record<string, string>,
+  ): Promise<void> {
+    const record = await this.#requireRun(runId);
+    const since = parseCursor(url.searchParams.get('since'));
+    const response = await this.#runResponse(record);
+    const log = this.#runLogs.get(runId);
+
+    beginEventStream(res, cors);
+    writeEventFrame(res, 'run', response);
+
+    if (!log) {
+      writeEventFrame(res, 'closed', {
+        reason:
+          'this run has no resident event log — it finished long enough ago to be evicted, or the daemon ' +
+          'restarted. The run record above is complete; the event stream is not replayable.',
+      });
+      endEventStream(res);
+      return;
+    }
+
+    for (const recorded of log.since(since)) {
+      writeEventFrame(res, recorded.event.type, recorded.event, recorded.index);
+    }
+    if (log.truncated) {
+      writeEventFrame(res, 'truncated', {
+        reason: `this run produced more than the log retains; the oldest events were dropped. Nothing in the run record was lost.`,
+      });
+    }
+
+    if (log.closed) {
+      writeEventFrame(res, 'run', await this.#runResponse(await this.#requireRun(runId)));
+      endEventStream(res);
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        clearInterval(keepAlive);
+        clearTimeout(ceiling);
+        unsubscribe();
+        res.removeListener('close', finish);
+        req.removeListener('close', finish);
+        resolve();
+      };
+
+      const unsubscribe = log.subscribe(
+        (recorded) => writeEventFrame(res, recorded.event.type, recorded.event, recorded.index),
+        finish,
+      );
+      const keepAlive = setInterval(() => writeKeepAlive(res), EVENT_STREAM_KEEP_ALIVE_MS);
+      keepAlive.unref?.();
+      const ceiling = setTimeout(() => {
+        writeEventFrame(res, 'closed', {
+          reason: `this stream reached its ${RUN_STREAM_MAX_MS / 60_000} minute ceiling; reconnect with ?since= to continue.`,
+        });
+        finish();
+      }, RUN_STREAM_MAX_MS);
+      ceiling.unref?.();
+
+      res.once('close', finish);
+      req.once('close', finish);
+      // The run may have ended between the replay above and this subscription;
+      // `close()` only tells the followers it had at the time.
+      if (log.closed) finish();
+    });
+
+    if (!res.writableEnded && !res.destroyed) {
+      writeEventFrame(res, 'run', await this.#runResponse(await this.#requireRun(runId)));
+      endEventStream(res);
+    }
+  }
+
   async #applyResult(
     req: IncomingMessage,
     res: ServerResponse,
@@ -1020,6 +1531,105 @@ export class ForgeBridgeDaemon {
     const changeSet = await this.store.getChangeSet(id);
     if (!changeSet) throw new ForgeBridgeError('not_found', 'no such changeset');
     return changeSet;
+  }
+
+  async #requireRun(runId: string): Promise<RunRecord> {
+    const record = await this.store.getRun(runId);
+    if (!record) {
+      throw new ForgeBridgeError(
+        'not_found',
+        'no such run',
+        'Run records are held in memory: they do not survive a daemon restart, and the oldest are evicted.',
+      );
+    }
+    return record;
+  }
+
+  /**
+   * One shape for a run, wherever it is read from.
+   *
+   * `changeSetStatus` is looked up rather than stored on the record, so a run
+   * whose set has since been approved and applied reports that instead of the
+   * `validated` it was left in. The alternative — copying the status onto the
+   * run when the run ended — is two records of one fact, and the stale one
+   * would be the one saying nothing has been applied.
+   */
+  async #runResponse(record: RunRecord): Promise<RunResponse> {
+    const set = record.changeSetId ? await this.store.getChangeSet(record.changeSetId) : null;
+    // Parsed on the way out, like the models snapshot is: a response this
+    // daemon cannot validate against its own wire schema is one a strict client
+    // is entitled to reject, and finding that out here beats finding it out
+    // there.
+    return RunResponse.parse({
+      run: record.run,
+      plan: record.plan,
+      changeSetId: record.changeSetId,
+      changeSetStatus: set?.status ?? null,
+      contentDigest: record.contentDigest,
+      validation: record.validation,
+      skipped: record.skipped,
+      ordering: record.ordering,
+      failure: record.failure,
+    });
+  }
+
+  /**
+   * The client a run will call, or a refusal that says what is missing.
+   *
+   * Both questions are asked before the run starts. A daemon with no adapter
+   * and a daemon with an adapter and no credential are different problems with
+   * different fixes, and neither is a thing to discover one candidate at a time
+   * — attempting six models with no credential would write six identical
+   * `provider-error` attempts into the log and open the circuit breaker on a
+   * provider that was never down.
+   */
+  async #requireModelClient(): Promise<RunModelClient> {
+    const client = this.#modelClient;
+    if (!client) {
+      throw new ForgeBridgeError(
+        'provider_unconfigured',
+        'this daemon has no model client wired in, so it cannot turn a prompt into a ChangeSet',
+        'Every other route works without one. Start the daemon through its own bin, which wires the ' +
+          'OpenRouter adapter, or pass modelClient to createDaemon().',
+      );
+    }
+    if (!(await client.configured())) {
+      throw new ForgeBridgeError(
+        'provider_unconfigured',
+        `no credential is configured for ${client.providers.join(', ') || 'any provider'}`,
+        'Export OPENROUTER_API_KEY before starting the daemon, or add the item to your OS keychain. ' +
+          'The daemon reads it once per request and never stores, logs or returns it.',
+      );
+    }
+    return client;
+  }
+
+  /**
+   * The candidates this run may actually try.
+   *
+   * Filtered by what the wired client can reach, because a candidate served by
+   * a provider this daemon has no adapter for would be attempted, fail, and be
+   * recorded as that provider failing — a `ModelAttempt` describing something
+   * that never happened, in the one list ADR-008 requires to be true.
+   */
+  async #candidatesFor(client: RunModelClient): Promise<ModelCandidate[]> {
+    if (!this.#models.candidates) {
+      throw new ForgeBridgeError(
+        'provider_unconfigured',
+        'this daemon has no model registry wired in, so it has no candidates to route between',
+        'Pass a models port whose candidates() returns the models this daemon may try (ADR-007).',
+      );
+    }
+    const offered = await this.#models.candidates();
+    const reachable = offered.filter((candidate) => client.providers.includes(candidate.provider));
+    if (reachable.length === 0) {
+      throw new ForgeBridgeError(
+        'provider_unconfigured',
+        `the registry offers ${offered.length} model(s), none of them served by ${client.providers.join(', ')}`,
+        'Sync the catalog, or wire an adapter for a provider the registry knows about.',
+      );
+    }
+    return reachable;
   }
 
   /**
@@ -1241,6 +1851,44 @@ const MAX_FINDINGS = 1000;
 
 function clipMessage(message: string): string {
   return message.length <= MAX_FINDING_MESSAGE ? message : `${message.slice(0, MAX_FINDING_MESSAGE - 1)}…`;
+}
+
+/**
+ * The analyser the core reaches through its port while a run is generating.
+ *
+ * The same `@forgebridge/luau-analysis` this file already runs at submit, and
+ * in this process rather than out of one: `SandboxPort` exists so that an
+ * out-of-process analyser can be installed (M13), and until one is, the daemon
+ * runs the parser over model-authored text inside its own trust boundary
+ * exactly as `#validate` does. The port's `budget` is therefore not enforced
+ * here — there is no process to kill — and the analyser's own token ceiling is
+ * what bounds a hostile input instead.
+ *
+ * Findings carry the instance path and not an operation index. The port hands
+ * over one source per script with no index attached, and stamping a source's
+ * position in the list onto `operationIndex` would attribute a finding to
+ * whichever operation happened to be at that position — a number pointing at
+ * the wrong line of a diff is worse than no number. `luauVerdict`, which is
+ * what the stored verdict is computed from, reads the real indices.
+ */
+function luauAnalyserFor(allowedHttpHosts: readonly string[]): LuauAnalysisPort {
+  return {
+    async analyse(request: AnalysisRequest): Promise<AnalysisReport> {
+      const findings: Finding[] = [];
+      let status: AnalysisReport['status'] = 'ok';
+      for (const source of request.sources) {
+        const result = analyse(source.source, { allowedHttpHosts });
+        findings.push(
+          ...result.findings.map((finding) => ({
+            ...finding,
+            message: clipMessage(`${source.path}: ${finding.message}`),
+          })),
+        );
+        if (result.status === 'fail' || (result.status === 'warn' && status === 'ok')) status = result.status;
+      }
+      return { status, findings, truncated: false };
+    },
+  };
 }
 
 function luauVerdict(set: ChangeSet, allowedHttpHosts: readonly string[]): Validation['luau'] {

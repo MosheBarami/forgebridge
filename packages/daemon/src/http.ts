@@ -52,12 +52,21 @@ export function writeEmpty(res: ServerResponse, status: number, extraHeaders: Re
  * debugging convenience.
  */
 export function writeError(res: ServerResponse, error: unknown, extraHeaders: Record<string, string> = {}): void {
-  if (error instanceof ForgeBridgeError) {
-    writeJson(res, error.status, error.toPayload(), extraHeaders);
-    return;
-  }
-  const body: ProtocolError = { code: 'internal', message: 'the daemon failed to handle this request' };
-  writeJson(res, HTTP_STATUS.internal, body, extraHeaders);
+  const body = errorPayload(error);
+  writeJson(res, error instanceof ForgeBridgeError ? error.status : HTTP_STATUS.internal, body, extraHeaders);
+}
+
+/**
+ * The body a failure becomes, apart from the response it is written to.
+ *
+ * Split out because a `text/event-stream` handler has already sent its status
+ * line by the time something goes wrong and can only put the failure in a
+ * frame — and a stream that reported errors in its own vocabulary would be a
+ * second error format for clients to learn.
+ */
+export function errorPayload(error: unknown): ProtocolError {
+  if (error instanceof ForgeBridgeError) return error.toPayload();
+  return { code: 'internal', message: 'the daemon failed to handle this request' };
 }
 
 /**

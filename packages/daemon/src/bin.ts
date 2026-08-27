@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import type { ProjectPolicy } from '@forgebridge/core';
 import { InstancePath, PAIRING } from '@forgebridge/protocol';
 import { PRODUCER_TOKEN_ENV, PRODUCER_TOKEN_HEADER } from './auth.js';
+import { CatalogModels } from './models.js';
+import { OPENROUTER_SECRET_REF, OpenRouterClient } from './openrouter.js';
+import { defaultSecrets } from './secrets.js';
 import { DEFAULT_DAEMON_PORT, createDaemon, type DaemonLogger } from './server.js';
 
 /**
@@ -144,11 +147,21 @@ async function main(): Promise<void> {
 
   const policy: ProjectPolicy = { allowedPathPrefixes: args.allowedPaths, autoApply: null };
 
+  // The composition root, and the only place the three of these meet. The
+  // daemon library holds a `ModelsPort` and a `RunModelClient` and knows what
+  // neither of them is made of — which is what keeps the catalog out of the
+  // transport (`wire.ts`) and the vendor out of the engine (ADR-005).
+  const secrets = defaultSecrets();
+  const models = new CatalogModels();
+  const modelClient = new OpenRouterClient({ secrets });
+
   const daemon = createDaemon({
     port: args.port,
     projectId: args.projectId,
     allowedOrigins: args.allowedOrigins,
     policy,
+    models,
+    modelClient,
     // An operator who exports the token can hand the same value to a client it
     // launches; otherwise the daemon mints one and prints it below.
     ...(process.env[PRODUCER_TOKEN_ENV] ? { producerToken: process.env[PRODUCER_TOKEN_ENV] } : {}),
@@ -157,6 +170,14 @@ async function main(): Promise<void> {
 
   const bound = await daemon.listen();
   const pairing = daemon.issuePairingCode();
+
+  // Whether a credential was found, never what it is. `describe()` names the
+  // backend that answered so a user reading this line knows where the daemon
+  // looked — and is told plainly when that place is one any process they run
+  // can read (ADR-006).
+  const backend = secrets.describe();
+  const configured = (await secrets.get(OPENROUTER_SECRET_REF)) !== null;
+  const snapshot = await models.snapshot();
 
   process.stderr.write(
     [
@@ -177,6 +198,15 @@ async function main(): Promise<void> {
       args.allowedPaths.length > 0
         ? `  Writable paths: ${args.allowedPaths.join(', ')}`
         : '  Writable paths: none — every ChangeSet will be refused. Pass --allow-path <InstancePath>.',
+      '',
+      `  Models: ${snapshot.models.length} from ${snapshot.source}`,
+      configured
+        ? `  Provider key: found in ${backend.label}` +
+          (backend.readableByOtherProcesses
+            ? ' — readable by any process running as you; the OS keychain is not.'
+            : '.')
+        : '  Provider key: none found, so POST /v1/runs will refuse. Export OPENROUTER_API_KEY, or add it' +
+          ' to your keychain: security add-generic-password -U -s forgebridge.provider -a openrouter -w',
       '',
     ].join('\n'),
   );

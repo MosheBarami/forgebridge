@@ -1,11 +1,15 @@
 import { z } from 'zod';
 import {
   ChangeSet,
+  ChangeSetStatus,
   Link,
   PairingCode,
+  ProtocolError,
+  Run,
   TransportKind,
   Validation,
 } from '@forgebridge/protocol';
+import type { ModelCandidate, ModelClient, RoutingPolicy, SkipReason } from '@forgebridge/core';
 
 /**
  * Request and response shapes for the `/v1` endpoints that `PROTOCOL.md` names
@@ -232,6 +236,40 @@ export type ModelsSnapshot = z.infer<typeof ModelsSnapshot>;
  */
 export interface ModelsPort {
   snapshot(): Promise<ModelsSnapshot>;
+  /**
+   * The candidates `POST /v1/runs` may offer the router, already carrying the
+   * context window, capabilities, price and benchmarks the ordering reads.
+   *
+   * Optional, and its absence is a real answer rather than an empty list: a
+   * daemon with no registry wired in cannot start a run and says so with
+   * `provider_unconfigured`, which is a different fact from "the registry is
+   * configured and knows of no model you can use". The port returns
+   * `ModelCandidate` — a structural type in `@forgebridge/core` that any object
+   * with those fields satisfies — so a locally discovered model (M24) that no
+   * catalog has heard of routes beside a catalogued one.
+   */
+  candidates?(): Promise<ModelCandidate[]>;
+}
+
+/**
+ * A `ModelClient` that says which providers it can actually reach.
+ *
+ * The run route filters the candidate list by this before handing it to the
+ * router. Without it, a catalog entry served by a provider this daemon has no
+ * adapter for would be attempted, fail, and be recorded as that provider's
+ * failure — a `ModelAttempt` describing something that never happened, which is
+ * the one thing the attempt list must never contain (ADR-008).
+ */
+export interface RunModelClient extends ModelClient {
+  readonly providers: readonly string[];
+  /**
+   * Whether this client has what it needs to make a call — for a hosted
+   * provider, a credential. Asked once before a run rather than discovered once
+   * per candidate, so an unconfigured daemon answers `provider_unconfigured`
+   * instead of filling the run log with identical provider errors and opening
+   * the circuit breaker on a provider that was never down.
+   */
+  configured(): Promise<boolean>;
 }
 
 /**
@@ -254,3 +292,132 @@ export const DeliveryPayload = z.discriminatedUnion('kind', [
   }),
 ]);
 export type DeliveryPayload = z.infer<typeof DeliveryPayload>;
+
+// ── runs ─────────────────────────────────────────────────────────────────────
+
+/**
+ * The routing policies `@forgebridge/core` implements, as a wire enum.
+ *
+ * `RoutingPolicy` is a TypeScript union in the core rather than a Zod schema,
+ * so there is nothing to import and re-project — this list has to be written
+ * out. The two `Exclude`s below are what stop it being a transcription that
+ * rots: adding a policy to the core without adding it here, or leaving one here
+ * that the core has dropped, fails `tsc` in this package rather than reaching a
+ * user as a request the daemon accepts and the router does not understand.
+ */
+export const ROUTING_POLICIES = ['free-first', 'fastest', 'cheapest', 'best', 'pinned'] as const;
+type _UnlistedRoutingPolicy = Exclude<RoutingPolicy, (typeof ROUTING_POLICIES)[number]>;
+type _UnknownRoutingPolicy = Exclude<(typeof ROUTING_POLICIES)[number], RoutingPolicy>;
+const _routingPoliciesMatchTheCore: [_UnlistedRoutingPolicy, _UnknownRoutingPolicy] extends [never, never]
+  ? true
+  : never = true;
+void _routingPoliciesMatchTheCore;
+
+export const RoutingPolicyName = z.enum(ROUTING_POLICIES);
+export type RoutingPolicyName = z.infer<typeof RoutingPolicyName>;
+
+/** Why the router never invoked a candidate. Pinned to the core the same way. */
+export const SKIP_REASONS = ['circuit-open', 'attempt-budget'] as const;
+type _UnlistedSkipReason = Exclude<SkipReason, (typeof SKIP_REASONS)[number]>;
+type _UnknownSkipReason = Exclude<(typeof SKIP_REASONS)[number], SkipReason>;
+const _skipReasonsMatchTheCore: [_UnlistedSkipReason, _UnknownSkipReason] extends [never, never] ? true : never =
+  true;
+void _skipReasonsMatchTheCore;
+
+export const SkipReasonName = z.enum(SKIP_REASONS);
+export type SkipReasonName = z.infer<typeof SkipReasonName>;
+
+/**
+ * How many models one run may try. A cap, not a default: the router's own
+ * default is "every eligible candidate, in order", and a run that quietly
+ * stopped after three would be a fallback chain that lies about its own length.
+ */
+export const MAX_RUN_ATTEMPTS = 10;
+
+/** `Run.producer`, projected off the protocol rather than restated beside it. */
+const RunProducer = Run.shape.producer.unwrap();
+
+export const StartRunRequest = z.object({
+  /** Capped where `Run.prompt` is capped, so a prompt this accepts is one the protocol stores. */
+  prompt: z.string().min(1).max(50_000),
+  /** The daemon's default project when omitted, as everywhere else on this surface. */
+  projectId: z.string().uuid().optional(),
+  /**
+   * How the router orders and falls back over the candidates (ADR-008).
+   *
+   * `free-first` by default because a daemon a user just started is a daemon
+   * with a free key in it more often than not, and because it is the only
+   * default that cannot surprise someone with a bill.
+   */
+  policy: RoutingPolicyName.default('free-first'),
+  /** Required by `pinned`, ignored otherwise. Pinning disables fallback outright. */
+  pinnedModel: z.string().min(1).max(200).optional(),
+  /**
+   * The tree version this run must build against.
+   *
+   * Optional, and when it is given it is a claim about what the producer
+   * believes the project is at — a mismatch is `stale_base` before a single
+   * token is spent, rather than a ChangeSet that generates fine and is refused
+   * at submit. Omitted means "whatever the project is at now".
+   */
+  baseVersion: z.number().int().min(0).optional(),
+  maxAttempts: z.number().int().min(1).max(MAX_RUN_ATTEMPTS).optional(),
+  /**
+   * Answer as `text/event-stream` instead of JSON, carrying every stage change
+   * and every `ModelAttempt` as it happens. The final frame is the same
+   * `RunResponse` the JSON form returns.
+   */
+  stream: z.boolean().default(false),
+  producer: RunProducer.optional(),
+});
+export type StartRunRequest = z.infer<typeof StartRunRequest>;
+
+/** A candidate the router never invoked. Never counted as an attempt. */
+export const SkippedModel = z.object({
+  modelId: z.string().max(200),
+  provider: z.string().max(80),
+  reason: SkipReasonName,
+  detail: z.string().max(500),
+  retryAfterMs: z.number().int().min(0).optional(),
+});
+export type SkippedModel = z.infer<typeof SkippedModel>;
+
+/** What the router decided to try, and in what order, before it tried anything. */
+export const ModelOrdering = z.object({
+  policy: RoutingPolicyName,
+  candidatesConsidered: z.number().int().min(0),
+  candidatesEligible: z.number().int().min(0),
+  order: z.array(z.string().max(200)),
+  /** Set when the ordering could not be computed as asked — `fastest` with nothing measured. */
+  note: z.string().max(500).optional(),
+});
+export type ModelOrdering = z.infer<typeof ModelOrdering>;
+
+/**
+ * What a run produced.
+ *
+ * `run.attempts` is the whole attempt list, always — success, failure and
+ * cancellation alike. It is the field ADR-008 is about: a caller that cannot
+ * see which models were tried and why the router moved on cannot reproduce the
+ * run, and a fallback nobody can see is a silent substitution by another name.
+ *
+ * `changeSetId` names a ChangeSet stored in `validated`, never in `approved`.
+ * Approval is `POST /v1/changesets/:id/approve`, it requires the content digest
+ * this response carries, and no run reaches it (ADR-012).
+ */
+export const RunResponse = z.object({
+  run: Run,
+  /** The run's plan for itself: facts that were true before any model was called. */
+  plan: z.object({ steps: z.array(z.string()) }),
+  changeSetId: z.string().uuid().nullable(),
+  /** `validated` when a set survived; null when the run produced none. */
+  changeSetStatus: ChangeSetStatus.nullable(),
+  /** The digest `POST /v1/changesets/:id/approve` requires back. Null with no set. */
+  contentDigest: z.string().min(1).max(200).nullable(),
+  /** Computed by this daemon over the generated set. Never a model's own verdict. */
+  validation: Validation.nullable(),
+  skipped: z.array(SkippedModel),
+  ordering: ModelOrdering.nullable(),
+  failure: ProtocolError.nullable(),
+});
+export type RunResponse = z.infer<typeof RunResponse>;

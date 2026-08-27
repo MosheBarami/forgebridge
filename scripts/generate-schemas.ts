@@ -744,6 +744,12 @@ interface Response {
   readonly description: string;
   /** A component name, or a literal schema, or nothing for an empty body. */
   readonly schema?: string | JsonObject;
+  /**
+   * Defaults to `application/json`, which every route answered with until the
+   * run stream. Describing a `text/event-stream` as JSON would be this
+   * generator's one job — projecting the wire faithfully — done wrong.
+   */
+  readonly contentType?: string;
 }
 
 interface Parameter {
@@ -993,6 +999,83 @@ const ROUTES: readonly Route[] = [
       ...ERROR_RESPONSES,
     ],
     undocumentedInProtocolMd: 'served by the router since M14; add it to the endpoint table',
+  },
+  {
+    method: 'post',
+    path: '/v1/runs',
+    operationId: 'startRun',
+    summary: 'Turn a prompt into a proposed ChangeSet',
+    description:
+      'Runs the pipeline in `@forgebridge/core`: plan, route over the candidate models, generate, ' +
+      'validate. It stops at `awaiting-approval` and there is no argument that takes it further — ' +
+      'the set it stores is `validated`, and applying it means calling ' +
+      '`POST /v1/changesets/{changeSetId}/approve` with the digest of a diff a human read (ADR-012).\n\n' +
+      'The response carries `run.attempts`: every model the router tried, in order, with why it moved ' +
+      'on. That list is the run\'s permanent record and is returned in full whether the run succeeded, ' +
+      'failed or was cancelled — a fallback the caller cannot see is a silent substitution (ADR-008).\n\n' +
+      'A run that produced nothing still answers 201 with `failure` set, because a `ProtocolError` body ' +
+      'has nowhere to carry the attempt list. The 4xx and 5xx below are the things that stopped a run ' +
+      'from starting: no model client, no reachable candidate, a stale `baseVersion`.\n\n' +
+      'With `stream: true` the answer is a `text/event-stream` instead. Its frames are `run` (a whole ' +
+      'RunResponse, first and last), one frame per core `RunEvent` under that event\'s own type — ' +
+      '`stage`, `plan`, `model-attempt-started`, `output-delta`, `model-attempt`, `model-skipped`, ' +
+      '`validation`, `change-set`, `cancelled`, `failed` — each carrying its index as the SSE id, and ' +
+      '`error` carrying a ProtocolError if the request itself fails after the stream opened. Two ' +
+      '`validation` frames are normal: the core computes one through its analyser port, and the daemon ' +
+      'computes the one it stands behind over every source the set carries. `computedBy` says which.',
+    auth: 'producer',
+    requestBody: { schema: 'StartRunRequest', description: 'The prompt, and how to route it' },
+    responses: [
+      { status: 200, description: 'The streamed form, when `stream` is true', schema: { type: 'string' }, contentType: 'text/event-stream' },
+      { status: 201, description: 'The run, with its full attempt list. Nothing has been applied', schema: 'RunResponse' },
+      ...ERROR_RESPONSES,
+    ],
+  },
+  {
+    method: 'get',
+    path: '/v1/runs/{runId}',
+    operationId: 'getRun',
+    summary: 'A run and every model it tried',
+    description:
+      'Answers during a run as well as after it. `changeSetStatus` is read from the ChangeSet itself ' +
+      'rather than copied onto the run, so a set that has since been approved and applied reports that.',
+    auth: 'producer',
+    parameters: [
+      { name: 'runId', in: 'path', required: true, description: 'The run id', schema: UUID_SCHEMA },
+    ],
+    responses: [
+      { status: 200, description: 'The run', schema: 'RunResponse' },
+      ...ERROR_RESPONSES,
+    ],
+  },
+  {
+    method: 'get',
+    path: '/v1/runs/{runId}/events',
+    operationId: 'watchRun',
+    summary: 'Replay and follow a run as it happens',
+    description:
+      'Same frames as the streamed form of `POST /v1/runs`. Opens with a `run` frame so a client that ' +
+      'arrives late knows what the events are about, replays the retained events from `?since=`, then ' +
+      'follows until the run ends.\n\n' +
+      'The log is in memory and capped: `output-delta` frames are broadcast and never retained, and a ' +
+      'run old enough to have been evicted answers with the run record and a `closed` frame rather than ' +
+      'stopping quietly. Nothing the stream can lose is missing from the record — the attempt list is on ' +
+      'the `run` frame.',
+    auth: 'producer',
+    parameters: [
+      { name: 'runId', in: 'path', required: true, description: 'The run id', schema: UUID_SCHEMA },
+      {
+        name: 'since',
+        in: 'query',
+        required: false,
+        description: 'Replay retained events from this index. Absent means from the beginning.',
+        schema: { type: 'integer', minimum: 0 },
+      },
+    ],
+    responses: [
+      { status: 200, description: 'The event stream', schema: { type: 'string' }, contentType: 'text/event-stream' },
+      ...ERROR_RESPONSES,
+    ],
   },
   {
     method: 'get',
@@ -1717,7 +1800,9 @@ function buildOpenApi(
         ? { description: response.description }
         : {
             description: response.description,
-            content: { 'application/json': { schema: schemaRef(response.schema) } },
+            content: {
+              [response.contentType ?? 'application/json']: { schema: schemaRef(response.schema) },
+            },
           };
     }
 
