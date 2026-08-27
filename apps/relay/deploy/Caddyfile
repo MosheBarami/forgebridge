@@ -1,0 +1,27 @@
+# TLS termination for the relay.
+#
+# Caddy obtains and renews the certificate, and sets the two headers the relay
+# will only believe from a declared proxy: X-Forwarded-Proto, which is how the
+# relay knows the hop it is serving was actually TLS, and X-Forwarded-For, which
+# is what every per-address rate limit is keyed on.
+
+{$RELAY_DOMAIN} {
+	encode gzip
+
+	reverse_proxy relay:8080 {
+		# Long-polls are the transport's normal shape: the plugin holds one open
+		# for up to 25 seconds, and a run event stream for longer. A default
+		# read timeout would cut both and read to a user as a broken bridge.
+		transport http {
+			read_timeout 15m
+		}
+	}
+
+	log {
+		# The relay operator can read ChangeSet contents on this transport — that
+		# is what `relay-tls` means and it is said in the product (ADR-014).
+		# Logging request bodies would widen that from "can" to "does, for every
+		# user, forever", so only the request line and status are recorded.
+		format json
+	}
+}

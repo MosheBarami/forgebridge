@@ -1,0 +1,29 @@
+{
+  "name": "@forgebridge/relay",
+  "version": "0.1.0",
+  "description": "The ForgeBridge cloud transport. A pipe: no API keys, no models, no validation. The relay operator can read your changes (ADR-014).",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "bin": { "forgebridge-relay": "./dist/bin.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "echo 'lint: relay (configured in M04 follow-up, with the daemon and the web app)'"
+  },
+  "dependencies": {
+    "@forgebridge/protocol": "*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  }
+}

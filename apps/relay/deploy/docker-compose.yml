@@ -1,0 +1,65 @@
+# A self-hostable relay, with the TLS termination it needs to be honest about
+# its own name.
+#
+#     cd apps/relay/deploy
+#     RELAY_DOMAIN=relay.example.org docker compose up --build
+#
+# Two containers and no managed service, because ADR-004 rests on the relay
+# being small enough that self-hosting it is realistic. There is no database,
+# no Redis and no vendor account here: the relay's counters are in-process by
+# default, which is correct for one process and honestly limited for more (see
+# the TODO(M45) on AbuseStore).
+
+name: forgebridge-relay
+
+services:
+  relay:
+    build:
+      # The repository root, because the relay depends on a workspace sibling.
+      context: ../../..
+      dockerfile: apps/relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_PORT: 8080
+      # ONE trusted proxy: Caddy, below. This is the number that decides whether
+      # X-Forwarded-For and X-Forwarded-Proto are evidence or decoration, and
+      # leaving it at 0 makes the relay refuse every request rather than believe
+      # a header any client can set.
+      RELAY_PROXY_HOPS: 1
+      # The browser origins allowed to call the relay. Never `*`: these routes
+      # carry a bearer token.
+      RELAY_ALLOWED_ORIGINS: ${RELAY_ALLOWED_ORIGINS:-}
+      # The published sponsored budget. It is reported on /v1/health before
+      # anyone hits it and quoted in the refusal when they do (ADR-010).
+      RELAY_SPONSORED_DAILY_BUDGET: ${RELAY_SPONSORED_DAILY_BUDGET:-200}
+      # Set this to close session minting to callers holding the operator's
+      # token. Leave it unset to let anyone mint one; it is rate limited either
+      # way and costs the relay a UUID and a pairing code.
+      RELAY_CONTROL_TOKEN: ${RELAY_CONTROL_TOKEN:-}
+    expose:
+      - "8080"
+    # No published port. The relay is only reachable through the proxy, which is
+    # what makes RELAY_PROXY_HOPS=1 a true statement rather than a hopeful one.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - relay
+    environment:
+      # Caddy provisions a certificate for this name automatically. ADR-004
+      # requires a single hostname: Roblox grants plugin HTTP permission per web
+      # address, so a per-tenant or per-region subdomain would ask every user to
+      # approve another one.
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN to the hostname this relay serves}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
