@@ -26,6 +26,8 @@ import {
   collectDocs,
   collectRepoFacts,
   unitAt,
+  checkLayoutCoverage,
+  checkCitedTodos,
 } from '../docs-claims-rules.js';
 
 /**
@@ -62,6 +64,7 @@ const CI = read('.github/workflows/ci.yml');
 const CONTRIBUTING = read('CONTRIBUTING.md');
 const REPO_LAYOUT = read('docs/REPO-LAYOUT.md');
 const ADR_013 = read('docs/architecture/adr-013-fresh-public-repo.md');
+const SCHEMA_README = read('packages/protocol/schema/README.md');
 const ROOT_MANIFEST = JSON.parse(read('package.json')) as { scripts?: Record<string, string> };
 
 /** The two most-read pages. A claim wrong in both is wrong twice as loudly. */
@@ -536,6 +539,37 @@ function report(violations: readonly Violation[]): string {
   return violations.map((v) => `${v.file}:${v.line} — ${v.detail}`).join('\n');
 }
 
+describe('every document that counts the JSON Schema projections counts them right', () => {
+  // Same defect as the Luau count, in a second place. M11 added
+  // `RollbackOutcome.schema.json` and `RollbackResult.schema.json`;
+  // `packages/protocol/schema/README.md` was updated to 54 and the M08 row in
+  // `docs/MILESTONES.md` went on saying 52, so two documents in the same tree
+  // disagreed about a number either of them could have counted. The generator
+  // is what decides it — `verify:schemas` already refuses a projection that
+  // drifted — so the only thing left unchecked was the prose about it.
+  const schemaCount = readdirSync(path.join(ROOT, 'packages/protocol/schema')).filter((file) =>
+    file.endsWith('.schema.json'),
+  ).length;
+
+  it('counts something', () => {
+    expect(schemaCount).toBeGreaterThan(10);
+  });
+
+  it('finds the same count everywhere a document states one', () => {
+    // Every "<n> JSON Schema" in either document, not the first, for the same
+    // reason the Luau check takes them all: a fix applied to whichever file the
+    // reader happened to open is how they came to disagree.
+    const stated = [
+      ...[...MILESTONES.matchAll(/(\d+) JSON Schema/g)].map((m) => ['docs/MILESTONES.md', Number(m[1])] as const),
+      ...[...SCHEMA_README.matchAll(/each of the (\d+)/g)].map((m) => ['packages/protocol/schema/README.md', Number(m[1])] as const),
+    ];
+    expect(stated.length, 'no document states the JSON Schema count any more').toBeGreaterThan(0);
+    for (const [where, count] of stated) {
+      expect(count, `${where} says ${count}; packages/protocol/schema/ has ${schemaCount}`).toBe(schemaCount);
+    }
+  });
+});
+
 describe('the widened gate reads the whole repository', () => {
   // If this ever collapses to a handful of files the rules below all pass
   // vacuously, which is the failure mode that produced the finding in the first
@@ -672,6 +706,34 @@ describe('D7 — a command that looks like our binary is our binary', () => {
   });
 });
 
+describe('D9 — a cited TODO marker is a marker that is really there', () => {
+  // `docs/MILESTONES.md` cited `TODO(M40)` in `packages/daemon/src/rollback.ts`
+  // as M11's live blocker after M40 had closed it and deleted the marker, so
+  // one row called the work unfinished and the next called it done. Four
+  // agents landing in parallel is how that arrives, and nothing could see it.
+  it('cites no TODO that its named file does not carry', () => {
+    expect(
+      report(
+        checkCitedTodos(DOCS, FACTS, (rel) => {
+          const abs = path.join(ROOT, rel);
+          return existsSync(abs) ? readFileSync(abs, 'utf8') : '';
+        }),
+      ),
+    ).toBe('');
+  });
+});
+
+describe('D8 — the layout table lists every package, and calls none of them empty', () => {
+  // The rule that would have caught `apps/relay` and `packages/storage-sqlite`
+  // arriving as full packages and never reaching the table, and `apps/web`
+  // still being marked absent long after it built and tested. The older check
+  // above runs the other way — a *listed* directory with no files must carry a
+  // milestone — and a directory nobody listed was outside both.
+  it('lists every workspace directory, none of them described as absent', () => {
+    expect(report(checkLayoutCoverage({ path: 'README.md', text: README }, FACTS))).toBe('');
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Self-tests. Every rule above is handed a planted violation and required to
 //  reject it, and handed the marked-up version and required to accept it.
@@ -694,6 +756,8 @@ const FIXTURE_FACTS: RepoFacts = {
   testFiles: new Set(['packages/protocol/test/path.test.ts', 'plugin/tests/PathSpec.luau']),
   repoBasenames: new Set(['notice', 'readme', 'security']),
   verifyGates: ['verify:boundaries', 'verify:assets'],
+  workspaceDirs: new Set(['packages/protocol']),
+  sourceFiles: new Set(['packages/protocol/src/index.ts', 'packages/daemon/src/rollback.ts', 'plugin/src/Journal.luau']),
 };
 
 /** One fixture document. The path matters only where a rule keys on it (D5). */
@@ -950,5 +1014,128 @@ describe('self-test: D7 rejects a binary that is not declared', () => {
 
   it('does not fire when the repository has no scope to derive a family from', () => {
     expect(checkBinNames(doc('```bash\nacme run\n```'), { ...FIXTURE_FACTS, binPrefix: '' })).toEqual([]);
+  });
+});
+
+describe('self-test: D8 rejects a layout table that hides a package', () => {
+  const facts: RepoFacts = { ...FIXTURE_FACTS, workspaceDirs: new Set(['packages/protocol', 'apps/relay']) };
+  const readme = (rows: string) => ({ path: 'README.md', text: `## Repository layout\n\n\`\`\`\n${rows}\n\`\`\`\n` });
+
+  it('fires on a package with a manifest and no row', () => {
+    // The `apps/relay` case: a directory nobody listed cannot be checked for
+    // anything, so the one-directional check reported clean.
+    const found = checkLayoutCoverage(readme('packages/protocol/   the contract   frozen'), facts);
+    expect(found.map((v) => v.rule)).toEqual(['D8']);
+    expect(found[0]?.detail).toContain('apps/relay/');
+  });
+
+  it('fires on a row that calls a directory absent while it has a manifest', () => {
+    // The `apps/web` case: the row read "M32–M39 — absent" long after the app
+    // had a manifest, a build and a test suite.
+    const found = checkLayoutCoverage(
+      readme(['packages/protocol/   the contract   frozen', 'apps/relay/        cloud transport   M17 — absent'].join('\n')),
+      facts,
+    );
+    expect(found.map((v) => v.rule)).toEqual(['D8']);
+    expect(found[0]?.detail).toContain('described as empty or absent');
+  });
+
+  it('fires when the layout heading has moved, rather than finding nothing to check', () => {
+    // Fail closed: "I cannot find the table" and "the table is fine" must not
+    // be the same answer.
+    const found = checkLayoutCoverage({ path: 'README.md', text: '# ForgeBridge\n\nNo layout here.\n' }, facts);
+    expect(found.map((v) => v.rule)).toEqual(['D8']);
+    expect(found[0]?.detail).toContain('cannot be checked');
+  });
+
+  it('accepts a table that lists every package plainly — CONTROL', () => {
+    const found = checkLayoutCoverage(
+      readme(['packages/protocol/   the contract   frozen', 'apps/relay/        cloud transport   M17'].join('\n')),
+      facts,
+    );
+    expect(found).toEqual([]);
+  });
+
+  it('still allows a directory with no manifest to be marked absent — CONTROL', () => {
+    // The legitimate shape this rule is most confusable with, and the one the
+    // older check exists to enforce: `examples/` and an unbuilt app are
+    // supposed to say so. D8 only speaks about directories carrying a manifest.
+    const found = checkLayoutCoverage(
+      readme(
+        [
+          'packages/protocol/   the contract   frozen',
+          'apps/relay/        cloud transport   M17',
+          'packages/opencloud/ Open Cloud       M48 — absent',
+          'examples/           SDK examples     M29 — empty',
+        ].join('\n'),
+      ),
+      facts,
+    );
+    expect(found).toEqual([]);
+  });
+});
+
+describe('self-test: D9 rejects a TODO citation that points nowhere', () => {
+  const read = (rel: string): string =>
+    rel === 'packages/daemon/src/rollback.ts'
+      ? '// the journal store moved to DaemonStore in M40\n'
+      : '// TODO(M15): Luau has no property reflection\n';
+
+  it('fires when the named file no longer carries the marker', () => {
+    const found = checkCitedTodos(
+      doc('The inverse store is not on `DaemonStore` (`TODO(M40)` in `packages/daemon/src/rollback.ts`).'),
+      FIXTURE_FACTS,
+      read,
+    );
+    expect(found.map((v) => v.rule)).toEqual(['D9']);
+    expect(found[0]?.detail).toContain('may already be done');
+  });
+
+  it('fires when the cited file is not in the repository at all', () => {
+    const found = checkCitedTodos(doc('`TODO(M40)` in `packages/daemon/src/nowhere.ts` explains it.'), FIXTURE_FACTS, read);
+    expect(found.map((v) => v.rule)).toEqual(['D9']);
+    expect(found[0]?.detail).toContain('not a file in this repository');
+  });
+
+  it('fires when a bare filename names more than one file, rather than picking one', () => {
+    // Ambiguity is a finding, not a pass: guessing which `index.ts` was meant
+    // is how a gate reports clean on a pointer no reader can follow.
+    const facts: RepoFacts = {
+      ...FIXTURE_FACTS,
+      sourceFiles: new Set(['packages/a/src/index.ts', 'packages/b/src/index.ts']),
+    };
+    const found = checkCitedTodos(doc('`TODO(M09)` in `index.ts` covers it.'), facts, () => '');
+    expect(found.map((v) => v.rule)).toEqual(['D9']);
+    expect(found[0]?.detail).toContain('names 2 files');
+  });
+
+  it('accepts a marker the file really carries — CONTROL', () => {
+    const found = checkCitedTodos(
+      doc('A restored deletion is a rebuild (`TODO(M15)` in `plugin/src/Journal.luau`).'),
+      FIXTURE_FACTS,
+      read,
+    );
+    expect(found).toEqual([]);
+  });
+
+  it('accepts a path written relative to the document — CONTROL', () => {
+    // `plugin/README.md` writes `src/Journal.luau`, and that is a correct
+    // citation, not a broken one. A rule that only understood root-relative
+    // paths would fire on every package README in the tree.
+    const found = checkCitedTodos(
+      [{ path: 'plugin/README.md', text: 'See `TODO(M15)` in `src/Journal.luau`.' }],
+      FIXTURE_FACTS,
+      read,
+    );
+    expect(found).toEqual([]);
+  });
+
+  it('accepts any one of a multi-milestone marker — CONTROL', () => {
+    const found = checkCitedTodos(
+      doc('`TODO(M14/M15)` in `plugin/src/Journal.luau` is the shape.'),
+      FIXTURE_FACTS,
+      () => '// TODO(M15): still open\n',
+    );
+    expect(found).toEqual([]);
   });
 });

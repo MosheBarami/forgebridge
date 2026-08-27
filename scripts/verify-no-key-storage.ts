@@ -999,7 +999,11 @@ function formatSummary(report: KeyCustodyReport): string {
   lines.push(
     `  sinks        ${report.sinkCount.disk} disk, ${report.sinkCount.database} database, ` +
       `${report.sinkCount.response} response, ${report.sinkCount.log} log, ` +
-      `${report.sinkCount.telemetry} telemetry call(s) inspected under packages/`,
+      // Named from SCAN_ROOTS rather than written out, because the line said
+      // "under packages/" while the gate had been reading apps/ as well — and a
+      // summary that under-reports its own scope is how a reader concludes a
+      // tree is unchecked when it is, or the reverse after the next edit.
+      `${report.sinkCount.telemetry} telemetry call(s) inspected under ${SCAN_ROOTS.map((r) => `${r}/`).join(' and ')}`,
   );
   if (report.allowed.length === 0) {
     lines.push('  allowed      no credential-adjacent field names were waved through');

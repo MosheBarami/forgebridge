@@ -36,7 +36,7 @@ import path from 'node:path';
 
 export interface Violation {
   /** Rule id, matching the describe block in the test file. */
-  rule: 'D1' | 'D2' | 'D3' | 'D4' | 'D5' | 'D6' | 'D7';
+  rule: 'D1' | 'D2' | 'D3' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8' | 'D9';
   /** Repository-relative path of the document. */
   file: string;
   /** 1-indexed line the claim sits on. */
@@ -81,6 +81,15 @@ export interface RepoFacts {
   repoBasenames: ReadonlySet<string>;
   /** The root manifest's `verify:*` script names. */
   verifyGates: readonly string[];
+  /**
+   * Every workspace directory that carries a package.json, repository-relative
+   * and forward-slashed: `packages/core`, `apps/relay`, … Unlike `packages`,
+   * this crosses the `packages/` ÷ `apps/` line, because the README's layout
+   * table does too.
+   */
+  workspaceDirs: ReadonlySet<string>;
+  /** Every repository-relative source path in the tree, forward-slashed. */
+  sourceFiles: ReadonlySet<string>;
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.turbo', '.venv']);
@@ -199,6 +208,12 @@ export function collectRepoFacts(root: string): RepoFacts {
     testFiles,
     repoBasenames,
     verifyGates: rootScripts.filter((name) => name.startsWith('verify:')),
+    sourceFiles: new Set(walk(root, root).filter((rel) => /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|luau|py)$/.test(rel))),
+    workspaceDirs: new Set(
+      workspaceDirs(rootManifest).flatMap((dir) =>
+        manifestDirs(path.join(root, dir)).map((name) => `${dir}/${name}`),
+      ),
+    ),
   };
 }
 
@@ -622,6 +637,140 @@ export function checkBinNames(docs: readonly Doc[], facts: RepoFacts): Violation
 }
 
 /** Every rule, for a single report over the whole tree. */
+// ─────────────────────────────── D8: the layout table ───────────────────────────────
+
+/** Words the layout table uses for "there is nothing in this directory yet". */
+const NO_CODE_HERE = /\b(absent|empty|does not exist|not yet)\b/i;
+
+/**
+ * The README's layout block: the first fenced section under `## Repository
+ * layout`. Returns null when the heading or its fence is gone, and the caller
+ * treats that as a violation rather than as nothing to check.
+ */
+export function layoutBlock(readme: string): { text: string; startLine: number } | null {
+  const heading = readme.indexOf('## Repository layout');
+  if (heading === -1) return null;
+  const open = readme.indexOf('```', heading);
+  if (open === -1) return null;
+  const bodyStart = readme.indexOf('\n', open);
+  const close = readme.indexOf('```', bodyStart);
+  if (bodyStart === -1 || close === -1) return null;
+  return { text: readme.slice(bodyStart + 1, close), startLine: lineOf(readme, bodyStart + 1) };
+}
+
+/**
+ * D8 — the README's layout table names every workspace directory, and does not
+ * call one absent while it has code.
+ *
+ * The existing check ran one way only: it asserted that a *listed* directory
+ * with no files carries a milestone marker. Both failures it could not see had
+ * already happened by the time this rule was written. `apps/relay` and
+ * `packages/storage-sqlite` landed as full packages with tests and never
+ * reached the table at all — a directory nobody listed cannot be checked for
+ * anything — and the `apps/web` row still read "M32–M39 — absent" while the app
+ * had 124 tracked files and a passing suite. Both read, in a green log, exactly
+ * like a table with nothing wrong in it.
+ *
+ * Scoped to workspace directories rather than to every directory in the tree:
+ * "carries a package.json" is a fact with a sharp edge, and it is the same set
+ * turbo runs, so a package that exists enough to be built and tested is a
+ * package that has to be in the table.
+ */
+export function checkLayoutCoverage(readme: Doc, facts: RepoFacts): Violation[] {
+  const out: Violation[] = [];
+  const block = layoutBlock(readme.text);
+  if (block === null) {
+    // Fail closed. A moved heading is the one case where this rule would
+    // otherwise report clean by finding nothing to look at.
+    push(out, 'D8', readme, 0, 'the "## Repository layout" block is missing or unfenced, so the layout table cannot be checked');
+    return out;
+  }
+
+  const lines = block.text.split('\n');
+  const lineFor = new Map<string, number>();
+  lines.forEach((text, index) => {
+    const match = /^\s*((?:packages|apps)\/[a-z0-9][a-z0-9-]*)\/?\s/.exec(text);
+    if (match?.[1]) lineFor.set(match[1], block.startLine + index);
+  });
+
+  for (const dir of [...facts.workspaceDirs].sort()) {
+    const index = lineFor.get(dir);
+    if (index === undefined) {
+      push(out, 'D8', readme, block.startLine, `${dir}/ has a package.json and no row in the layout table`);
+      continue;
+    }
+    const text = lines[index - block.startLine] ?? '';
+    if (NO_CODE_HERE.test(text)) {
+      push(out, 'D8', readme, index, `${dir}/ is described as empty or absent, but it has a package.json`);
+    }
+  }
+  return out;
+}
+
+// ──────────────────────────── D9: cited TODO markers ────────────────────────────
+
+/** `` `TODO(M40)` in `packages/daemon/src/rollback.ts` `` and its near spellings. */
+const CITED_TODO = /`TODO\((M\d{2}[a-z]?(?:\/M\d{2}[a-z]?)*)\)`[^`\n]{0,60}`([\w./-]+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|luau|py))`/g;
+
+/**
+ * Resolve a path a document cites. Documents write these three ways — from the
+ * repository root, relative to the document, and as a bare filename — so all
+ * three are tried before the citation is called wrong.
+ *
+ * Returns the matches found. Zero and "more than one" are both reported by the
+ * caller rather than skipped: a citation nothing resolves is a broken pointer,
+ * and one that resolves two ways is a pointer the reader cannot follow either.
+ */
+export function resolveCitedPath(cited: string, docPath: string, facts: RepoFacts): string[] {
+  if (facts.sourceFiles.has(cited)) return [cited];
+  const beside = `${path.posix.dirname(docPath)}/${cited}`.replace(/^\.\//, '');
+  if (facts.sourceFiles.has(beside)) return [beside];
+  const base = cited.split('/').pop();
+  return [...facts.sourceFiles].filter((rel) => rel.endsWith(`/${cited}`) || rel.split('/').pop() === base);
+}
+
+/**
+ * D9 — a document that quotes a `TODO(Mxx)` in a named file must find it there.
+ *
+ * Four agents landing in parallel is how this one arrives. M40 moved the
+ * journal-entry methods onto `DaemonStore` and deleted the `TODO(M40)` in
+ * `packages/daemon/src/rollback.ts`; M11's row went on citing that exact marker
+ * in that exact file as a live blocker, so `docs/MILESTONES.md` described one
+ * row's work as unfinished and the next row's as having finished it. Both rows
+ * read as careful prose and neither was checkable by anything.
+ *
+ * `dist/` is walked out of the fact set, so a marker surviving only in built
+ * output does not satisfy a citation to source.
+ */
+export function checkCitedTodos(
+  docs: readonly Doc[],
+  facts: RepoFacts,
+  /** Reads a repository-relative source path. Injected so the self-tests need no tree. */
+  readSource: (rel: string) => string,
+): Violation[] {
+  const out: Violation[] = [];
+  for (const doc of docs) {
+    for (const match of doc.text.matchAll(CITED_TODO)) {
+      const [, markers = '', cited = ''] = match;
+      const lineIndex = lineOf(doc.text, match.index ?? 0);
+      const resolved = resolveCitedPath(cited, doc.path, facts);
+      if (resolved.length === 0) {
+        push(out, 'D9', doc, lineIndex, `cites TODO(${markers}) in ${cited}, which is not a file in this repository`);
+        continue;
+      }
+      if (resolved.length > 1) {
+        push(out, 'D9', doc, lineIndex, `cites TODO(${markers}) in "${cited}", which names ${resolved.length} files — write the path from the repository root`);
+        continue;
+      }
+      const body = readSource(resolved[0] as string);
+      if (!markers.split('/').some((marker) => body.includes(`TODO(${marker})`))) {
+        push(out, 'D9', doc, lineIndex, `cites TODO(${markers}) in ${resolved[0]}, which carries no such marker — the work it describes may already be done`);
+      }
+    }
+  }
+  return out;
+}
+
 export function checkAll(docs: readonly Doc[], facts: RepoFacts, root: string): Violation[] {
   const readOr = (rel: string): string => {
     const abs = path.join(root, rel);
@@ -635,5 +784,7 @@ export function checkAll(docs: readonly Doc[], facts: RepoFacts, root: string): 
     ...checkBlindRelayClaims(docs),
     ...checkClaimedTests(docs, facts),
     ...checkBinNames(docs, facts),
+    ...checkLayoutCoverage({ path: 'README.md', text: readOr('README.md') }, facts),
+    ...checkCitedTodos(docs, facts, (rel) => readOr(rel)),
   ];
 }
