@@ -7,8 +7,8 @@
  *       importable from any runtime, forever. One dependency is the budget.
  *   B2  packages/core imports no vendor SDK              — vendors live behind
  *       ports (ADR-005/011); a direct import makes self-hosting a fiction.
- *   B3  nothing under packages/ names the official       — ADR-001: the core is
- *       instance                                           neutral or it is not
+ *   B3  nothing outside the official instance names it  — ADR-001: the core is
+ *                                                           neutral or it is not
  *                                                           adoptable by rivals.
  *   B4  no package imports an app                        — apps depend on
  *                                                           packages, never back.
@@ -61,15 +61,36 @@ const OFFICIAL_INSTANCE_NAME = ['apple', 'gg'].join('.');
  * Exported so `docs/REPO-LAYOUT.md` can be checked against it: the document
  * states this rule's scope in prose, and a stated scope wider than the enforced
  * one is a rule a reader will believe and a machine will not apply.
+ *
+ * `apps` is here as a *tree*, with the official instance exempted below by name,
+ * and that direction matters. Listing the neutral apps individually would mean a
+ * newly added app is silently out of scope until somebody remembers to add it —
+ * and an app nobody added to the list reads, in a green CI log, exactly like an
+ * app with nothing wrong in it. Naming the one exemption instead makes every
+ * future app neutral by default. `apps/relay` was added while B3 still scanned
+ * three trees, and it named the official instance six times without the gate
+ * seeing any of them.
  */
-export const NEUTRAL_TREES: readonly string[] = ['packages', 'plugin', 'examples'];
+export const NEUTRAL_TREES: readonly string[] = ['packages', 'plugin', 'examples', 'apps'];
 
-function walk(dir: string, repoRoot: string, out: string[] = []): string[] {
+/**
+ * The one path inside `NEUTRAL_TREES` that ADR-001 exempts: `apps/web` *is* the
+ * official instance, so naming itself is its job rather than a violation.
+ */
+export const OFFICIAL_INSTANCE_TREE = 'apps/web';
+
+function walk(dir: string, repoRoot: string, out: string[] = [], excluded: readonly string[] = []): string[] {
   if (!existsSync(dir)) return out;
   for (const dirent of readdirSync(dir, { withFileTypes: true })) {
     if (dirent.isDirectory()) {
       if (SKIP_DIRS.has(dirent.name)) continue;
-      walk(path.join(dir, dirent.name), repoRoot, out);
+      const child = path.join(dir, dirent.name);
+      const childRel = path.relative(repoRoot, child).split(path.sep).join('/');
+      // Pruned at the directory rather than filtered at the file: `apps/web` is
+      // a built Next.js tree, and descending into it to discard every path
+      // would mean reading its build output on every run of the gate.
+      if (excluded.includes(childRel)) continue;
+      walk(child, repoRoot, out, excluded);
     } else if (dirent.isFile()) {
       out.push(path.relative(repoRoot, path.join(dir, dirent.name)).split(path.sep).join('/'));
     }
@@ -222,7 +243,7 @@ export function verifyBoundaries(repoRoot: string): BoundaryViolation[] {
 
   // ── B3 and B4 ─────────────────────────────────────────────────────────────
   for (const tree of NEUTRAL_TREES) {
-    for (const rel of walk(path.join(repoRoot, tree), repoRoot)) {
+    for (const rel of walk(path.join(repoRoot, tree), repoRoot, [], [OFFICIAL_INSTANCE_TREE])) {
       const source = readIfText(path.join(repoRoot, rel));
       if (source === null) continue;
 
@@ -234,8 +255,8 @@ export function verifyBoundaries(repoRoot: string): BoundaryViolation[] {
           rule: 'B3',
           file: `${rel}:${index + 1}`,
           detail:
-            'names the official instance. Everything outside apps/web stays neutral (ADR-001) — ' +
-            'refer to "the official instance" instead.',
+            `names the official instance. Everything outside ${OFFICIAL_INSTANCE_TREE} stays neutral ` +
+            '(ADR-001) — refer to "the official instance" instead.',
         });
       });
 

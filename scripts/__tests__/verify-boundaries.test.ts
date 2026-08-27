@@ -168,6 +168,42 @@ describe('verifyBoundaries', () => {
     expect(rules()).toContain('B3');
   });
 
+  it('B3: flags it in a neutral app, not only in packages/ and plugin/', () => {
+    // The violation this scope was widened for. `apps/relay` named the official
+    // instance six times in its CORS tests and B3 walked three trees, none of
+    // them `apps/` — so the gate reported clean because it never looked, which
+    // is the one failure shape this repository keeps re-finding.
+    cleanProtocol();
+    write('apps/relay/test/proxy.test.ts', `const origin = 'https://${OFFICIAL_INSTANCE_NAME}';\n`);
+    expect(rules()).toContain('B3');
+  });
+
+  it('B3: flags an app that did not exist when the rule was written', () => {
+    // Neutrality is the default for apps, not an opt-in list. An app added
+    // tomorrow is in scope on the day it lands.
+    cleanProtocol();
+    write('apps/desktop/src/main.ts', `const home = '${OFFICIAL_INSTANCE_NAME}';\n`);
+    expect(rules()).toContain('B3');
+  });
+
+  it('B3: allows the official instance to name itself in apps/web — CONTROL', () => {
+    // The legitimate shape B3 is most confusable with. `apps/web` IS the
+    // official instance (ADR-001); a rule that fired here would fire on every
+    // page of the flagship and be switched off within a week.
+    cleanProtocol();
+    write('apps/web/app/page.tsx', `export const HOME = '${OFFICIAL_INSTANCE_NAME}';\n`);
+    expect(verifyBoundaries(root)).toEqual([]);
+  });
+
+  it('B3: does not exempt a sibling whose name merely starts with the exempt one', () => {
+    // `apps/website` is not `apps/web`. A prefix test rather than a path test
+    // would let it through, and the exemption is the whole attack surface of
+    // this rule.
+    cleanProtocol();
+    write('apps/website/src/index.ts', `const home = '${OFFICIAL_INSTANCE_NAME}';\n`);
+    expect(rules()).toContain('B3');
+  });
+
   it('B4: flags a package importing an app by package name', () => {
     cleanProtocol();
     write('apps/web/package.json', JSON.stringify({ name: '@forgebridge/web' }));

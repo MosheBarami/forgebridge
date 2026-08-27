@@ -170,7 +170,7 @@ landing one without the other is the drift `verify:schemas` exists to refuse.
 |---|---|
 | **B1** `packages/protocol` imports nothing but `zod` | The contract must stay importable from any runtime, forever. One dependency is the entire budget. |
 | **B2** `packages/core` imports no vendor SDK | Vendors live behind ports. A direct `@supabase/*` or `next` import makes self-hosting a fiction. |
-| **B3** Nothing under `packages/`, `plugin/` or `examples/` names the official instance | The core is neutral or it is not adoptable by rival tools (ADR-001). |
+| **B3** Nothing under `packages/`, `plugin/`, `examples/` or `apps/` names the official instance — except `apps/web/`, which **is** it | The core is neutral or it is not adoptable by rival tools (ADR-001). The scope is a tree with one named exemption, so an app added tomorrow is neutral by default rather than out of scope until somebody remembers it. |
 | **B4** No package imports an app | Apps depend on packages. Never the reverse. |
 
 If you need a vendor, write an adapter package behind the relevant port. If you need something
