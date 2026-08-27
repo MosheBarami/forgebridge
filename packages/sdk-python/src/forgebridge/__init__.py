@@ -14,18 +14,20 @@ Not published. There is no `pip install forgebridge` that installs this package
 
 from .checks import check_changeset_ordering
 from .client import ForgeBridgeClient, HttpResponse, Transport, urllib_transport
-from .errors import ForgeBridgeError, TransportError
+from .errors import ErrorView, ForgeBridgeError, TransportError, describe_error
 from .models import ALL_MODELS
 
 __version__ = "0.1.0"
 
 __all__ = [
     "ALL_MODELS",
+    "ErrorView",
     "ForgeBridgeClient",
     "ForgeBridgeError",
     "HttpResponse",
     "Transport",
     "TransportError",
     "check_changeset_ordering",
+    "describe_error",
     "urllib_transport",
 ]

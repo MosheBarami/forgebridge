@@ -12,6 +12,7 @@ import { runCommand } from '../src/commands/run.js';
 import {
   captureIo,
   diffFixture,
+  journalFixture,
   linkStatusFixture,
   modelsFixture,
   stubTransport,
@@ -19,6 +20,7 @@ import {
 } from './helpers.js';
 
 const GLOBAL = { json: false, baseUrl: 'http://127.0.0.1:7317', token: 'test-token' };
+const JOURNAL_ID = randomUUID();
 
 describe('the posture sentence comes from the protocol', () => {
   it('renders every transport in the protocol’s own words', () => {
@@ -84,11 +86,13 @@ describe('every command that reaches a transport prints the posture', () => {
       models: async () => modelsFixture({ models: [{ id: 'a/b', free: true, capabilities: ['tools'] }] }),
       diff: async () => diffFixture({ status: 'applied' }),
       rollback: async () => ({
-        journalId: randomUUID(),
+        journalId: JOURNAL_ID,
         changeSetId: randomUUID(),
         status: 'dispatched' as const,
         nonce: 1,
+        steps: 2,
       }),
+      journal: async () => journalFixture({ journalId: JOURNAL_ID }),
     });
     return { io, transport };
   }
@@ -150,10 +154,18 @@ describe('every command that reaches a transport prints the posture', () => {
     const { io, transport } = arrange();
     const stub = stubTransport({
       rollback: transport.rollback,
+      journal: transport.journal,
       linkStatus: async () => linkStatusFixture({ transport: 'relay-tls' }),
     });
     await rollbackCommand(
-      { command: 'rollback', global: GLOBAL, journalId: randomUUID(), expectedVersion: 1, reason: null },
+      {
+        command: 'rollback',
+        global: GLOBAL,
+        journalId: JOURNAL_ID,
+        expectedVersion: 1,
+        reason: null,
+        timeoutSeconds: 0,
+      },
       testDeps(io, stub),
     );
     expect(io.errText()).toContain(PRIVACY_POSTURE['relay-tls']);

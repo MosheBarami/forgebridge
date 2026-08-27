@@ -122,8 +122,17 @@ Every skill's input schema is strict: an unrecognised key is refused rather than
 | `review-changeset-diff` | `{ changeSetId }` | no |
 | `apply-approved-changeset` | `{ changeSetId }` | **yes — approval-gated** |
 | `rollback-apply` | `{ journalId, expectedVersion, reason? }` | **yes — approval-gated** |
+| `read-journal` | `{ journalId }` | no |
 | `query-models` | `{}` | no |
 | `studio-link-status` | `{}` | no |
+
+`rollback-apply` dispatches and answers `dispatched`, which is all that is true at that
+moment: the paired Studio session polls for the delivery, replays the inverse operations
+and reports afterwards. `read-journal` is where the outcome appears, which is why it is a
+read and not a flag on the write. Its `state` has five values and three of them mean the
+reversal did not fully happen — `rollback_partial` in particular is its own answer and is
+never rounded up, because some inverses replayed and some did not, and the ones that would
+have finished the job are spent.
 
 `start-run` and `propose-changeset` end in the same place — a ChangeSet the daemon
 validated and nobody approved — and differ only in who wrote the operations. A run hands the

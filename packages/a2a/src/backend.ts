@@ -10,6 +10,7 @@ import type { ApplyApprovalGrant, RollbackApprovalGrant } from './approval.js';
 import {
   ApproveResponse,
   DiffResponse,
+  JournalStateResponse,
   LinkStatusResponse,
   ModelsResponse,
   ProposeResponse,
@@ -68,6 +69,16 @@ export interface ForgeBridgeBackend {
     grant: RollbackApprovalGrant,
     request: { journalId: string; expectedVersion: number; reason?: string },
   ): Promise<RollbackResponse>;
+  /**
+   * What happened to one apply, and to any reversal of it.
+   *
+   * A read, and so it takes no grant: it changes nothing and it is the only way
+   * a calling agent can learn that a rollback it dispatched actually happened.
+   * Dispatch answers `202 dispatched` and the plugin replays afterwards, so
+   * without this the connector's last word on a reversal would be that it had
+   * asked for one.
+   */
+  journal(journalId: string): Promise<JournalStateResponse>;
   models(): Promise<ModelsResponse>;
   linkStatus(): Promise<LinkStatusResponse>;
 }
@@ -167,6 +178,10 @@ export class DaemonBackend implements ForgeBridgeBackend {
       expectedVersion: request.expectedVersion,
       ...(request.reason ? { reason: request.reason } : {}),
     });
+  }
+
+  async journal(journalId: string): Promise<JournalStateResponse> {
+    return await this.#call('GET', `/v1/journal/${encodeURIComponent(journalId)}`, JournalStateResponse);
   }
 
   async models(): Promise<ModelsResponse> {

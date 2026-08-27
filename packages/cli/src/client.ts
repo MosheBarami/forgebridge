@@ -3,12 +3,14 @@ import {
   PRODUCER_TOKEN_HEADER,
   ChangeSetDiff as ChangeSetDiffSchema,
   HealthResponse as HealthSchema,
+  JournalStateResponse as JournalStateSchema,
   LinkStatusResponse as LinkStatusSchema,
   ModelsSnapshot as ModelsSnapshotSchema,
   RollbackResponse as RollbackResponseSchema,
   RunResponse as RunResponseSchema,
   type ChangeSetDiff,
   type HealthResponse,
+  type JournalStateResponse,
   type LinkStatusResponse,
   type ModelsSnapshot,
   type RollbackResponse,
@@ -114,6 +116,15 @@ export interface Transport {
   diff(changeSetId: string): Promise<ChangeSetDiff>;
   rollback(request: RollbackRequest): Promise<RollbackResponse>;
   /**
+   * What happened to one apply, and to any reversal of it.
+   *
+   * The read `rollback` needs to be able to say anything true. Dispatching a
+   * reversal answers `202 dispatched` and nothing more — the consumer holds the
+   * inverses and replays them afterwards — so without this the CLI could only
+   * ever report that it had asked.
+   */
+  journal(journalId: string): Promise<JournalStateResponse>;
+  /**
    * Start a run and, when a listener is given, follow it while it happens.
    *
    * The listener is what makes fallback visible rather than merely recorded
@@ -174,6 +185,13 @@ export class DaemonClient implements Transport {
       `/v1/journal/${encodeURIComponent(request.journalId)}/rollback`,
       { producer: true, body: request },
     );
+  }
+
+  /** `GET /v1/journal/:id`. Producer surface: it names what changed in the place. */
+  journal(journalId: string): Promise<JournalStateResponse> {
+    return this.#request(JournalStateSchema, 'GET', `/v1/journal/${encodeURIComponent(journalId)}`, {
+      producer: true,
+    });
   }
 
   /**

@@ -45,6 +45,7 @@ export const SKILL_IDS = [
   'review-changeset-diff',
   'apply-approved-changeset',
   'rollback-apply',
+  'read-journal',
   'query-models',
   'studio-link-status',
 ] as const;
@@ -108,6 +109,16 @@ export const RollbackApplyInput = z
   })
   .strict();
 
+/**
+ * A read, and deliberately not folded into `rollback-apply` as a "wait" flag.
+ *
+ * A rollback is dispatched and reported back separately, so learning the outcome
+ * is a second call however it is spelled. Spelling it as its own skill keeps the
+ * write path free of anything that waits — and keeps this one out of
+ * `WRITING_SKILLS`, where a flag on the write path could not have gone.
+ */
+export const ReadJournalInput = z.object({ journalId: z.string().uuid() }).strict();
+
 export const QueryModelsInput = z.object({}).strict();
 
 export const StudioLinkStatusInput = z.object({}).strict();
@@ -118,6 +129,7 @@ export const SKILL_INPUTS = {
   'review-changeset-diff': ReviewChangesetDiffInput,
   'apply-approved-changeset': ApplyApprovedChangesetInput,
   'rollback-apply': RollbackApplyInput,
+  'read-journal': ReadJournalInput,
   'query-models': QueryModelsInput,
   'studio-link-status': StudioLinkStatusInput,
 } as const satisfies Record<SkillId, z.ZodTypeAny>;
@@ -317,6 +329,20 @@ export const FORGEBRIDGE_SKILLS: readonly AgentSkill[] = Object.freeze([
         reason: 'the respawn handler broke spawn points',
       }),
     ],
+    inputModes: [JSON_MODE],
+    outputModes: [JSON_MODE, TEXT_MODE],
+  },
+  {
+    id: 'read-journal',
+    name: 'Read an apply journal',
+    description:
+      'Read what happened to one apply and to any reversal of it: the state, the tree versions either side, how ' +
+      'many inverse operations the daemon holds, and — once the Studio session has replayed them — the per-inverse ' +
+      'outcomes. This is how a rollback is followed up: rollback-apply dispatches and answers "dispatched", and the ' +
+      'reversal is reported here afterwards. rollback_partial is its own state and is never rounded to either ' +
+      'neighbour: some inverses replayed and some did not, and the ones that would have finished the job are spent.',
+    tags: ['roblox', 'journal', 'rollback', 'read-only', 'forgebridge'],
+    examples: [example('read-journal', { journalId: '00000000-0000-4000-8000-0000000000bb' })],
     inputModes: [JSON_MODE],
     outputModes: [JSON_MODE, TEXT_MODE],
   },

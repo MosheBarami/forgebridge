@@ -44,6 +44,8 @@ from .models import (
     ChangeSetDiff,
     DeliveryEnvelope,
     HealthResponse,
+    JournalEntryAck,
+    JournalStateResponse,
     LinkStatusResponse,
     ModelsSnapshot,
     OutputResponse,
@@ -52,6 +54,7 @@ from .models import (
     ProtocolError,
     RollbackRequest,
     RollbackResponse,
+    RollbackResultAck,
     RunResponse,
     StartRunRequest,
     SubmitChangeSetResponse,
@@ -227,9 +230,16 @@ class ForgeBridgeClient:
     def request_rollback(self, journal_id: str, request: RollbackRequest) -> RollbackResponse:
         """Dispatch a rollback. Dispatched is not done.
 
-        The inverse operations live on the consumer that captured them, so only
-        the consumer can say a rollback completed — and the protocol currently
-        has no way for it to say so (TODO(M11) in `packages/daemon`).
+        Still not, and it never will be from this call: the delivery carries the
+        inverse operations, the paired Studio session polls for it, replays them
+        and reports afterwards. What M11 changed is that the outcome exists on
+        the wire at all — read it with `get_journal`, which is the only thing
+        that can tell a completed reversal from a partial one.
+
+        Refused when the daemon holds no inverses for the apply. That is a
+        deliberate fail-closed: a reversal it cannot send is not one it will
+        pretend to dispatch, and the refusal names the Studio session that may
+        still be able to undo in place.
         """
         return RollbackResponse.model_validate(
             self._call(
@@ -238,6 +248,23 @@ class ForgeBridgeClient:
                 body=request,
                 producer=True,
             )
+        )
+
+    def get_journal(self, journal_id: str) -> JournalStateResponse:
+        """Read what happened to one apply, and to any reversal of it.
+
+        `state` has five values and three of them mean a rollback did not fully
+        happen. `rollback_partial` in particular is its own answer and must not
+        be read as a variety of `rolled_back`: some inverses replayed and some
+        did not, so the place is in a state neither the original apply nor the
+        rollback describes, and the inverses that would have finished the job
+        have been consumed. `result.outcomes` says which ones failed.
+
+        `inverses` is `None`, not `0`, when this daemon holds none — the two are
+        different facts, and only one of them means there is no route back.
+        """
+        return JournalStateResponse.model_validate(
+            self._call("GET", f"/v1/journal/{_segment(journal_id)}", producer=True)
         )
 
     def read_output(self, link: str | None = None) -> OutputResponse:
@@ -291,6 +318,47 @@ class ForgeBridgeClient:
             else "/v1/apply-result"
         )
         return ApplyResultAck.model_validate(self._call("POST", path, body=envelope, link=True))
+
+    def record_journal_entry(
+        self, journal_id: str, envelope: DeliveryEnvelope
+    ) -> JournalEntryAck:
+        """Upload the inverse operations captured before an apply ran.
+
+        The payload is a `JournalEntry`. This is what takes the inverses off the
+        session that captured them; without it a rollback cannot outlive that
+        session, which makes it a session feature rather than a safety net.
+
+        Post it after the ApplyResult, never before: the daemon attaches the
+        entry to the apply it already witnessed and refuses one for an apply it
+        has not seen.
+        """
+        return JournalEntryAck.model_validate(
+            self._call(
+                "POST",
+                f"/v1/journal/{_segment(journal_id)}/entry",
+                body=envelope,
+                link=True,
+            )
+        )
+
+    def report_rollback_result(
+        self, journal_id: str, envelope: DeliveryEnvelope
+    ) -> RollbackResultAck:
+        """Report how far a reversal got. The payload is a `RollbackResult`.
+
+        A partial reversal is reported as a partial reversal — one outcome per
+        inverse attempted, nothing rounded up — and the daemon leaves
+        `rolledBackAt` null for it, because the entry is then neither reversed
+        nor intact.
+        """
+        return RollbackResultAck.model_validate(
+            self._call(
+                "POST",
+                f"/v1/journal/{_segment(journal_id)}/rollback-result",
+                body=envelope,
+                link=True,
+            )
+        )
 
     def mirror_output(self, envelope: DeliveryEnvelope) -> None:
         """Mirror the Studio console up. The payload is an OutputBatch."""

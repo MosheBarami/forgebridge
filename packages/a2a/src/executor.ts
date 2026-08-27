@@ -153,15 +153,44 @@ export class SkillExecutor {
         return {
           kind: 'done',
           payload: result,
-          // "dispatched", not "rolled back". The inverse operations live on the
-          // plugin that captured them, so only the plugin can complete a
-          // rollback -- and the protocol has no way for it to say so yet
-          // (TODO(M11) in packages/daemon/src/server.ts). Reporting this as a
-          // completed reversal would be the connector inventing a fact.
+          // "dispatched", not "rolled back", and still not. The plugin replays
+          // the inverses after it polls, so at the moment this answers nothing
+          // has been reversed and reporting otherwise would be the connector
+          // inventing a fact. What changed with M11 is that the outcome is
+          // reportable at all, so the summary names the skill that reports it
+          // rather than leaving the caller with no next step.
           summary:
             `Rollback of journal ${result.journalId} (ChangeSet ${result.changeSetId}) was dispatched to the paired ` +
-            `Studio session at delivery nonce ${result.nonce}. Dispatched is not completed: the plugin holds the ` +
-            'inverse operations and reports separately.',
+            `Studio session at delivery nonce ${result.nonce}` +
+            `${result.steps === undefined ? '' : `, carrying ${result.steps} inverse operation(s)`}. ` +
+            'Dispatched is not completed: the plugin replays the inverses and reports separately. Call read-journal ' +
+            `with journalId ${result.journalId} for the outcome.`,
+        };
+      }
+
+      case 'read-journal': {
+        const journal = await this.#backend.journal(invocation.input.journalId);
+        const failures = (journal.result?.outcomes ?? []).filter((outcome) => !outcome.ok);
+        return {
+          kind: 'done',
+          payload: journal,
+          // The state is said in the daemon's own word, never translated. Three
+          // of the five mean a rollback did not fully happen, and an agent that
+          // read "partial" as a variety of "done" would build on a tree that is
+          // in neither of the two states anyone has a record of.
+          summary:
+            `Journal ${journal.journalId} (ChangeSet ${journal.changeSetId}) is "${journal.state}". ` +
+            `The apply moved the tree ${journal.versionBefore} → ${journal.versionAfter}; this daemon holds ` +
+            `${journal.inverses === null ? 'no' : journal.inverses} inverse operation(s) for it.` +
+            (journal.result === null
+              ? ''
+              : ` The reversal replayed ${journal.result.outcomes.length - failures.length} of ` +
+                `${journal.result.outcomes.length} and left the tree at version ${journal.result.newVersion}.` +
+                (failures.length === 0
+                  ? ''
+                  : ` Inverses that could not be replayed: ${failures
+                      .map((outcome) => `${outcome.index} (${outcome.error ?? 'no reason given'})`)
+                      .join('; ')}. Those inverses are spent; this journal cannot be rolled back again.`)),
         };
       }
 

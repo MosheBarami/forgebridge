@@ -199,10 +199,15 @@ Options:
                           Required, never guessed: it is what stops a reversal
                           landing on a tree that has moved since.
   --reason <text>         Recorded with the request
+  --timeout <s>           Seconds to wait for the reversal to be reported
+                          (default ${DEFAULT_APPLY_TIMEOUT_SECONDS}; 0 reports what is true now).
 
-Dispatches the reversal to the paired Studio session, which holds the inverse
-operations. Dispatched is not done — only the consumer that captured the
-inverses can say a rollback completed.
+Dispatches the reversal to the paired Studio session, which replays the inverse
+operations and reports back. Three outcomes, and the middle one is not rounded
+to either neighbour: rolled_back, rollback_partial — some inverses replayed and
+some did not, the place is in a state neither the rollback nor the original
+apply describes, and the remaining inverses are spent — and rollback_failed.
+Only rolled_back exits 0.
 
 ${GLOBAL}
 

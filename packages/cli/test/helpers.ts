@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { ChangeSetDiff, LinkStatusResponse, ModelsSnapshot, RunResponse } from '@forgebridge/daemon';
+import type {
+  ChangeSetDiff,
+  JournalStateResponse,
+  LinkStatusResponse,
+  ModelsSnapshot,
+  RunResponse,
+} from '@forgebridge/daemon';
 import type { Io } from '../src/index.js';
 import type { Deps } from '../src/commands/context.js';
 import type { Transport } from '../src/client.js';
@@ -34,6 +40,43 @@ export function linkStatusFixture(overrides: Partial<LinkStatusResponse> = {}): 
     defaultProjectId: randomUUID(),
     links: [],
     pairing: null,
+    ...overrides,
+  };
+}
+
+/**
+ * One apply's journal, as `GET /v1/journal/:id` reports it.
+ *
+ * `state` defaults to `rolled_back` because that is the shape most tests want to
+ * arrange away from; every other state is a deliberate override, which is what
+ * keeps a test that means "partial" from getting it by accident.
+ */
+export function journalFixture(overrides: Partial<JournalStateResponse> = {}): JournalStateResponse {
+  const journalId = overrides.journalId ?? randomUUID();
+  const changeSetId = overrides.changeSetId ?? randomUUID();
+  return {
+    journalId,
+    changeSetId,
+    projectId: randomUUID(),
+    summary: 'add a shop handler',
+    state: 'rolled_back',
+    versionBefore: 1,
+    versionAfter: 2,
+    appliedAt: '2026-01-01T00:00:00.000Z',
+    rollbackRequestedAt: '2026-01-01T00:01:00.000Z',
+    rolledBackAt: '2026-01-01T00:02:00.000Z',
+    inverses: 2,
+    result: {
+      journalId,
+      changeSetId,
+      outcomes: [
+        { index: 1, ok: true },
+        { index: 0, ok: true },
+      ],
+      newVersion: 1,
+      rolledBackAt: '2026-01-01T00:02:00.000Z',
+      pluginVersion: '0.1.0',
+    },
     ...overrides,
   };
 }
@@ -156,6 +199,7 @@ export function stubTransport(handlers: Partial<Transport> = {}): Transport & { 
     models: async (...args) => (calls.push('models'), (handlers.models ?? refuse('models'))(...args)),
     diff: async (...args) => (calls.push(`diff:${args[0]}`), (handlers.diff ?? refuse('diff'))(...args)),
     rollback: async (...args) => (calls.push('rollback'), (handlers.rollback ?? refuse('rollback'))(...args)),
+    journal: async (...args) => (calls.push(`journal:${args[0]}`), (handlers.journal ?? refuse('journal'))(...args)),
     startRun: async (...args) => (calls.push('startRun'), (handlers.startRun ?? refuse('startRun'))(...args)),
   };
 }

@@ -103,6 +103,38 @@ any other call, so construct the client with one sized for a run:
 JSON answer and cannot parse a `text/event-stream` body. The streamed form of a
 run is `GET /v1/runs/{id}/events`, and a Python reader for it is TODO(M30).
 
+## Every failure reduces to a code you can branch on
+
+```python
+from forgebridge import ForgeBridgeClient, describe_error
+
+try:
+    client.propose_changeset(changeset)
+except Exception as failure:
+    view = describe_error(failure)
+    if view.code == "stale_base":
+        ...          # rebuild against the current version
+    elif view.code == "not_approved":
+        ...          # go and find a human; no call here can do it
+    elif not view.recognised:
+        ...          # nobody said anything; this is not a decision
+```
+
+`describe_error` contains no judgement a caller does not already make — `except
+ForgeBridgeError as failure: failure.code` and `except TransportError` are the
+same two branches. It exists because those `except` clauses are a *shape* rather
+than a value, and a shape cannot be handed to something generic: a retry policy,
+a router deciding whether to rebase or to ask a person, or the connector
+conformance suite all need the answer as data.
+
+Two properties are load-bearing. It is **total** — every input returns a view and
+none raises, because a classifier that can fail is one you cannot use inside the
+`except` block that is the only place it is ever called. And `recognised` is
+`False` whenever the answer was defaulted: an unreachable daemon is reported as
+`internal` because the protocol has no code for "the transport is not reachable"
+(TODO(M31)), never as `not_approved`, which would be this package inventing an
+approval decision out of a network event.
+
 ## Consumer routes need a MAC this package cannot compute
 
 `poll`, `report_apply_result` and `mirror_output` are authenticated by a MAC over
@@ -126,28 +158,44 @@ drift proof; the TypeScript half is `scripts/__tests__/schema-projection.test.ts
 which runs the same documents through Zod, through the JSON Schema and through
 these models and compares all three.
 
-### Not yet wired into the connector conformance suite
+### Wired into the connector conformance suite
 
 `@forgebridge/conformance` is the one executable definition of what a ForgeBridge
-connector must do, and `@forgebridge/cli`, `@forgebridge/mcp` and
-`@forgebridge/a2a` each run it against a live daemon from their own test tree.
-This package does not, and the reason is structural rather than a decision about
-what is worth testing:
+connector must do, and this package runs the whole matrix against a live daemon
+like the other three connectors do — every case passing except the two it
+declares `unsupported`: `tree-read`, because `/v1` serves no tree snapshot for
+any connector to read, and `surface-portable`, because a library advertises no
+tool list, skill list or Agent Card.
 
-- the suite is TypeScript, and it needs a live daemon and a built workspace to
-  run against. The Python gate in `.github/workflows/ci.yml` has neither — it
-  runs before `npm run build`, so nothing under `packages/*/dist` exists yet;
-- and hosting the adapter here would make this directory an npm workspace, which
-  changes `package-lock.json` for a package whose registry is PyPI.
+It is the only connector that runs the suite in another language, and that is
+most of what it is worth. Three TypeScript connectors passing a TypeScript suite
+share the same Zod schemas, the same `ForgeBridgeError` and the same idea of what
+a ChangeSet is in memory; their agreement is weaker evidence than it looks. This
+package shares none of it — its own models, parsed by pydantic, its own exception
+types, its own transport — so what it agrees with is the protocol rather than a
+sibling's reading of it.
 
-So the run behaviours the suite checks are asserted here instead, against the
-same requirements: `tests/test_client.py` holds that a run reports every attempt
-in order, that it stops at `validated`, that no route it builds reaches
-`/approve`, and that a verdict is unrepresentable on the request. That is the
-same set of claims, made one language over — it is not the same *proof*, and the
-difference is exactly what the suite exists to catch.
+The split follows the language, because the suite is TypeScript and needs a built
+workspace this package's CI gate does not have, and hosting a TypeScript adapter
+here would make a PyPI package an npm workspace:
 
-TODO(M31): a driver in the shape of `tests/roundtrip.py` — a subprocess entry
-point the TypeScript side shells out to, which is how the cross-language drift
-proof above already works — plus an adapter in a package that runs after the
-build. Owner: whoever owns `packages/sdk-python` at M30.
+- `tests/conformance_driver.py` is the Python half — a subprocess entry point in
+  the same shape as `tests/roundtrip.py`, which the cross-language schema drift
+  proof already shells out to. Every command is one call on `ForgeBridgeClient`,
+  and every failure is classified by `forgebridge.describe_error`;
+- `packages/conformance/src/python/sdk-adapter.ts` is the bridge that drives it,
+  and it decides nothing. It is run by
+  `packages/conformance/test/python-sdk.test.ts`, which also plants three
+  approval cheats in it and watches the suite go red.
+
+**There is no approve command in the driver**, and the client it builds is wired
+to a transport that refuses any request whose URL contains `/approve` before it
+is sent. `ForgeBridgeClient.approve_changeset` exists — it has to — and a
+connector that could reach it while under test would hold the handle on both
+sides of the gate ADR-012 puts there. `tests/test_conformance_driver.py` asserts
+both halves of that, and asserts the guard does *not* fire on an ordinary call.
+
+`tests/test_client.py` still holds the same claims from the Python side — that a
+run reports every attempt in order, that it stops at `validated`, that no route
+this client builds reaches `/approve` by accident, and that a verdict is
+unrepresentable on a run request.

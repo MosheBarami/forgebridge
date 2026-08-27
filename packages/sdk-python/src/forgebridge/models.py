@@ -341,33 +341,6 @@ class DeliveryPayloadChangeset(_Model):
     kind: Literal["changeset"]
     changeSet: ChangeSet
 
-class DeliveryPayloadRollback(_Model):
-    kind: Literal["rollback"]
-    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
-    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
-    expectedVersion: Annotated[int, Ge(0)]
-    reason: Annotated[str, StringConstraints(max_length=500)] | None = Field(default=None)
-
-    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
-    # parsed object entirely, and a projection that emitted `null` instead would not
-    # round-trip.
-    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"reason"})
-
-DeliveryPayload = Annotated[(DeliveryPayloadChangeset | DeliveryPayloadRollback), Field(discriminator="kind")]
-
-ErrorCode = Literal["invalid_request", "stale_base", "not_approved", "policy_violation", "link_unpaired", "link_unauthenticated", "replay_detected", "too_large", "rate_limited", "budget_exhausted", "provider_unconfigured", "unsupported_version", "not_found", "internal"]
-
-TransportKind = Literal["local-daemon", "relay-tls", "relay-e2e"]
-
-class HealthResponse(_Model):
-    ok: Literal[True]
-    service: Literal["forgebridge-daemon"]
-    version: str
-    protocolVersion: str
-    transport: TransportKind
-    boundTo: str
-    uptimeSeconds: Annotated[float, Ge(0)]
-
 class InverseOperationDeleteCreated(_Model):
     inverse: Literal["deleteCreated"]
     path: str
@@ -395,6 +368,39 @@ class InverseOperationRestoreSubtree(_Model):
 
 InverseOperation = Annotated[(InverseOperationDeleteCreated | InverseOperationRestoreProperty | InverseOperationRestoreSource | InverseOperationMoveBack | InverseOperationRestoreSubtree), Field(discriminator="inverse")]
 
+class RollbackDeliveryStepsItem(_Model):
+    index: Annotated[int, Ge(0)]
+    inverse: InverseOperation
+
+class RollbackDelivery(_Model):
+    kind: Literal["rollback"]
+    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    expectedVersion: Annotated[int, Ge(0)]
+    reason: Annotated[str, StringConstraints(max_length=500)] | None = Field(default=None)
+    restoresToVersion: Annotated[int, Ge(0)]
+    steps: Annotated[list[RollbackDeliveryStepsItem], Len(0, 500)]
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"reason"})
+
+DeliveryPayload = Annotated[(DeliveryPayloadChangeset | RollbackDelivery), Field(discriminator="kind")]
+
+ErrorCode = Literal["invalid_request", "stale_base", "not_approved", "policy_violation", "link_unpaired", "link_unauthenticated", "replay_detected", "too_large", "rate_limited", "budget_exhausted", "provider_unconfigured", "unsupported_version", "not_found", "internal"]
+
+TransportKind = Literal["local-daemon", "relay-tls", "relay-e2e"]
+
+class HealthResponse(_Model):
+    ok: Literal[True]
+    service: Literal["forgebridge-daemon"]
+    version: str
+    protocolVersion: str
+    transport: TransportKind
+    boundTo: str
+    uptimeSeconds: Annotated[float, Ge(0)]
+
 class JournalEntryAppliedItem(_Model):
     index: Annotated[int, Ge(0)]
     operation: Operation
@@ -410,6 +416,27 @@ class JournalEntry(_Model):
     versionAfter: Annotated[int, Ge(0)]
     appliedAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')]
     rolledBackAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')] | None = Field(default=None)
+
+class JournalEntryAck(_Model):
+    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    inverses: Annotated[int, Ge(0)]
+
+JournalState = Literal["applied", "rollback_requested", "rolled_back", "rollback_partial", "rollback_failed"]
+
+class JournalStateResponse(_Model):
+    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    projectId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    summary: str
+    state: JournalState
+    versionBefore: Annotated[int, Ge(0)]
+    versionAfter: Annotated[int, Ge(0)]
+    appliedAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')]
+    rollbackRequestedAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')] | None
+    rolledBackAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')] | None
+    inverses: Annotated[int, Ge(0)] | None
+    result: Any
 
 LinkState = Literal["unpaired", "pairing", "paired", "expired", "revoked"]
 
@@ -523,6 +550,16 @@ class ProtocolError(_Model):
     # round-trip.
     _omit_if_none: ClassVar[frozenset[str]] = frozenset({"remedy", "traceId"})
 
+class RollbackOutcome(_Model):
+    index: Annotated[int, Ge(0)]
+    ok: bool
+    error: Annotated[str, StringConstraints(max_length=1000)] | None = Field(default=None)
+
+    # Absent on the wire rather than null: Zod leaves an `.optional()` field off the
+    # parsed object entirely, and a projection that emitted `null` instead would not
+    # round-trip.
+    _omit_if_none: ClassVar[frozenset[str]] = frozenset({"error"})
+
 class RollbackRequest(_Model):
     journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     expectedVersion: Annotated[int, Ge(0)]
@@ -538,6 +575,21 @@ class RollbackResponse(_Model):
     changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     status: Literal["dispatched"]
     nonce: Annotated[int, Ge(0)]
+    steps: Annotated[int, Ge(0)]
+
+class RollbackResult(_Model):
+    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    outcomes: Annotated[list[RollbackOutcome], Len(0, 500)]
+    newVersion: Annotated[int, Ge(0)]
+    rolledBackAt: Annotated[str, StringConstraints(pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$')]
+    pluginVersion: Annotated[str, StringConstraints(max_length=40)]
+
+class RollbackResultAck(_Model):
+    journalId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    changeSetId: Annotated[str, StringConstraints(pattern=r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    state: JournalState
+    version: Annotated[int, Ge(0)]
 
 RunStage = Literal["queued", "planning", "generating", "validating", "awaiting-approval", "applying", "testing", "done", "failed", "cancelled"]
 
@@ -660,6 +712,9 @@ ALL_MODELS: dict[str, Any] = {
     "IntValue": IntValue,
     "InverseOperation": InverseOperation,
     "JournalEntry": JournalEntry,
+    "JournalEntryAck": JournalEntryAck,
+    "JournalState": JournalState,
+    "JournalStateResponse": JournalStateResponse,
     "Link": Link,
     "LinkState": LinkState,
     "LinkStatusResponse": LinkStatusResponse,
@@ -686,8 +741,12 @@ ALL_MODELS: dict[str, Any] = {
     "PropertyValue": PropertyValue,
     "ProtocolError": ProtocolError,
     "RectValue": RectValue,
+    "RollbackDelivery": RollbackDelivery,
+    "RollbackOutcome": RollbackOutcome,
     "RollbackRequest": RollbackRequest,
     "RollbackResponse": RollbackResponse,
+    "RollbackResult": RollbackResult,
+    "RollbackResultAck": RollbackResultAck,
     "RoutingPolicyName": RoutingPolicyName,
     "Run": Run,
     "RunResponse": RunResponse,

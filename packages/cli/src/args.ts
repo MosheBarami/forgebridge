@@ -81,7 +81,14 @@ export type Invocation =
     }
   | { command: 'diff'; global: GlobalOptions; changeSetId: string }
   | { command: 'apply'; global: GlobalOptions; changeSetId: string; timeoutSeconds: number }
-  | { command: 'rollback'; global: GlobalOptions; journalId: string; expectedVersion: number; reason: string | null }
+  | {
+      command: 'rollback';
+      global: GlobalOptions;
+      journalId: string;
+      expectedVersion: number;
+      reason: string | null;
+      timeoutSeconds: number;
+    }
   | { command: 'status'; global: GlobalOptions };
 
 /**
@@ -431,11 +438,16 @@ function parseApply(argv: readonly string[], env: NodeJS.ProcessEnv): Invocation
 function parseRollback(argv: readonly string[], env: NodeJS.ProcessEnv): Invocation {
   const { values, positionals } = parse(
     argv,
-    { 'expected-version': { type: 'string', multiple: true }, reason: { type: 'string', multiple: true } },
+    {
+      'expected-version': { type: 'string', multiple: true },
+      reason: { type: 'string', multiple: true },
+      timeout: { type: 'string', multiple: true },
+    },
     true,
   );
   const journalId = requireUuid(requireExactlyOnePositional(positionals, 'a journal id'), 'a journal id');
   const expectedRaw = stringOrNull(values['expected-version'], '--expected-version');
+  const timeoutRaw = stringOrNull(values['timeout'], '--timeout');
   if (expectedRaw === null) {
     // Not defaulted, and not discovered by reading the daemon's refusal and
     // retrying. `RollbackRequest.expectedVersion` exists to guard against
@@ -452,6 +464,12 @@ function parseRollback(argv: readonly string[], env: NodeJS.ProcessEnv): Invocat
     journalId,
     expectedVersion: integerIn(expectedRaw, '--expected-version', 0, Number.MAX_SAFE_INTEGER),
     reason: stringOrNull(values['reason'], '--reason'),
+    // The same meaning `apply` gives it, and for the same reason: a rollback is
+    // dispatched to the paired Studio session and reported back afterwards, so
+    // "wait for the outcome" and "tell me what is true now" are both legitimate
+    // things to ask for. 0 is the second.
+    timeoutSeconds:
+      timeoutRaw === null ? DEFAULT_APPLY_TIMEOUT_SECONDS : integerIn(timeoutRaw, '--timeout', 0, 86_400),
   };
 }
 

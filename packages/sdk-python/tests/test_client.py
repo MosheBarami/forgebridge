@@ -15,7 +15,25 @@ from forgebridge.client import (
     HttpResponse,
 )
 from forgebridge.errors import ForgeBridgeError, TransportError
-from forgebridge.models import ApproveRequest, ChangeSet, StartRunRequest
+from forgebridge.models import (
+    ApproveRequest,
+    ChangeSet,
+    DeliveryEnvelope,
+    RollbackRequest,
+    RollbackResult,
+    StartRunRequest,
+)
+
+# A sealed envelope, opaque to this client: it holds no session key and cannot
+# make one (see the M30 note in `client.py`). What matters here is the routing
+# and the headers, not the payload.
+ENVELOPE = {
+    "linkId": "3f2504e0-4f89-41d3-9a0c-0305e82c3305",
+    "nonce": 9,
+    "encrypted": False,
+    "payload": "e30=",
+    "mac": "bWFj",
+}
 
 # The digest `GET /v1/changesets/:id/diff` reports for CHANGESET's operations.
 # An approve must echo it: the daemon binds a "yes" to the content that was
@@ -314,3 +332,158 @@ def test_no_method_runs_and_approves() -> None:
     source = inspect.getsource(ForgeBridgeClient.start_run)
     assert '"/v1/runs"' in source
     assert "/approve" not in source.replace(ForgeBridgeClient.start_run.__doc__ or "", "")
+
+
+JOURNAL_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3306"
+
+
+def _journal(state: str, outcomes: list[dict] | None) -> dict:
+    return {
+        "journalId": JOURNAL_ID,
+        "changeSetId": CHANGESET["id"],
+        "projectId": CHANGESET["projectId"],
+        "summary": "a small change",
+        "state": state,
+        "versionBefore": 3,
+        "versionAfter": 4,
+        "appliedAt": "2026-08-26T12:00:00Z",
+        "rollbackRequestedAt": "2026-08-26T12:01:00Z",
+        "rolledBackAt": "2026-08-26T12:02:00Z" if state == "rolled_back" else None,
+        "inverses": 2,
+        "result": None
+        if outcomes is None
+        else {
+            "journalId": JOURNAL_ID,
+            "changeSetId": CHANGESET["id"],
+            "outcomes": outcomes,
+            "newVersion": 3,
+            "rolledBackAt": "2026-08-26T12:02:00Z",
+            "pluginVersion": "0.1.0",
+        },
+    }
+
+
+def test_a_dispatched_rollback_is_not_a_completed_one() -> None:
+    """`request_rollback` answers "dispatched" and cannot answer anything else.
+
+    The Studio session holds the inverses and replays them after it polls, so at
+    the moment this returns nothing has been reversed. The client must not have
+    a method that pretends otherwise, and the outcome has its own read.
+    """
+    recorder = Recorder(
+        ok(
+            {
+                "journalId": JOURNAL_ID,
+                "changeSetId": CHANGESET["id"],
+                "status": "dispatched",
+                "nonce": 7,
+                "steps": 2,
+            },
+            status=202,
+        )
+    )
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t", transport=recorder)
+    response = client.request_rollback(
+        JOURNAL_ID, RollbackRequest(journalId=JOURNAL_ID, expectedVersion=4)
+    )
+    assert response.status == "dispatched"
+    assert response.steps == 2
+    assert not hasattr(response, "rolledBackAt")
+
+
+def test_a_partial_reversal_is_readable_as_partial() -> None:
+    """The outcome no surface may round up.
+
+    Some inverses replayed and some did not: the place is in a state neither the
+    apply nor the rollback describes, and the ones that would have finished the
+    job are spent. A client that could only say "rolled back or not" would make
+    that indistinguishable from a reversal that never started.
+    """
+    recorder = Recorder(
+        ok(
+            _journal(
+                "rollback_partial",
+                [
+                    {"index": 1, "ok": True},
+                    {"index": 0, "ok": False, "error": "Workspace.Shop.Sign is gone"},
+                ],
+            )
+        )
+    )
+    client = ForgeBridgeClient("http://127.0.0.1:8787", producer_token="t", transport=recorder)
+    journal = client.get_journal(JOURNAL_ID)
+
+    assert journal.state == "rollback_partial"
+    assert journal.rolledBackAt is None
+    # `result` projects as `Any`: the generator renders a nullable $ref that way,
+    # here and on `RunResponse.validation` alike. Validating it explicitly is
+    # what a caller has to do, so the test does what a caller does.
+    result = RollbackResult.model_validate(journal.result)
+    failed = [outcome for outcome in result.outcomes if not outcome.ok]
+    assert [outcome.index for outcome in failed] == [0]
+    assert failed[0].error == "Workspace.Shop.Sign is gone"
+
+    _, url, headers, _ = recorder.calls[0]
+    assert url.endswith(f"/v1/journal/{JOURNAL_ID}")
+    assert headers[PRODUCER_TOKEN_HEADER] == "t"
+
+
+def test_no_inverses_is_told_apart_from_nothing_to_undo() -> None:
+    """`None` and `0` are different facts.
+
+    `None` means the inverses never left the Studio session that captured them —
+    that session may still be able to undo in place, and nothing else can. `0`
+    would mean an apply that changed nothing.
+    """
+    payload = _journal("applied", None)
+    payload["inverses"] = None
+    client = ForgeBridgeClient(
+        "http://127.0.0.1:8787", producer_token="t", transport=Recorder(ok(payload))
+    )
+    assert client.get_journal(JOURNAL_ID).inverses is None
+
+
+def test_the_two_journal_writes_are_consumer_surface() -> None:
+    """Both carry the link, because both decide what a rollback can do.
+
+    One writes the record a reversal is replayed from; the other is the only
+    thing that can stamp a journal reversed. A process that found the loopback
+    port must be able to write neither.
+    """
+    client = ForgeBridgeClient("http://127.0.0.1:8787", transport=Recorder())
+    with pytest.raises(TransportError):
+        client.record_journal_entry(JOURNAL_ID, DeliveryEnvelope.model_validate(ENVELOPE))
+    with pytest.raises(TransportError):
+        client.report_rollback_result(JOURNAL_ID, DeliveryEnvelope.model_validate(ENVELOPE))
+
+    recorder = Recorder(
+        ok({"journalId": JOURNAL_ID, "changeSetId": CHANGESET["id"], "inverses": 2}),
+        ok(
+            {
+                "journalId": JOURNAL_ID,
+                "changeSetId": CHANGESET["id"],
+                "state": "rolled_back",
+                "version": 3,
+            }
+        ),
+    )
+    linked = ForgeBridgeClient(
+        "http://127.0.0.1:8787",
+        link_id="3f2504e0-4f89-41d3-9a0c-0305e82c3305",
+        transport=recorder,
+    )
+    assert (
+        linked.record_journal_entry(JOURNAL_ID, DeliveryEnvelope.model_validate(ENVELOPE)).inverses
+        == 2
+    )
+    assert (
+        linked.report_rollback_result(
+            JOURNAL_ID, DeliveryEnvelope.model_validate(ENVELOPE)
+        ).state
+        == "rolled_back"
+    )
+
+    assert recorder.calls[0][1].endswith(f"/v1/journal/{JOURNAL_ID}/entry")
+    assert recorder.calls[1][1].endswith(f"/v1/journal/{JOURNAL_ID}/rollback-result")
+    for _, _, headers, _ in recorder.calls:
+        assert headers[LINK_HEADER] == "3f2504e0-4f89-41d3-9a0c-0305e82c3305"

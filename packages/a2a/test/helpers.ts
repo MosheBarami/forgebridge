@@ -5,6 +5,7 @@ import type { ForgeBridgeBackend, StartRunRequest } from '../src/backend.js';
 import type {
   ApproveResponse,
   DiffResponse,
+  JournalStateResponse,
   LinkStatusResponse,
   ModelsResponse,
   ProposeResponse,
@@ -132,7 +133,37 @@ export class FakeBackend implements ForgeBridgeBackend {
   ): Promise<RollbackResponse> {
     this.calls.push({ method: 'rollback', argument: request, grant });
     this.#maybeThrow('rollback');
-    return { journalId: request.journalId, changeSetId: randomUUID(), status: 'dispatched', nonce: 2 };
+    return { journalId: request.journalId, changeSetId: randomUUID(), status: 'dispatched', nonce: 2, steps: 2 };
+  }
+
+  /**
+   * Overridable, because the interesting states are the ones a default cannot
+   * be: `rolled_back` is what a test has to arrange *away* from, and
+   * `rollback_partial` is the outcome every surface is most likely to round up.
+   */
+  journalStates = new Map<string, JournalStateResponse>();
+
+  async journal(journalId: string): Promise<JournalStateResponse> {
+    this.#record('journal', journalId);
+    return (
+      this.journalStates.get(journalId) ?? {
+        journalId,
+        changeSetId: randomUUID(),
+        summary: 'add a shop script',
+        state: 'rolled_back',
+        versionBefore: 1,
+        versionAfter: 2,
+        rolledBackAt: '2026-01-01T00:02:00.000Z',
+        inverses: 2,
+        result: {
+          outcomes: [
+            { index: 1, ok: true },
+            { index: 0, ok: true },
+          ],
+          newVersion: 1,
+        },
+      }
+    );
   }
 
   async models(): Promise<ModelsResponse> {

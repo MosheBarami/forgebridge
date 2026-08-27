@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ForgeBridgeError, PROTOCOL_VERSION } from '@forgebridge/protocol';
 import { createDaemon, type ForgeBridgeDaemon, type ModelsPort, type RunModelClient } from '@forgebridge/daemon';
 import {
+  approvalCheats,
   assertConformant,
   connectStudioDouble,
   daemonHumanApproval,
@@ -485,5 +486,39 @@ describe('@forgebridge/a2a is a conformant connector', () => {
 
     expect(report.ok, formatReport(report)).toBe(true);
     expect(formatReport(report)).toContain(`${DOWN_MODEL}→provider-error`);
+  });
+});
+
+/**
+ * The same three cheats every connector runs, wrapped around this adapter.
+ *
+ * They live in `@forgebridge/conformance` rather than here because "the suite
+ * would catch this" is a claim about *this* adapter and not only about the
+ * reference one. An adapter is a shim, and a shim can be thin enough to pass
+ * every case while the connector behind it enforces nothing; the way to find
+ * that out is to break the shim on purpose and require the report to go red.
+ */
+describe('the suite catches this connector skipping the approval check', () => {
+  it('goes red for each cheat, and green for the one case that is not a gate on its own', async () => {
+    harness = await startHarness();
+
+    for (const cheat of approvalCheats(harness.adapter, harness.approve)) {
+      const report = await runConformanceSuite(cheat.adapter, {
+        humanApproval: harness.approve,
+        only: [cheat.caseId, ...cheat.stillPasses],
+      });
+
+      const caught = report.results.find((result) => result.case.id === cheat.caseId);
+      expect(caught?.outcome, `${cheat.name}\n${formatReport(report)}`).toBe('fail');
+      expect(caught?.failures.join('\n')).toMatch(cheat.failure);
+      expect(report.ok).toBe(false);
+
+      // The instructive half: "refuses whatever it is handed" *passes*
+      // `apply-refused-without-approval`, and a connector author who read only
+      // that case would ship it. One case in isolation is not a gate.
+      for (const id of cheat.stillPasses) {
+        expect(report.results.find((result) => result.case.id === id)?.outcome, formatReport(report)).toBe('pass');
+      }
+    }
   });
 });

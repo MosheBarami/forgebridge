@@ -95,12 +95,17 @@ export type ApproveResponse = z.infer<typeof ApproveResponse>;
 /**
  * `POST /v1/journal/:id/rollback` — 202.
  *
- * `status` is `"dispatched"`, not `"rolled back"`. The inverse operations live
- * on the Studio plugin that captured them, so only the plugin can complete a
- * rollback; the daemon's own TODO(M11) records that the protocol currently has
- * no way for it to report completion. Anything this connector tells an A2A
- * caller must preserve that distinction rather than rounding "dispatched" up to
- * "done".
+ * `status` is `"dispatched"`, not `"rolled back"`, and it stays that way: this
+ * response is answered the moment the reversal is queued, before the Studio
+ * plugin has polled for it. What M11 changed is that the outcome is now
+ * reportable at all — `GET /v1/journal/:id` below is where it appears. Anything
+ * this connector tells an A2A caller must still preserve the distinction rather
+ * than rounding "dispatched" up to "done".
+ *
+ * `steps` is how many inverse operations went out, and it is optional here for
+ * the reason every schema in this file is narrow: a daemon predating M11 does
+ * not send it, and a connector that refused to parse the response would turn an
+ * additive server change into a broken client.
  */
 export const RollbackResponse = z
   .object({
@@ -108,9 +113,47 @@ export const RollbackResponse = z
     changeSetId: z.string().uuid(),
     status: z.string(),
     nonce: z.number().int().min(0),
+    steps: z.number().int().min(0).optional(),
   })
   .passthrough();
 export type RollbackResponse = z.infer<typeof RollbackResponse>;
+
+/**
+ * `GET /v1/journal/:id` — 200. What happened to one apply, and to any reversal.
+ *
+ * The read that lets this connector say anything true about a rollback. Before
+ * it, the `rollback-apply` skill could report that it had asked and nothing
+ * more.
+ *
+ * `state` is a string rather than an enum for the reason this file's header
+ * gives — a daemon that gained a state would otherwise break the connector —
+ * and `result` is declared in full rather than passed through, because the
+ * per-inverse outcomes are the whole content of a partial reversal. A summary
+ * that said "partial" without saying which inverses failed would leave a calling
+ * agent with nothing to act on.
+ */
+export const JournalStateResponse = z
+  .object({
+    journalId: z.string().uuid(),
+    changeSetId: z.string().uuid(),
+    summary: z.string(),
+    state: z.string(),
+    versionBefore: z.number().int().min(0),
+    versionAfter: z.number().int().min(0),
+    rolledBackAt: z.string().nullable(),
+    inverses: z.number().int().min(0).nullable(),
+    result: z
+      .object({
+        outcomes: z.array(
+          z.object({ index: z.number().int().min(0), ok: z.boolean(), error: z.string().optional() }).passthrough(),
+        ),
+        newVersion: z.number().int().min(0),
+      })
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough();
+export type JournalStateResponse = z.infer<typeof JournalStateResponse>;
 
 /**
  * `POST /v1/runs` — 201.
