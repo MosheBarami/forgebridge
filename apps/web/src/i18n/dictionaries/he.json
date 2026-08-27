@@ -127,7 +127,7 @@
     "lede": "קישור אחד, תור אחד של שינויים מוצעים, והפרש אחד לקרוא לפני שמתחייבים אליו.",
     "linkRegister": "קישור",
     "queueRegister": "שינויים מוצעים",
-    "queueEmpty": "עדיין לא הוצע דבר. ריצה מניחה כאן ChangeSet במצב {status}, והוא ממתין לכם.",
+    "queueEmpty": "לוח זה אינו יכול להציג את הממתינים: לדימון עדיין אין נתיב למנות ChangeSets. ריצה שתופעל כאן תציג את ה־ChangeSet שלה במצב {status} עם סיומה.",
     "queueEmptyStatus": "validated",
     "modelsRegister": "מודלים",
     "modelsUnconfigured": "לא חובר מרשם לדימון הזה, ולכן אין עדיין בין מה לנתב.",

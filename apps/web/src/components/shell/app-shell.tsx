@@ -88,7 +88,16 @@ export function AppShell({ children }: { children: ReactNode }) {
           // the header, which puts the next Tab back at the top of the nav.
           tabIndex={-1}
           aria-label={t('shell.mainContent')}
-          className="flex-1 px-4 py-6 md:px-8 md:py-8"
+          // `min-w-0` is load-bearing, not cosmetic. As a flex item this
+          // defaults to `min-width: auto`, which refuses to shrink below its
+          // content's min-content width — so a surface wider than the viewport
+          // (the game map's graph is the one that does it) pushes the whole
+          // row wide and the *page* scrolls sideways, dragging the header out
+          // of view. The graph already scrolls inside its own
+          // `overflow-x-auto` box; this is what lets that box actually be
+          // narrower than the graph. Measured: 1338px page scrollWidth in a
+          // 1265px viewport before, 1265px after, in both `dir` values.
+          className="min-w-0 flex-1 px-4 py-6 md:px-8 md:py-8"
         >
           {children}
         </main>

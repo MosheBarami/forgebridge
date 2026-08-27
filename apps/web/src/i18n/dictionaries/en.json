@@ -127,7 +127,7 @@
     "lede": "One link, one queue of proposed changes, one diff to read before you commit to it.",
     "linkRegister": "Link",
     "queueRegister": "Proposed changes",
-    "queueEmpty": "Nothing proposed yet. A run puts a ChangeSet here in {status}; it waits for you.",
+    "queueEmpty": "This register cannot list what is waiting: the daemon has no route to enumerate ChangeSets yet. A run started here shows its ChangeSet in {status} when it stops.",
     "queueEmptyStatus": "validated",
     "modelsRegister": "Models",
     "modelsUnconfigured": "No registry is wired into this daemon, so there is nothing to route between yet.",
