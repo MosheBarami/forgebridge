@@ -1,0 +1,20 @@
+# The build context for every image in this repository is the repository root,
+# because both the relay and the daemon depend on workspace siblings. Without
+# this file that context is the whole tree — including `node_modules/`, which
+# the Dockerfiles reinstall from the lockfile anyway, and `.git/`.
+#
+# `apps/relay/.dockerignore` is not consulted for those builds: Docker reads the
+# `.dockerignore` beside the context root, and the context root is here.
+**/node_modules
+**/dist
+**/.turbo
+**/coverage
+**/.venv
+**/__pycache__
+**/*.tsbuildinfo
+.git
+.github
+.env
+.env.*
+!.env.example
+plugin/build

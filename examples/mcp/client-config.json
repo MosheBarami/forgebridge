@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "forgebridge": {
+      "command": "npx",
+      "args": ["forgebridge-mcp", "--stdio"],
+      "env": {
+        "FORGEBRIDGE_DAEMON_URL": "http://127.0.0.1:7317",
+        "FORGEBRIDGE_PRODUCER_TOKEN": "paste the token the daemon printed on its terminal"
+      }
+    }
+  }
+}

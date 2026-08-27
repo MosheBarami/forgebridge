@@ -1,0 +1,48 @@
+# The collector this stack provisions.
+#
+# Read the note in `docker-compose.yml` before wiring anything to it: no process
+# in this repository constructs a telemetry port today, so this collector
+# currently receives nothing. It is here so that the deployment is ready for the
+# first one that does, and so that the readiness is a checkable fact rather than
+# a line in a README.
+#
+# The pipeline is deliberately minimal and deliberately local. An exporter
+# pointed at a vendor would be a decision about where a self-hoster's traces go,
+# and that is the self-hoster's decision — ADR-011 puts the vendor behind an
+# adapter for the same reason. Replace the `debug` exporter below with your own
+# and nothing else in this file has to change.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        # Bound to every interface *inside the container*; the service publishes
+        # no port, so the only things that can reach it are the other services
+        # on this compose network.
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+exporters:
+  # Prints a summary of what arrives to the collector's own stdout, which is
+  # what `docker compose logs otel-collector` shows. `basic` rather than
+  # `detailed`: span attributes on this transport can carry ChangeSet metadata,
+  # and a collector that writes all of it into container logs has widened the
+  # relay's stated privacy posture without anyone deciding to.
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+  telemetry:
+    logs:
+      level: info

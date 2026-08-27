@@ -1,6 +1,19 @@
 # A self-hostable relay, with the TLS termination it needs to be honest about
 # its own name.
 #
+# This is the **relay-only** deployment: two containers, nothing else. The
+# repository root's `docker-compose.yml` is the full self-hosting stack — this
+# plus an OpenTelemetry collector — and `docs/SELF-HOSTING.md` documents that
+# one. Keep both: a reader who wants only the transport should not have to read
+# past a collector to find it.
+#
+# The two files have to agree about the relay's configuration surface, and they
+# are held to it rather than trusted: `scripts/__tests__/deployment.test.ts`
+# rule P1 checks *every* compose file in this repository against the variables
+# `apps/relay/src/bin.ts` actually reads, so a variable added to one and not the
+# other fails the build.
+
+#
 #     cd apps/relay/deploy
 #     RELAY_DOMAIN=relay.example.org docker compose up --build
 #
@@ -36,6 +49,12 @@ services:
       # token. Leave it unset to let anyone mint one; it is rate limited either
       # way and costs the relay a UUID and a pairing code.
       RELAY_CONTROL_TOKEN: ${RELAY_CONTROL_TOKEN:-}
+      # Per-link ceilings, both below the protocol's own hard bounds (8 MiB and
+      # 500 operations). The relay refuses to start with either at or above
+      # them: a ceiling at the hard bound enforces nothing, and the typo that
+      # adds a zero turns the defence off without changing anything visible.
+      RELAY_MAX_CHANGESET_BYTES: ${RELAY_MAX_CHANGESET_BYTES:-1048576}
+      RELAY_MAX_OPERATIONS: ${RELAY_MAX_OPERATIONS:-200}
     expose:
       - "8080"
     # No published port. The relay is only reachable through the proxy, which is
