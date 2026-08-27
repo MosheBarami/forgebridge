@@ -3,3 +3,4 @@ export * from './secrets.js';
 export * from './transport.js';
 export * from './telemetry.js';
 export * from './sandbox.js';
+export * from './model.js';

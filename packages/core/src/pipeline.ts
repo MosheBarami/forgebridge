@@ -8,7 +8,6 @@ import {
 import type {
   ApplyResult as ApplyResultType,
   ChangeSet as ChangeSetType,
-  Finding,
   ModelAttempt,
   ProtocolError,
   Run,
@@ -16,6 +15,12 @@ import type {
 } from '@forgebridge/protocol';
 import { systemClock, type Clock } from './clock.js';
 import { checkPolicy, DENY_ALL_POLICY, type PolicyDecision } from './policy.js';
+import {
+  analyseChangeSet,
+  firstErrorFinding,
+  DEFAULT_ANALYSIS_TIMEOUT_MS,
+  MAX_SANDBOX_OUTPUT_BYTES,
+} from './validate.js';
 import {
   ModelRouter,
   type InvocationContext,
@@ -193,9 +198,7 @@ export interface RunState {
 }
 
 const DEFAULT_APPLY_TIMEOUT_MS = 300_000;
-const DEFAULT_ANALYSIS_TIMEOUT_MS = 30_000;
 const DEFAULT_TEST_TIMEOUT_MS = 120_000;
-const MAX_SANDBOX_OUTPUT_BYTES = 262_144;
 const MAX_PARSE_ISSUES_REPORTED = 20;
 
 export class RunPipeline {
@@ -479,52 +482,20 @@ export class RunPipeline {
     return { run, plan, changeSet: validated, decision, validation };
   }
 
+  /**
+   * Delegated to `validate.ts`, which both run drivers share. The rules it
+   * enforces — an unconfigured analyser reports `warn`, a truncated pass never
+   * reports `ok` — are the kind that rot when they are written twice.
+   */
   async #analyse(set: ChangeSetType, allowedHttpHosts: readonly string[]): Promise<Validation['luau']> {
-    const sources = set.operations.flatMap((operation) =>
-      operation.op === 'writeScript'
-        ? [{ path: operation.path as string, scriptType: operation.scriptType, source: operation.source }]
-        : [],
-    );
-
-    if (!this.#deps.sandbox) {
-      // Reporting `ok` here would claim a check that never ran. `warn` plus a
-      // finding says exactly what happened, and the auto-apply gate reads it.
-      const finding: Finding = {
-        severity: 'warning',
-        rule: 'core/luau-analysis-unavailable',
-        message: 'No Luau analyser is configured; this ChangeSet was not statically checked.',
-      };
-      return { status: sources.length === 0 ? 'ok' : 'warn', findings: sources.length === 0 ? [] : [finding] };
-    }
-
-    if (sources.length === 0) return { status: 'ok', findings: [] };
-
-    const report = await this.#deps.sandbox.analyse({
-      sources,
+    return await analyseChangeSet(set, {
+      analyser: this.#deps.sandbox,
       allowedHttpHosts,
       budget: {
         timeoutMs: this.#deps.analysisTimeoutMs ?? DEFAULT_ANALYSIS_TIMEOUT_MS,
         maxOutputBytes: MAX_SANDBOX_OUTPUT_BYTES,
       },
     });
-
-    if (report.truncated && report.status === 'ok') {
-      // A pass that ran out of budget has not seen everything, so it cannot say
-      // `ok`. The analyser is told this; the core enforces it anyway.
-      return {
-        status: 'warn',
-        findings: [
-          ...report.findings,
-          {
-            severity: 'warning',
-            rule: 'core/luau-analysis-truncated',
-            message: 'Static analysis hit its budget before finishing; the verdict covers only part of the source.',
-          },
-        ],
-      };
-    }
-
-    return { status: report.status, findings: report.findings };
   }
 
   async #apply(
@@ -714,11 +685,6 @@ export class RunPipeline {
   #now(): string {
     return new Date(this.#clock()).toISOString();
   }
-}
-
-function firstErrorFinding(luau: Validation['luau']): string | undefined {
-  const finding = luau.findings.find((candidate) => candidate.severity === 'error');
-  return finding ? `${finding.rule}: ${finding.message}`.slice(0, 500) : undefined;
 }
 
 function unknownFailure(stage: string): ProtocolError {
