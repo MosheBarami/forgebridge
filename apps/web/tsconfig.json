@@ -1,0 +1,31 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    /*
+     * The base config targets Node libraries: NodeNext resolution, emitted
+     * declarations, ES2023 lib. A Next app is none of those things — it is
+     * bundler-resolved, JSX-bearing, DOM-typed and emits nothing (`next build`
+     * owns the output). Everything below is an override of that difference and
+     * nothing else; `strict` and `noUncheckedIndexedAccess` come through from
+     * the base untouched, which is the point of extending it at all.
+     */
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "preserve",
+    "allowJs": true,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "incremental": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
+    "plugins": [{ "name": "next" }]
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", ".next"]
+}

@@ -1,0 +1,870 @@
+{
+  "meta": {
+    "title": "ForgeBridge",
+    "tagline": "A bridge between an AI and your Roblox place.",
+    "description": "Propose changes with any model, read the diff, approve what you meant. Works with no account, against a daemon on your own machine."
+  },
+  "shell": {
+    "skipToContent": "Skip to main content",
+    "primaryNav": "Primary",
+    "utilityBar": "Bridge status and preferences",
+    "mainContent": "Main content",
+    "footer": "About this build",
+    "nav": {
+      "bridge": "Bridge",
+      "generate": "Generate",
+      "projects": "Projects",
+      "inventory": "Inventory",
+      "map": "Game map",
+      "settings": "Settings"
+    },
+    "theme": {
+      "label": "Theme",
+      "system": "System",
+      "light": "Light",
+      "dark": "Dark"
+    },
+    "locale": {
+      "label": "Language"
+    },
+    "signedOut": {
+      "badge": "No account",
+      "explain": "You are signed out, and everything on this page works that way. Your projects live in this browser until you choose otherwise."
+    }
+  },
+  "link": {
+    "label": "Link",
+    "checking": "Checking for a daemon…",
+    "posture": "Privacy posture",
+    "postureGloss": {
+      "local-daemon": "Nothing on this page is sent anywhere but the daemon running on this machine.",
+      "relay-tls": "Changes travel through a relay the operator can read. Use the local daemon if that matters to you.",
+      "relay-e2e": "The relay carries ciphertext it cannot read."
+    },
+    "state": {
+      "unreachable": "No daemon",
+      "unpaired": "Daemon up, Studio not paired",
+      "pairing": "Pairing",
+      "paired": "Live",
+      "expired": "Pairing expired",
+      "revoked": "Link revoked"
+    },
+    "detail": {
+      "daemon": "Daemon",
+      "protocol": "Protocol",
+      "boundTo": "Bound to",
+      "project": "Project",
+      "links": "Links",
+      "plugin": "Plugin",
+      "lastSeen": "Last seen",
+      "never": "never"
+    },
+    "surfaceTitle": "Transport and link",
+    "surfaceLede": "Which route your changes take, who can read them on the way, and how a Studio session gets attached to this daemon.",
+    "relayWarning": "This link runs through a relay. The operator can read every ChangeSet that crosses it — the prompt, the Luau a model wrote, and the paths it touches. That is not a risk this build mitigates; it is what the transport is. Switch to the local daemon if it matters to you.",
+    "transport": {
+      "title": "Transports",
+      "lede": "All three are listed so you can compare them before choosing. Each is shown with the protocol's own posture sentence, word for word — this app never paraphrases one and never replaces one with an icon.",
+      "active": "Active",
+      "unavailable": {
+        "label": "Unavailable",
+        "noRelay": "No relay exists in this build. The transport split is designed (ADR-004) and the far end has not been built, so there is nothing for a link to connect to.",
+        "gated": "Held back on purpose. End-to-end encryption needs X25519 and an AEAD implemented in pure Luau, because Roblox has no crypto standard library, and ADR-014 gates that behind a spike and an external review. Being wrong about crypto is worse than being late about it."
+      }
+    },
+    "pairing": {
+      "title": "Pairing",
+      "outstanding": "A code is waiting",
+      "attempts": "Attempts remaining: {remaining}",
+      "expiresAt": "Expires at {when}",
+      "step1": "Read the pairing code off the terminal the daemon was started from. It is printed once, when the daemon starts.",
+      "step2": "In Roblox Studio, open the ForgeBridge plugin and enter the code.",
+      "step3": "This page notices the pairing on its own within a few seconds. Nothing here needs to be pressed.",
+      "paired": "Paired",
+      "pairedBody": "A Studio session is attached and no code is outstanding. Restart the daemon if you need to pair a second machine.",
+      "none": "No code outstanding",
+      "noneBody": "The daemon issues one code when it starts and it is single use. If yours has expired or has been redeemed, restart the daemon to get another.",
+      "whyNotShown": "Why the code is not on this page",
+      "whyNotShownBody": "The daemon reports only that a code is outstanding, never the code itself. Serving it over HTTP would hand it to anything that can reach the port, which would defeat the point of carrying it by hand. There is also no route to issue a new one, so a fresh code means restarting the daemon.",
+      "limits": "A code is {length} characters, valid for {minutes} minutes, with {attempts} attempts, and single use. None of the three limits is configurable — they are what makes a short code safe."
+    },
+    "sessions": {
+      "title": "Studio sessions",
+      "none": "No Studio session has ever paired with this daemon.",
+      "refresh": "Re-read from the daemon",
+      "keyId": "Session key id"
+    }
+  },
+  "daemon": {
+    "absent": {
+      "title": "No daemon is answering on {url}",
+      "lede": "That is the expected first-run state, not an error. The daemon is the part that talks to Roblox Studio and holds your model keys; it runs on your machine and nothing here works without it.",
+      "twoCauses": "The browser cannot tell these two apart, so check both:",
+      "causeNotRunning": "The daemon is not running.",
+      "causeOriginBlocked": "The daemon is running, but has not been told this page may call it. It refuses browser origins it was not started with.",
+      "startTitle": "Start it",
+      "startBody": "From a clone of the repository, in a terminal:",
+      "originNote": "The {flag} part is not optional for a browser. Without it the daemon answers every request from this page with a refusal, which reaches JavaScript looking exactly like \"nothing is listening\".",
+      "tokenTitle": "Then paste the producer token",
+      "tokenBody": "The daemon prints a one-line token when it starts. Producer routes — proposing, diffing, approving, rolling back — require it. It is minted fresh for each daemon process, so this page keeps it in memory only and never writes it to disk.",
+      "tokenPlaceholder": "Producer token from the daemon's terminal",
+      "tokenSubmit": "Use this token",
+      "tokenCleared": "Token cleared.",
+      "retry": "Check again",
+      "retrying": "Checking…",
+      "docs": "Full instructions live in the repository README."
+    },
+    "error": {
+      "unreachable": "The daemon did not answer.",
+      "originRejected": "The daemon refused this page's origin.",
+      "unauthenticated": "This route needs the daemon's producer token.",
+      "invalidResponse": "The daemon answered with something this build does not understand.",
+      "protocol": "The daemon refused the request."
+    }
+  },
+  "bridge": {
+    "title": "Bridge",
+    "lede": "One link, one queue of proposed changes, one diff to read before you commit to it.",
+    "linkRegister": "Link",
+    "queueRegister": "Proposed changes",
+    "queueEmpty": "Nothing proposed yet. A run puts a ChangeSet here in {status}; it waits for you.",
+    "queueEmptyStatus": "validated",
+    "modelsRegister": "Models",
+    "modelsUnconfigured": "No registry is wired into this daemon, so there is nothing to route between yet.",
+    "modelsCount": "{count} models, {free} of them free",
+    "modelsVerified": "Catalog verified {when}"
+  },
+  "generate": {
+    "title": "Generate",
+    "lede": "A prompt goes to a model, the model proposes a ChangeSet, and it stops there. You read the diff — the Luau included — and approving is a separate act.",
+    "composer": {
+      "title": "Prompt",
+      "prompt": "What should change",
+      "promptPlaceholder": "Add a shop stand in Workspace that sells a speed coil for 50 coins, with a ProximityPrompt and a server script that checks the player's balance.",
+      "promptRequired": "Say what you want changed.",
+      "project": "Project",
+      "noProject": "No project selected",
+      "projectHint": "Runs are attributed to a project id. Create one on the projects page, or the daemon's own default project is used.",
+      "projectDaemonDefault": "The daemon's default project",
+      "model": "Model",
+      "policy": "Routing",
+      "start": "Start run",
+      "starting": "Running…",
+      "cancel": "Stop",
+      "cancelled": "Stopped. The daemon records the run as cancelled, which is a different fact from failed.",
+      "needsDaemon": "No daemon is answering, so there is nothing to run against. The bridge page says how to start one.",
+      "needsToken": "Starting a run needs the daemon's producer token. Paste it on the bridge page; it is held in memory for this tab only.",
+      "reset": "New run"
+    },
+    "policy": {
+      "free-first": "Free models first",
+      "fastest": "Fastest first",
+      "cheapest": "Cheapest first",
+      "best": "Best benchmark first",
+      "pinned": "This model only, no fallback",
+      "pinnedNote": "Pinning disables fallback entirely. If the model is rate limited the run fails rather than moving on."
+    },
+    "models": {
+      "group": {
+        "eligible": "Can drive a run",
+        "ineligible": "Cannot drive a run"
+      },
+      "free": "free",
+      "paid": "paid",
+      "context": "{tokens} context",
+      "tools": "tool calling",
+      "noTools": "no tool calling",
+      "structured": "structured output",
+      "noStructured": "no structured output",
+      "coding": "coding {score}",
+      "unscored": "coding unscored",
+      "ineligibleWhy": "This pipeline needs {capabilities}. The router will skip it.",
+      "requirements": "A run needs a model with tool calling and structured output. {eligible} of the {total} models in this catalog have both.",
+      "source": "{count} models from {source}, synced {when}.",
+      "catalogTotal": "The provider listed {total}; the rest did not survive the free-price derivation.",
+      "stale": "This catalog is {days} days old, past the {threshold}-day threshold the registry sets. Treat the prices and capabilities below as unverified.",
+      "excluded": "{count} models were seen and left out",
+      "excludedShow": "Show why",
+      "excludedHide": "Hide",
+      "freeDerived": "Free is derived from a live price of zero at sync time, never asserted."
+    },
+    "run": {
+      "title": "Run",
+      "waiting": "No run yet.",
+      "stage": {
+        "queued": "Queued",
+        "planning": "Planning",
+        "generating": "Generating",
+        "validating": "Validating",
+        "awaiting-approval": "Waiting for you",
+        "applying": "Applying",
+        "testing": "Testing",
+        "done": "Done",
+        "failed": "Failed",
+        "cancelled": "Cancelled"
+      },
+      "plan": "Plan",
+      "planEmpty": "The model produced no plan steps.",
+      "chain": "Models",
+      "expand": "Show every attempt",
+      "collapse": "Collapse",
+      "inFlight": "waiting on {model}",
+      "attemptIndex": "Attempt {index}",
+      "duration": "{ms} ms",
+      "tokens": "{prompt} in, {completion} out",
+      "cost": "${cost}",
+      "costFree": "no charge",
+      "outcome": {
+        "ok": "succeeded",
+        "rate-limited": "rate limited",
+        "context-exceeded": "context exceeded",
+        "capability-missing": "capability missing",
+        "provider-error": "provider error",
+        "timeout": "timed out",
+        "refused": "refused",
+        "invalid-output": "invalid output",
+        "cancelled": "cancelled"
+      },
+      "skipped": "Never tried",
+      "skippedReason": {
+        "circuit-open": "circuit open",
+        "attempt-budget": "attempt budget spent"
+      },
+      "skippedRetry": "retry after {ms} ms",
+      "adr": "Every model the router tried is listed, with why it moved on. A substitution you cannot see is a substitution you did not agree to.",
+      "unrecognised": "{count} frames from the daemon were not in a shape this build understands, so they are not in the log above. That usually means the daemon is newer than this page.",
+      "failure": "The run did not produce a change",
+      "remedy": "What to do",
+      "cancelledReason": "Cancelled: {reason}",
+      "runId": "Run"
+    },
+    "diff": {
+      "title": "Proposed change",
+      "none": "Nothing proposed yet. A run puts a ChangeSet here and it waits.",
+      "loading": "Reading the diff…",
+      "error": "The diff could not be read, so there is nothing to approve.",
+      "summary": "Summary",
+      "status": "Status",
+      "counts": "{total} operations · {creates} created · {setProperties} properties · {moves} moved · {deletes} deleted",
+      "scripts": "{count} install Luau",
+      "countsNote": "Scripts is a cross-cut, not another slice: an operation that installs Luau is also counted as a create or a property. These do not add up to the total.",
+      "stale": "This ChangeSet was built against version {base}; the project is at {current}. The daemon will refuse to apply it — rebuild against the current version.",
+      "treeUnaware": "The daemon holds no snapshot of your place, so this shows what will be written and not what is there now. There is no before side to this diff and it does not pretend to have one.",
+      "digest": "Content digest",
+      "digestNote": "Approving sends this digest back. It is what makes your yes a statement about the operations on this page rather than about an identifier.",
+      "operations": "Operations",
+      "op": {
+        "createInstance": "create",
+        "setProperty": "set property",
+        "writeScript": "write script",
+        "moveInstance": "move",
+        "deleteInstance": "delete"
+      },
+      "destructive": "destructive",
+      "carriesLuau": "installs Luau",
+      "code": "Luau that will run",
+      "codeBytes": "{bytes} bytes",
+      "unreadableSource": "This operation writes Source with something that is not a string, so there is no code to show. The daemon's analyser has already failed the verdict for it.",
+      "value": "Value written",
+      "properties": "Properties",
+      "paths": "Paths",
+      "undisclosed": {
+        "title": "This diff is incomplete — do not approve it",
+        "body": "The daemon counts {counted} operations in this ChangeSet that install Luau. This page could resolve the code for only {shown}. Something is installing a script you are not being shown, which is exactly what approval exists to prevent. Report this before approving anything."
+      }
+    },
+    "validation": {
+      "title": "Validation",
+      "computedBy": "Computed by {by}, {when}",
+      "computedNote": "The verdict is the daemon's, computed inside its trust boundary. Whatever a model claimed about its own output was discarded.",
+      "luau": "Luau",
+      "policy": "Path policy",
+      "status": {
+        "ok": "passed",
+        "warn": "passed with warnings",
+        "fail": "failed"
+      },
+      "findings": "Findings",
+      "violations": "Violations",
+      "clean": "No findings.",
+      "operationRef": "operation {index}",
+      "lineRef": "line {line}",
+      "absent": "This ChangeSet carries no verdict, so it cannot be approved."
+    },
+    "approve": {
+      "title": "Your decision",
+      "explain": "Nothing above has been applied. Approving hands this ChangeSet to the paired Studio session; rejecting leaves it where it is.",
+      "readFirst": "Read the operations above, including the Luau, before you decide.",
+      "approvedBy": "Approved by",
+      "approvedByPlaceholder": "your name, for the journal",
+      "note": "Note",
+      "notePlaceholder": "optional, kept with the journal entry",
+      "button": "Approve and apply",
+      "working": "Approving…",
+      "done": "Approved. The daemon has queued it for the paired Studio session as nonce {nonce}.",
+      "reject": "Reject",
+      "rejected": "Rejected. This page has let it go.",
+      "rejectExplain": "There is no reject route on the daemon: rejecting clears this surface, and the ChangeSet stays in validated on the daemon until its process ends. It is never applied without an approval, so nothing is left pending in your place. TODO(M35): a real reject needs a daemon route that sets the status.",
+      "bulkDelete": "This deletes {count} instances, above the threshold of {threshold}. Confirm you mean it.",
+      "bulkDeleteConfirm": "Yes, delete {count} instances",
+      "blockedValidation": "Validation failed, so the daemon will refuse this approval. Fix the findings and run again.",
+      "blockedStale": "The project has moved since this was built, so the daemon will refuse this approval.",
+      "blockedUndisclosed": "This page cannot account for every script in this ChangeSet, so it will not offer to approve it.",
+      "error": "The daemon refused the approval"
+    }
+  },
+  "projects": {
+    "title": "Projects",
+    "lede": "A project is a name for the identifier your runs are attributed to, the paths you mean to let a model write to, and the last place version this browser saw.",
+    "count": "{count} projects",
+    "storageUnavailable": {
+      "title": "This browser will not store anything",
+      "body": "Projects live in IndexedDB, and this browser would not open it. A private window with site data blocked, a full quota, or another tab holding an older version of the database open will all do this. The daemon and everything on the bridge page still work; nothing here can be saved.",
+      "detail": "The browser said: {detail}"
+    },
+    "create": {
+      "title": "New project",
+      "name": "Name",
+      "namePlaceholder": "Tycoon prototype",
+      "nameRequired": "A project needs a name.",
+      "placeId": "Place id",
+      "placeIdHelp": "Optional. The Roblox place this is about, so you can tell two projects apart at a glance. Nothing is sent to Roblox.",
+      "placeIdInvalid": "A place id is a positive whole number.",
+      "prefixes": "Paths you mean to allow",
+      "prefixesHelp": "Instance paths a model may write under, validated against the protocol's own path rules. Recorded as intent — see the note below.",
+      "prefixPlaceholder": "ServerScriptService.Shop",
+      "prefixAdd": "Add path",
+      "prefixRemove": "Remove {path}",
+      "prefixInvalid": "Not an addressable instance path: {reason}",
+      "prefixDuplicate": "That path is already on the list.",
+      "submit": "Create project",
+      "roots": "Addressable roots"
+    },
+    "policyNote": {
+      "title": "What this list does and does not do",
+      "body": "The daemon enforces its own path policy, taken from the --allowed-paths it was started with. There is no route on /v1 that lets this page set one, so what you record here is your intent and a check this app can make before a run — it is not what stops a ChangeSet. The daemon's answer is the one that reaches your place."
+    },
+    "adopt": {
+      "title": "The daemon is using a different project",
+      "body": "Runs are attributed to a project id, and the daemon generates one per process. This browser's project is {local}; the daemon's is {daemon}. A run against a project the daemon has no policy for is refused under its default policy.",
+      "use": "Create a project on the daemon's id",
+      "matched": "Matches the daemon's current project",
+      "differs": "Not the daemon's current project",
+      "unknown": "No daemon, so nothing to compare against"
+    },
+    "list": {
+      "title": "Stored in this browser",
+      "empty": "No projects yet.",
+      "emptyHint": "Create one above. It is a record in this browser; no account is involved and nothing is uploaded."
+    },
+    "row": {
+      "open": "Open",
+      "select": "Use for runs",
+      "selected": "Used for runs",
+      "delete": "Delete",
+      "deleteConfirm": "Delete {name}?",
+      "deleteExplain": "This removes the record from this browser. Nothing in your place changes, and nothing already applied is undone.",
+      "deleteYes": "Delete it",
+      "deleteNo": "Keep it",
+      "placeId": "Place",
+      "noPlaceId": "no place id",
+      "prefixes": "{count} allowed paths",
+      "noPrefixes": "no paths recorded",
+      "version": "Version {version}",
+      "versionObserved": "observed {when}",
+      "versionNever": "no version observed yet",
+      "updated": "Updated {when}"
+    },
+    "detail": {
+      "notFound": "No project with that id is stored in this browser.",
+      "back": "All projects",
+      "identity": "Identity",
+      "id": "Project id",
+      "idNote": "This is the value sent as projectId on every run. It cannot be changed: a project whose id moved would orphan every ChangeSet and journal entry that named the old one.",
+      "created": "Created",
+      "save": "Save changes",
+      "saved": "Saved",
+      "version": "Place version",
+      "versionNote": "The last currentVersion this browser saw reported on a diff. The daemon holds a version counter, not a tree — every diff it serves says treeAware: false — so this is a number observed, not a snapshot taken.",
+      "export": "Export",
+      "exportJson": "Download project definition",
+      "exportJsonNote": "The record above, as JSON. This is what signing in will adopt when accounts land, so a file saved now is not a dead end.",
+      "exportRbxlx": "Export .rbxlx",
+      "exportRbxlxWhy": "Not available. A .rbxlx is a serialised place tree and the daemon holds no tree — there is no route on /v1 that returns one. Writing a file from what this browser has would produce a place file with no place in it. TODO(M34): this needs a daemon route that asks the paired Studio plugin to serialise the place.",
+      "danger": "Delete this project"
+    }
+  },
+  "approval": {
+    "gate": "Nothing is applied without you",
+    "explain": "A run produces a ChangeSet and stops. You read the diff — including the Luau that will run — and approving is a separate, deliberate act."
+  },
+  "placeholder": {
+    "reserved": "Reserved for {milestone}",
+    "notBuilt": "This surface is not built. The shell around it is: navigation, theme, locale, the link indicator and the daemon client are all real, so the agent that builds this page starts from a working app rather than a blank one.",
+    "seeMilestones": "See docs/MILESTONES.md"
+  },
+  "notFound": {
+    "title": "No such page",
+    "body": "That address is not part of this app.",
+    "home": "Back to the bridge"
+  },
+  "common": {
+    "copy": "Copy",
+    "copied": "Copied",
+    "dismiss": "Dismiss",
+    "loading": "Loading…"
+  },
+  "inventory": {
+    "title": "Inventory",
+    "lede": "Mechanic cards: named recipes for the things Roblox places are actually made of. Open one and read exactly what it would ask a model to build, and which paths it would be allowed to touch, before you use it.",
+    "notApplied": "Using a card does not change your place. It starts a run, the run stops at a ChangeSet in validated, and you read the diff — the Luau included — and approve it yourself.",
+    "search": {
+      "label": "Search the catalog",
+      "placeholder": "Search by name, path or keyword"
+    },
+    "filter": {
+      "label": "Filter by category",
+      "all": "All"
+    },
+    "results": {
+      "count": "Showing {shown} of {total} cards.",
+      "none": "No card matches that.",
+      "noneHint": "The starter set is small, deliberately. Community submission is reserved for M50; until then, a mechanic that is not here is a prompt you write yourself on the generation surface."
+    },
+    "category": {
+      "economy": "Economy",
+      "progression": "Progression",
+      "movement": "Movement",
+      "interaction": "Interaction",
+      "persistence": "Persistence",
+      "world": "World"
+    },
+    "source": {
+      "starter": "Starter card",
+      "community": "Community card"
+    },
+    "scopeIntent": {
+      "creates": "creates",
+      "writes": "writes to",
+      "reads": "reads, does not modify"
+    },
+    "op": {
+      "createInstance": "create",
+      "setProperty": "set property",
+      "writeScript": "write script",
+      "moveInstance": "move",
+      "deleteInstance": "delete"
+    },
+    "card": {
+      "back": "All cards",
+      "scope": "Path scope",
+      "scopeNote": "The paths this recipe asks for. Anything outside them is a policy violation the daemon computes at submit time, not a suggestion the model may take or leave.",
+      "scopePath": "Path",
+      "scopeIntent": "Intent",
+      "plan": "What it intends to build",
+      "planNote": "What the recipe asks for. A model can deviate, and the ChangeSet diff is the only account of what it actually did.",
+      "planOp": "Operation",
+      "planPath": "Path",
+      "planDetail": "Class or type",
+      "opCount": "{count} operations",
+      "prompt": "The prompt, in full",
+      "promptNote": "This is the literal text sent to the model, not a summary of it. It is in English because that is what gets sent — nothing is translated on the way out.",
+      "copy": "Copy the prompt",
+      "copyFailed": "The browser refused clipboard access. The prompt is above: select it and copy it.",
+      "open": "Open in Generate",
+      "openNote": "That link carries this card's id in the query string. The generation surface is reserved for M35 and does not read it yet, so today the link lands on a placeholder."
+    },
+    "community": {
+      "title": "Community cards",
+      "body": "Submitting a card is reserved for M50. The shape one has to take already exists — id, category, prompt, path scope, intended operations — and every starter card in this catalog is checked against it at build time."
+    },
+    "cards": {
+      "checkpoints": {
+        "title": "Checkpoints",
+        "summary": "Obby stages that remember how far a player got, and respawn them there.",
+        "caveat": "It assumes your checkpoints are SpawnLocations named 1, 2, 3 under one folder; it will not build the obby. The stage lives in leaderstats only, so a player who leaves loses it unless you also use the DataStore card."
+      },
+      "currency-pickup": {
+        "title": "Currency pickup",
+        "summary": "Coins on the ground that pay out once and come back.",
+        "caveat": "It grants through the leaderstats card's Stats module. Without that card, or something exposing the same functions, the generated code has nothing to call."
+      },
+      "daily-reward": {
+        "title": "Daily reward",
+        "summary": "A once-a-day bonus with a streak, timed on the server.",
+        "caveat": "DataStore limits are per key and per minute, and a busy server can be throttled. The recipe asks for pcall and for a refusal to write after a failed read, but it cannot prove the model did either — that is what the diff is for."
+      },
+      "datastore-save": {
+        "title": "DataStore save and load",
+        "summary": "One wrapper every other system saves through, with retries and a bind-to-close.",
+        "caveat": "This is the card whose failure costs players their progress. Cross-server session locking is not in it: two servers loading the same player can still overwrite each other, and that needs a lock this recipe does not ask for."
+      },
+      "kill-brick": {
+        "title": "Kill brick",
+        "summary": "Parts that damage or kill whatever walks into them.",
+        "caveat": "Touched fires many times a second, so the debounce is the whole card. A version that drops it will look like it works and will kill a player who is standing still."
+      },
+      "leaderstats": {
+        "title": "Leaderstats",
+        "summary": "Coins and Wins on the player list, changed through one module.",
+        "caveat": "It creates the values and the module and nothing else — it does not save them. Pair it with the DataStore card if the numbers are meant to survive a rejoin."
+      },
+      "pet-follower": {
+        "title": "Pet follower",
+        "summary": "A companion model that trails its owner without eating the frame budget.",
+        "caveat": "It drives the pet with AlignPosition rather than per-frame CFrame writes, which is the difference between a pet and a lag source. There is no inventory, no equip flow and no ownership rule in it."
+      },
+      "proximity-interaction": {
+        "title": "Proximity prompt",
+        "summary": "Press-to-use on a part, dispatched to a handler on the server.",
+        "caveat": "MaxActivationDistance is a client-side hint. The recipe asks for a server-side distance re-check because Triggered can be fired from anywhere on the map; check the diff kept it."
+      },
+      "round-timer": {
+        "title": "Round timer",
+        "summary": "An intermission-and-round loop that both sides read from one place.",
+        "caveat": "It replicates the clock through Value objects rather than a remote fired every second. It defines phases and timing only — what happens during a round is your game, not this card."
+      },
+      "shop": {
+        "title": "Shop",
+        "summary": "A server-authoritative shop: catalog, remote, purchase handler.",
+        "caveat": "It builds the server half. There is no GUI in it — it creates the RemoteFunction a GUI would invoke, and the interface is yours to design."
+      },
+      "sprint-toggle": {
+        "title": "Sprint toggle",
+        "summary": "Shift to run, with stamina the server owns.",
+        "caveat": "The client only reports intent; WalkSpeed is set on the server. It draws no stamina bar — it creates the remote a bar would read from, not the bar."
+      },
+      "team-spawn": {
+        "title": "Team spawns",
+        "summary": "Two teams, balanced on join, each with its own spawn.",
+        "caveat": "It leans on the engine's TeamColor routing rather than teleporting on respawn, so your SpawnLocations have to exist first. Switching team later is a different feature and needs its own server-side check."
+      },
+      "timed-door": {
+        "title": "Timed door",
+        "summary": "A button that opens a door, and a door that closes itself.",
+        "caveat": "State is tracked per door on purpose: one shared boolean is a bug that only appears when two players use two gates at once. It does not model the geometry — it tweens between two CFrames you supply."
+      }
+    }
+  },
+  "map": {
+    "title": "Game map",
+    "lede": "The systems in a project and the wiring between them: the scripts and instances this bridge knows about, joined by the requires and remote references their code makes.",
+    "graph": {
+      "label": "Systems",
+      "hint": "Arrow keys move between nodes — up and down within a service, forward and back across services. Enter opens the selected node below.",
+      "counts": "{nodes} nodes, {edges} edges.",
+      "omitted": "{count} instances not drawn: this is a map of the systems, not of the place.",
+      "unreadable": "{count} stored records could not be read and were skipped."
+    },
+    "legend": {
+      "place": "In the place",
+      "proposed": "Proposed, not applied",
+      "referenced": "Referenced, not found",
+      "require": "require",
+      "remote": "remote reference"
+    },
+    "caveat": {
+      "body": "Edges are read from the text of the scripts, not from a running place. A reference built at run time — a module looked up by a variable, a remote pulled out of a table — draws no line here and cannot. What is drawn is real; what is missing may not be."
+    },
+    "example": {
+      "banner": "This is an example place, not your project. Nothing here is stored.",
+      "clear": "Clear the example"
+    },
+    "empty": {
+      "title": "Nothing to map yet",
+      "body": "This map draws from what this browser holds, and right now that is nothing. It is the expected state, not an error.",
+      "sourcesTitle": "Where the data comes from",
+      "fromProject": "A project's captured tree snapshot. Reserved for M34.",
+      "fromChangeSets": "The operations of ChangeSets kept in this browser. Reserved for M35.",
+      "exampleTitle": "See how it reads",
+      "exampleBody": "An example place assembled from five of the starter cards in the inventory. Its edges are extracted from real Luau by exactly the code that would read yours. It is never written to storage and it is gone when you reload.",
+      "exampleAction": "Show the example place",
+      "unavailableTitle": "Browser storage is not available",
+      "unavailableBody": "This map reads from IndexedDB, and this browser has refused it — a private window, blocked site data, or a full quota. Nothing is wrong with your project; there is simply nowhere here to read it from."
+    },
+    "node": {
+      "class": "Class",
+      "classUnknown": "not known",
+      "changeSet": "ChangeSet",
+      "outbound": "Points at",
+      "inbound": "Pointed at by",
+      "noOutbound": "This script makes no require or remote reference that could be resolved.",
+      "noInbound": "Nothing this map can read points here.",
+      "source": "Source",
+      "sourceUnknown": "This app does not hold the Luau for this node. A snapshot that captured no source, or a path only a reference knows about, has none to show.",
+      "origin": {
+        "label": "Known from",
+        "place": "in the place",
+        "proposed": "proposed",
+        "referenced": "referenced"
+      },
+      "originExplain": {
+        "place": "A tree snapshot says this instance exists.",
+        "proposed": "This appears only in a ChangeSet that has not been applied. Nothing is in the place yet.",
+        "referenced": "A script's text points at this path, and neither a snapshot nor a ChangeSet knows it. Often that is a broken reference; sometimes it is a path this app has simply never been shown."
+      }
+    },
+    "edge": {
+      "kind": {
+        "require": "requires",
+        "remote": "remote"
+      }
+    },
+    "panel": {
+      "title": "Selected node",
+      "empty": "Choose a node in the graph to read it.",
+      "clear": "Clear selection"
+    }
+  },
+  "settings": {
+    "sectionNav": "Settings sections",
+    "storageUnavailable": "This browser will not remember the change: {detail}. The setting holds for this page and is lost on reload.",
+    "section": {
+      "overview": "Overview",
+      "models": "Models",
+      "keys": "Keys",
+      "approval": "Approval",
+      "appearance": "Appearance and language",
+      "link": "Transport and link"
+    },
+    "overview": {
+      "title": "Settings",
+      "lede": "What this build is currently set to do, and where each of those settings is kept.",
+      "open": "Open",
+      "autoOn": "Auto-apply is on",
+      "autoOff": "Every change waits for you",
+      "autoOffBody": "A run produces a ChangeSet and stops. You read the diff, including the Luau, and approving is a separate act.",
+      "autoScope": "Covers {prefix}. Everything else, and every deletion anywhere, still waits for your approval.",
+      "pinnedTo": "Pinned to {model}.",
+      "catalogHint": "The router orders candidates by this policy. The catalog it orders is read from the synced snapshot, never from a list written into this app.",
+      "vaultHeld": "A credential is held in this browser",
+      "vaultEmpty": "This browser holds no credential",
+      "daemonCredentialUnknown": "This says nothing about the daemon's own credential. No route reports whether the daemon found one — it prints that on the terminal it was started from.",
+      "noDaemon": "Nothing is answering. That is the expected first-run state, not an error.",
+      "storageTitle": "Where these settings live",
+      "storageBody": "In this browser, with no account. Preferences and the approval policy are in IndexedDB; the theme is in localStorage because it has to be read before the first paint; the language is a cookie because the middleware has to read it before the app renders. None of them is sent anywhere.",
+      "storageAdoption": "If accounts arrive later, signing in adopts what is already here. It never silently replaces it."
+    },
+    "models": {
+      "title": "Models",
+      "lede": "The catalog this build routes between, where it came from, and when it was last verified. Nothing on this page is a list written by hand.",
+      "provenance": "Provenance",
+      "verifiedAt": "Verified at",
+      "counts": "Listed",
+      "countsValue": "{listed} models, {free} of them free, out of {total} the provider offered.",
+      "ready": "Usable for a run",
+      "readyValue": "{ready}, being those that carry every capability this pipeline needs: {capabilities}.",
+      "expiringSummary": "{count} model in this catalog has a recorded withdrawal date inside the warning window. It is flagged in the list below.",
+      "routing": "Default routing",
+      "policy": "Policy",
+      "policyHint": "The order the router tries candidates in. A run may override it; this is what it starts from.",
+      "policyName": {
+        "free-first": "Free first",
+        "fastest": "Fastest",
+        "cheapest": "Cheapest",
+        "best": "Best benchmark",
+        "pinned": "Pinned to one model"
+      },
+      "pinned": "Pinned model",
+      "pinnedHint": "Only models that can actually drive a run are offered here. Pinning one the pipeline cannot use produces a failed run rather than a fallback.",
+      "pinnedInactive": "Only used when the policy is \"Pinned to one model\". Your choice is kept either way.",
+      "pinnedNone": "None",
+      "routingScope": "This is a default for this browser. The daemon still refuses any model it has no adapter or no credential for, and the run log names every model it tried and why it moved on.",
+      "catalog": "Catalog",
+      "showing": "Showing {shown} of {total}.",
+      "search": "Search",
+      "searchHint": "Matches the model id, its display name and its author.",
+      "sort": "Order by",
+      "sortBy": {
+        "coding": "Coding index",
+        "intelligence": "Intelligence index",
+        "agentic": "Agentic index",
+        "context": "Context window",
+        "name": "Name"
+      },
+      "filters": "Filters",
+      "freeOnly": "Free only",
+      "freeOnlyHint": "Free is derived from the price at the time the catalog was verified, never asserted. Each row shows the derivation.",
+      "usableOnly": "Only models a run can use",
+      "usableOnlyHint": "Hides models missing a capability this pipeline requires: {capabilities}.",
+      "noMatches": "Nothing in the catalog matches those filters.",
+      "excluded": "Seen and excluded",
+      "excludedLede": "Models the sync read and deliberately left out, with the recorded reason. \"Not in the list\" and \"we looked at it and it bills per generated song\" are different facts, and only the second one survives being asked about.",
+      "availability": {
+        "ready": "Ready",
+        "expiring": "Expiring",
+        "expired": "Withdrawn",
+        "incapable": "Cannot drive a run"
+      },
+      "isFree": "Free",
+      "notFree": "Not free",
+      "expiring": "The provider has recorded a withdrawal date: {when}, {days} days from now. The router deprioritises it as that date approaches.",
+      "expired": "Withdrawn on {when}. The router will not attempt it.",
+      "incapable": "Missing a capability this pipeline needs: {missing}.",
+      "author": "Author",
+      "context": "Context window",
+      "capabilities": "Capabilities",
+      "benchmarks": "Benchmarks",
+      "axis": {
+        "intelligence": "intelligence",
+        "coding": "coding",
+        "agentic": "agentic"
+      },
+      "unmeasured": "unmeasured",
+      "age": "Age",
+      "ageValue": "{days} days since that sync.",
+      "liveTitle": "What the daemon’s registry says",
+      "liveNone": "No daemon is answering, so everything above is the catalog compiled into this build. Start the daemon to see the one a run would actually use.",
+      "liveSame": "The daemon is reading the same snapshot: {count} models, verified at the same moment.",
+      "liveDiffers": "The daemon is reading a different snapshot: {count} models, verified {when}. A run would use that one, not the one above."
+    },
+    "keys": {
+      "title": "Keys",
+      "lede": "Where a provider credential can live so that this product can use it without ever holding it.",
+      "promise": "The promise, and how it is kept",
+      "promiseBody": "Your provider key never reaches an apple.gg server. That is not a policy — this app ships no server route a key could be sent to, so there is nothing to send it to. The daemon runs on your machine and is the only thing that talks to a provider.",
+      "promiseGate": "The structural half of that claim is checked in CI: npm run verify:no-key-storage fails the build if a persisted shape declares a credential-shaped field, or if the storage port's signatures could carry one.",
+      "cannotReport": "What this page cannot tell you: whether the daemon actually found a credential. No route reports it. The daemon prints \"Provider key: found in …\" on the terminal it was started from, and that terminal is the only place the answer exists today.",
+      "keychain": {
+        "title": "OS keychain — the daemon reads it",
+        "lede": "The strongest of the three, and the only one that can drive a run right now. The daemon reads the item at service forgebridge.provider, account openrouter, once per request. It never writes one.",
+        "promptNote": "Keep -w as the last option, with no value after it: the command then prompts for the credential instead of taking it as an argument, where every process on the machine could read it out of ps while the call lasts.",
+        "removeNote": "To remove it:",
+        "platforms": "macOS only, today. The daemon's keychain backend drives the security binary that ships with macOS; the Windows Credential Manager and libsecret backends are named in the architecture and are not implemented yet. On Windows and Linux the environment variable below is the path that works."
+      },
+      "env": {
+        "title": "Environment variable — the daemon reads it",
+        "lede": "Exported into the shell you start the daemon from. The provider's own variable name is accepted, so if you have already exported it for another tool you do not need a second one.",
+        "alsoAccepted": "This project's own form is also read:",
+        "exposure": "Weaker than the keychain, and the daemon says so on its own startup line: a variable exported into a shell is visible to every process that shell starts, and on Linux to anything that can read /proc/<pid>/environ as you."
+      },
+      "oauth": {
+        "title": "Connect with OpenRouter",
+        "lede": "The path where you never handle a credential at all. Authorization happens on OpenRouter; the code that comes back is redeemed here, in this tab, and the result is sealed into the browser vault below.",
+        "step1": "This tab generates a one-time verifier, keeps it here, and sends only its SHA-256 hash to OpenRouter.",
+        "step2": "You authorize on OpenRouter and are returned to this app with a single-use code.",
+        "step3": "This tab redeems the code against OpenRouter directly — not through any server of ours — and seals the result.",
+        "authorizeAt": "You will be sent to",
+        "exchangeAt": "The code is redeemed at",
+        "unverified": "Both addresses above are transcribed from OpenRouter's published flow and have not been exercised against a live server from inside this repository. If the flow fails, the callback page names which step failed and the paste path below still works. Verifying them, and pinning them with a conformance case, is TODO(M23).",
+        "start": "Connect with OpenRouter",
+        "starting": "Redirecting…"
+      },
+      "vault": {
+        "title": "Browser vault",
+        "lede": "A credential entered here is encrypted with AES-GCM under a key this browser generated and cannot export, and the ciphertext is written to a database belonging to this page alone.",
+        "noEgressYet": "It cannot start a run yet, and that is worth knowing before you paste anything. The daemon has no route that accepts a credential — it reads one from the keychain or the environment — so a credential sealed here has nowhere to go until that route exists. Use the keychain above if you want a run to work today.",
+        "held": "Held",
+        "source": "Entered by",
+        "sourceName": {
+          "pasted": "pasting it here",
+          "oauth": "authorizing with OpenRouter"
+        },
+        "added": "Sealed at",
+        "forget": "Forget this credential",
+        "forgetAll": "Forget everything, including the sealing key",
+        "inputLabel": "OpenRouter credential",
+        "inputHint": "It is read once, encrypted, and the field is cleared. It is never rendered back, never logged, and never placed in a URL.",
+        "inputPlaceholder": "Paste it here",
+        "seal": "Encrypt and store in this browser",
+        "sealed": "Sealed. The field has been cleared.",
+        "unavailable": "The vault cannot run here",
+        "unavailableReason": {
+          "server": "This is being rendered on a server, which has no browser storage. Nothing is wrong; the panel fills in once the page is interactive.",
+          "insecure-context": "This page is not a secure context, so the browser exposes no Web Crypto at all. Rather than store a credential in the clear and call this a vault, it refuses. Serve the app over HTTPS, or over localhost, and it works.",
+          "no-indexeddb": "This browser exposes no IndexedDB, so there is nowhere to put the ciphertext.",
+          "blocked": "The browser refused to open the vault database."
+        },
+        "mechanics": "Exactly what happens",
+        "mechanic1": "The sealing key is generated with extractable set to false, so exporting it fails in every browser. Script on this page can decrypt with it; nothing can copy it out.",
+        "mechanic2": "The ciphertext lives in a database separate from everything else this app stores. The storage port that holds your projects is never handed a credential, and CI checks that its signatures could not carry one.",
+        "mechanic3": "Nothing in this panel makes a network request. This app has no server route for a credential, which is what turns the promise into a property of the code.",
+        "mechanic4": "Only the last four characters are ever displayed, and only so you can tell two credentials apart."
+      },
+      "callback": {
+        "title": "Finishing the OpenRouter connection",
+        "lede": "Redeeming the authorization code in this tab. Nothing here reaches a server of ours.",
+        "back": "Back to keys",
+        "hint": "Sealed. It ends in {hint}.",
+        "state": {
+          "working": "Redeeming",
+          "provider-error": "OpenRouter returned an error",
+          "no-flow": "No connection in progress",
+          "state-mismatch": "Refused",
+          "no-code": "No code returned",
+          "failed": "Could not finish",
+          "done": "Connected"
+        },
+        "body": {
+          "working": "Exchanging the single-use code for a credential, then sealing it into this browser's vault.",
+          "provider-error": "The authorization did not complete. OpenRouter's own words are below.",
+          "no-flow": "This tab has no verifier for the code on this URL. That happens when the tab that started the connection was closed, when the address was opened in a new tab, or when it was sent by someone else. Start again from the keys page.",
+          "state-mismatch": "The value returned with this code is not the one this tab sent, so the code was not redeemed. Start again from the keys page.",
+          "no-code": "The address carries no authorization code. Start again from the keys page.",
+          "failed": "The code was not redeemed, and nothing has been stored.",
+          "done": "The credential is encrypted and stored in this browser. It cannot drive a run until the daemon can accept one — see the vault panel on the keys page."
+        },
+        "remedy": {
+          "blocked": "The browser refused the request or nothing answered. A cross-origin refusal and a network failure are indistinguishable from a page, so both are possible. Pasting a credential on the keys page does not depend on this request.",
+          "refused": "OpenRouter rejected the redemption. A code is single use and short lived, so this is what a second attempt with the same code looks like. Start again from the keys page.",
+          "unrecognised": "The exchange succeeded and the response was not a shape this build recognises, which most likely means the transcribed endpoint has moved — see TODO(M23) in lib/keys/openrouter-oauth.ts. Paste a credential on the keys page instead.",
+          "vault": "The credential arrived and the browser vault refused to store it. The vault panel on the keys page names why."
+        }
+      }
+    },
+    "approval": {
+      "title": "Approval",
+      "lede": "Nothing is written into your place without a person deciding. This is where that rule can be narrowed, deliberately and by path.",
+      "defaultTitle": "The default",
+      "digestNote": "Approving sends back the fingerprint of the diff you were shown, so it means \"I approve these operations\", not \"I approve whatever is under this id\". A page that never loaded a diff has no fingerprint to send, which is the gate working rather than an obstacle.",
+      "autoTitle": "Auto-apply",
+      "autoLede": "Off by default. Turning it on lets changes inside one named folder be applied without stopping for you — worth it when you are iterating on a single system, and worth nothing at all outside that case.",
+      "scopeLabel": "Set the one folder auto-apply may write into",
+      "scopeHint": "A full instance path, dotted, at least one level below a service root. For example ServerScriptService.Shop — not ServerScriptService, which would be the whole service.",
+      "scopeEmpty": "No folder set. Auto-apply cannot be turned on until there is one.",
+      "enabled": "Auto-apply is now on.",
+      "disabled": "Auto-apply is now off. Every change waits for you again.",
+      "enableLabel": "Apply changes inside this folder without asking",
+      "enableHint": "Still journaled, still validated, and still refused for anything that touches a path outside it.",
+      "enableBlocked": "Set a folder first. An auto-apply with no folder is not \"everything\" — it is a half-finished setting, and this form will not produce one.",
+      "summary": "Auto-apply is on for {prefix}. Anything that touches a path outside it is refused whole rather than applied in part, and every deletion anywhere still waits for you.",
+      "scopeError": {
+        "empty": "Enter a path first.",
+        "invalid-path": "Not an addressable instance path: {detail}",
+        "service-root": "{root} is a whole service, not a folder inside one. Auto-applying to a service root is auto-applying to your place. Name something beneath it."
+      },
+      "neverTitle": "What auto-apply never covers",
+      "neverBody": "Deletion. There is no setting on this page that turns it on, and there is no field in the stored policy that could hold one — a corrupted record or a bug in this form cannot produce an auto-applied delete, because the shape cannot express it.",
+      "covered": "Can be auto-applied",
+      "neverCovered": "Never auto-applied",
+      "journalNote": "Everything applied, by you or by a policy, writes its inverse to the journal first. Rollback is a protocol endpoint, not a feature of this page.",
+      "enforcementTitle": "Who enforces this",
+      "enforcement": {
+        "yes": "The daemon enforces it",
+        "no": "Stated here, not yet enforced",
+        "notYet": "The daemon has no route that accepts an approval policy, so what you set here is a recorded intention rather than a rule the daemon applies. It is stored in this browser and it is what the generation surface reads when it shows you which operations a policy would have covered. Wiring it into the daemon is TODO(M38)."
+      },
+      "scopeCurrent": "Current folder",
+      "set": "Set folder",
+      "clear": "Clear folder",
+      "scopeSet": "{prefix} is now the auto-apply folder. It is still off; turn it on below.",
+      "scopeChangedAndDisabled": "{prefix} is now the auto-apply folder. Changing it turned auto-apply off — turn it back on once you have looked at the new folder.",
+      "scopeCleared": "Folder cleared, and auto-apply is off.",
+      "onePrefixNote": "One folder, not a list, and that is the design rather than a limitation: a list grows one reasonable-looking entry at a time until it covers more than anyone decided on. A project that needs two folders auto-applied needs a narrower project.",
+      "projectPolicyNote": "Two rules will still be the daemon’s, not this page’s: the folder must sit inside the project’s own allowed paths, and a ChangeSet that fails path policy or validation is never eligible whatever is set here."
+    },
+    "appearance": {
+      "title": "Appearance and language",
+      "lede": "Two preferences, each stored where it has to be read from rather than where the rest of your work lives.",
+      "themeBody": "Three values, because \"system\" is a real choice: an OS that switches at sunset should take the app with it. A resolved value is written to the document before the first paint, so a status colour never changes under you after the page has appeared.",
+      "themeStorage": "Stored in this browser's localStorage, under",
+      "themeContrast": "Both themes are built from the same tokens, and every state colour clears 4.5:1 against its own background in its own theme. A colour is never the only carrier of meaning — every coloured marker in this app sits beside a word.",
+      "localeBody": "The language is part of the address, so a link you share opens in the language you shared it in rather than in whichever one the recipient's browser prefers.",
+      "localeStorage": "Your choice is also written to a cookie so a later visit to the site root lands where you left it:",
+      "rtlNote": "Hebrew renders the whole app right to left, and not by mirroring a stylesheet: every inline-axis edge in the source is a logical property, and a test fails the build on any physical one. Instance paths, model ids and Luau stay left to right inside it, as isolated runs, so the bidirectional algorithm cannot reorder a path around the text beside it.",
+      "postureNote": "One string is deliberately never translated: the privacy posture. It is a contract term, and a translation of a contract term is a second sentence that can disagree with the first. In Hebrew it appears in English with an explanation beneath it.",
+      "motionTitle": "Motion",
+      "motionBody": "There is almost none, and there is no setting for it. Everything that moves in this app is a state change rather than decoration, so a browser asking for reduced motion gets the state change with the animation removed rather than the same animation slowed down."
+    }
+  }
+}

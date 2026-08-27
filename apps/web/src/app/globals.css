@@ -1,0 +1,391 @@
+@import "tailwindcss";
+
+/*
+ * ForgeBridge web — the token system.
+ *
+ * Read DESIGN.md before changing a value here. The two rules that hold the
+ * whole thing together:
+ *
+ *   1. Chroma is reserved for STATE. Interface chrome — buttons, borders,
+ *      panels, text — is achromatic. The only coloured things on a screen are
+ *      the states of the bridge: is the link live, did validation pass, is a
+ *      ChangeSet waiting for a human. A coloured button competes with those,
+ *      and the one moment this product cannot afford to blur is the moment
+ *      something is waiting for approval (ADR-012).
+ *
+ *   2. Every colour a component uses comes from a token below. There is no
+ *      literal hex outside this file, and no `dark:` utility carrying a colour
+ *      that the light theme does not have an answer for.
+ *
+ * Theme resolution, in the order the cascade applies it:
+ *
+ *   :root                                    complete LIGHT set — the default
+ *   @media (prefers-color-scheme: dark)
+ *     :root:not([data-theme="light"])        dark, unless the user chose light
+ *   :root[data-theme="dark"]                 dark, because the user chose dark
+ *
+ * The middle block is guarded rather than bare so an explicit light choice wins
+ * over the OS. The third block is not "the same rule again": without it, a user
+ * on a light OS who picks dark gets nothing.
+ */
+
+/*
+ * The `dark:` variant, for the rare case a component needs a different *shape*
+ * in dark rather than a different colour — a border that must become a fill,
+ * an image that needs its own asset. Colour is not that case: colour goes
+ * through the tokens, which already resolve per theme.
+ *
+ * It matches the attribute in both directions because `<html>` always carries a
+ * resolved `data-theme` after `theme-script.tsx` runs, before first paint.
+ */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ── LIGHT: the complete set ─────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+
+  /* Surfaces. A panel, not a page: three flat planes separated by rules, no
+     shadows. `raised` is where content the user reads closely sits — code,
+     inputs, diff bodies. */
+  --fb-canvas: #edefee;
+  --fb-surface: #f7f8f7;
+  --fb-raised: #ffffff;
+  --fb-sunken: #e4e7e5;
+
+  /* Ink. `faint` is darkened past the obvious choice so it still clears 4.5:1
+     on canvas — a "muted" token that only passes at 18px is a token someone
+     will use at 13px. */
+  --fb-fg: #14181a;
+  --fb-fg-muted: #4e5658;
+  --fb-fg-faint: #5f6769;
+  --fb-fg-inverse: #edefee;
+
+  /* Rules. The only separator this system has. */
+  --fb-rule: #c9cfcd;
+  --fb-rule-strong: #a7afad;
+
+  /* State — the only chroma in the system.
+     live     the link is up / validation passed / an apply succeeded
+     attend   something is waiting for a human: validated, awaiting approval
+     halt     validation failed / a destructive operation / an apply failed
+     idle     unpaired, unknown, not yet asked */
+  --fb-live: #0f6b4a;
+  --fb-live-wash: #e2efe8;
+  --fb-attend: #7a5100;
+  --fb-attend-wash: #f4ebd9;
+  --fb-halt: #a32217;
+  --fb-halt-wash: #f6e4e1;
+  --fb-idle: #5f6769;
+  --fb-idle-wash: #e4e7e5;
+
+  /* Focus. Two rings, ink then canvas, so the pair contrasts against every
+     surface token in both themes without introducing a fourth accent hue that
+     would collide with the state colours. */
+  --fb-focus: #14181a;
+  --fb-focus-halo: #edefee;
+
+  /* Selection. */
+  --fb-select-bg: #14181a;
+  --fb-select-fg: #edefee;
+
+  /* Type. Latin first, Hebrew second: a browser falls through per glyph, so
+     Latin comes from Plex Sans and Hebrew from Plex Sans Hebrew without a
+     locale switch changing the typographic voice — the two are cut from the
+     same skeleton, which is the reason this family was chosen. */
+  --fb-font-sans:
+    var(--font-plex-sans), var(--font-plex-sans-he), ui-sans-serif, system-ui,
+    "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --fb-font-mono:
+    var(--font-plex-mono), ui-monospace, "SF Mono", "Cascadia Mono", Menlo,
+    Consolas, monospace;
+
+  /* Spacing: 4px base. Named rather than numeric-only so a register's internal
+     rhythm is a decision, not an accident of whatever felt right. */
+  --fb-space-1: 0.25rem;
+  --fb-space-2: 0.5rem;
+  --fb-space-3: 0.75rem;
+  --fb-space-4: 1rem;
+  --fb-space-5: 1.5rem;
+  --fb-space-6: 2rem;
+  --fb-space-7: 3rem;
+  --fb-space-8: 4rem;
+
+  /* Radius stops at 3px. A workshop instrument has milled edges, not pills. */
+  --fb-radius-sm: 2px;
+  --fb-radius-md: 3px;
+
+  /* The shell's fixed measurements, shared by the layout and the skip link. */
+  --fb-bar-height: 3rem;
+  --fb-rail-width: 14rem;
+  --fb-measure: 72ch;
+}
+
+/* ── DARK: the OS said so, and the user has not overridden it ────────────── */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --fb-canvas: #101413;
+    --fb-surface: #171c1b;
+    --fb-raised: #1e2423;
+    --fb-sunken: #0a0d0c;
+
+    --fb-fg: #e6eae8;
+    --fb-fg-muted: #a3acaa;
+    --fb-fg-faint: #7e8785;
+    --fb-fg-inverse: #101413;
+
+    --fb-rule: #2c3433;
+    --fb-rule-strong: #414a48;
+
+    --fb-live: #5ccf9e;
+    --fb-live-wash: #123028;
+    --fb-attend: #edb44e;
+    --fb-attend-wash: #33280f;
+    --fb-halt: #ff8a78;
+    --fb-halt-wash: #3a1d18;
+    --fb-idle: #7e8785;
+    --fb-idle-wash: #1e2423;
+
+    --fb-focus: #e6eae8;
+    --fb-focus-halo: #101413;
+
+    --fb-select-bg: #e6eae8;
+    --fb-select-fg: #101413;
+  }
+}
+
+/* ── DARK: the user chose it ─────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --fb-canvas: #101413;
+  --fb-surface: #171c1b;
+  --fb-raised: #1e2423;
+  --fb-sunken: #0a0d0c;
+
+  --fb-fg: #e6eae8;
+  --fb-fg-muted: #a3acaa;
+  --fb-fg-faint: #7e8785;
+  --fb-fg-inverse: #101413;
+
+  --fb-rule: #2c3433;
+  --fb-rule-strong: #414a48;
+
+  --fb-live: #5ccf9e;
+  --fb-live-wash: #123028;
+  --fb-attend: #edb44e;
+  --fb-attend-wash: #33280f;
+  --fb-halt: #ff8a78;
+  --fb-halt-wash: #3a1d18;
+  --fb-idle: #7e8785;
+  --fb-idle-wash: #1e2423;
+
+  --fb-focus: #e6eae8;
+  --fb-focus-halo: #101413;
+
+  --fb-select-bg: #e6eae8;
+  --fb-select-fg: #101413;
+}
+
+/*
+ * The Tailwind side of the same tokens.
+ *
+ * `@theme inline` emits `background-color: var(--fb-canvas)` rather than the
+ * resolved value, which is what makes `bg-canvas` follow a theme change at
+ * runtime instead of freezing whatever `:root` said at build time.
+ */
+@theme inline {
+  --color-canvas: var(--fb-canvas);
+  --color-surface: var(--fb-surface);
+  --color-raised: var(--fb-raised);
+  --color-sunken: var(--fb-sunken);
+
+  --color-fg: var(--fb-fg);
+  --color-fg-muted: var(--fb-fg-muted);
+  --color-fg-faint: var(--fb-fg-faint);
+  --color-fg-inverse: var(--fb-fg-inverse);
+
+  --color-rule: var(--fb-rule);
+  --color-rule-strong: var(--fb-rule-strong);
+
+  --color-live: var(--fb-live);
+  --color-live-wash: var(--fb-live-wash);
+  --color-attend: var(--fb-attend);
+  --color-attend-wash: var(--fb-attend-wash);
+  --color-halt: var(--fb-halt);
+  --color-halt-wash: var(--fb-halt-wash);
+  --color-idle: var(--fb-idle);
+  --color-idle-wash: var(--fb-idle-wash);
+
+  --font-sans: var(--fb-font-sans);
+  --font-mono: var(--fb-font-mono);
+
+  --radius-sm: var(--fb-radius-sm);
+  --radius-md: var(--fb-radius-md);
+  --radius-DEFAULT: var(--fb-radius-sm);
+}
+
+@layer base {
+  html {
+    /* 15px UI base. Dense enough to read as an instrument, large enough that
+       the 0.8125rem meta size below is still 12px and not 11. */
+    font-size: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--fb-canvas);
+    color: var(--fb-fg);
+    font-family: var(--fb-font-sans);
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    font-feature-settings: "cv05" 1; /* Plex's straight-legged l, against 1 and I */
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: var(--fb-select-bg);
+    color: var(--fb-select-fg);
+  }
+
+  /*
+   * Focus: two rings. The inner is ink (or paper, in dark), the outer is the
+   * canvas colour, so the pair is legible on a rule, on a wash, on a filled
+   * button and on a code block — every surface this system has — without
+   * needing a per-component override.
+   */
+  :focus-visible {
+    outline: 2px solid var(--fb-focus);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px var(--fb-focus-halo);
+    border-radius: var(--fb-radius-sm);
+  }
+  /* Browsers that draw a default ring on :focus for mouse clicks: suppress it
+     only where :focus-visible is supported, so keyboard users never lose one. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  h1, h2, h3, h4 {
+    font-weight: 600;
+    letter-spacing: -0.011em;
+    line-height: 1.25;
+    text-wrap: balance;
+  }
+
+  code, kbd, pre, samp {
+    font-family: var(--fb-font-mono);
+    font-size: 0.875em;
+  }
+
+  hr {
+    border: 0;
+    border-block-start: 1px solid var(--fb-rule);
+  }
+
+  /*
+   * WCAG 2.2 §2.3.3. Everything in this app that moves is a state change
+   * (a link going live, a run stage advancing) — informative, never decorative.
+   * Reduced motion therefore means "cut it to nothing", not "slow it down":
+   * the state still changes, it just stops being animated.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+   * The register label — the instrument-panel voice. 12px, upper case, tracked
+   * out, muted.
+   *
+   * Upper case is a Latin idea. Hebrew is unicameral: `text-transform:
+   * uppercase` does nothing to it, and the letter-spacing actively harms it by
+   * breaking the connection between letterforms the reader uses to find word
+   * shapes. So under `dir="rtl"` this class becomes a plain small label with
+   * its weight carrying the emphasis instead. That is what "RTL is not an
+   * afterthought" means here — the same class, a different correct answer.
+   */
+  .fb-label {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fb-fg-muted);
+  }
+  [dir="rtl"] .fb-label {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    font-size: 0.8125rem;
+  }
+
+  /* Meta text: timestamps, counts, digests. */
+  .fb-meta {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--fb-fg-muted);
+  }
+
+  /*
+   * A register: the panel primitive. A hairline box on the surface plane, with
+   * a ruled header. Deliberately not a rounded card with a coloured left rail —
+   * the rail would spend chroma on a container instead of on a state.
+   */
+  .fb-register {
+    background-color: var(--fb-surface);
+    border: 1px solid var(--fb-rule);
+    border-radius: var(--fb-radius-md);
+  }
+  .fb-register-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--fb-space-3);
+    padding: var(--fb-space-3) var(--fb-space-4);
+    border-block-end: 1px solid var(--fb-rule);
+  }
+  .fb-register-body {
+    padding: var(--fb-space-4);
+  }
+
+  /*
+   * Skip link: off-screen until focused, then a real, visible control pinned to
+   * the inline start of the viewport — the right-hand side under `dir="rtl"`.
+   */
+  .fb-skip-link {
+    position: absolute;
+    inset-block-start: -100vh;
+    inset-inline-start: var(--fb-space-4);
+    z-index: 50;
+    padding: var(--fb-space-2) var(--fb-space-3);
+    background-color: var(--fb-raised);
+    color: var(--fb-fg);
+    border: 1px solid var(--fb-fg);
+    border-radius: var(--fb-radius-sm);
+    font-weight: 500;
+  }
+  .fb-skip-link:focus-visible {
+    inset-block-start: var(--fb-space-3);
+  }
+
+  /* Screen-reader-only, with the standard escape hatch for focus. */
+  .fb-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+}
