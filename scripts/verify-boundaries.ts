@@ -68,7 +68,10 @@ const OFFICIAL_INSTANCE_NAME = ['apple', 'gg'].join('.');
  * and an app nobody added to the list reads, in a green CI log, exactly like an
  * app with nothing wrong in it. Naming the one exemption instead makes every
  * future app neutral by default. `apps/relay` was added while B3 still scanned
- * three trees, and it named the official instance six times without the gate
+  * three trees. No violation was found when the scope was widened — apps/relay was
+ * already clean. The gate was widened because a rule that reads "everything
+ * outside apps/web stays neutral" while scanning three named directories is a
+ * rule nobody can rely on, not because it caught anything.
  * seeing any of them.
  */
 export const NEUTRAL_TREES: readonly string[] = ['packages', 'plugin', 'examples', 'apps'];

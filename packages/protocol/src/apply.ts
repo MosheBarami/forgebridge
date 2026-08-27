@@ -157,8 +157,23 @@ export type RollbackStatus = 'rolled_back' | 'partial' | 'failed';
  * `every()` over an empty array is true — which is exactly how a fail-closed
  * check turns into "I found no problem, so this is fine".
  */
-export function rollbackStatusOf(result: RollbackResult): RollbackStatus {
+export function rollbackStatusOf(result: RollbackResult, inverseCount?: number): RollbackStatus {
   if (result.outcomes.length === 0) return 'failed';
-  if (result.outcomes.every((outcome) => outcome.ok)) return 'rolled_back';
+
+  const allOk = result.outcomes.every((outcome) => outcome.ok);
+  if (allOk) {
+    // A reversal replays inverses last-first and stops where it fails, so it
+    // reports only the ones it attempted. Every attempt succeeding is NOT the
+    // same as a completed rollback: the inverses it never reached are still
+    // applied to the place.
+    //
+    // Without `inverseCount` those two are indistinguishable, and answering
+    // `rolled_back` to both is what let a three-of-five reversal be recorded as
+    // complete with `rolledBackAt` stamped. Any caller that can supply the count
+    // must, and the daemon does.
+    if (inverseCount === undefined) return 'rolled_back';
+    return result.outcomes.length === inverseCount ? 'rolled_back' : 'partial';
+  }
+
   return result.outcomes.some((outcome) => outcome.ok) ? 'partial' : 'failed';
 }

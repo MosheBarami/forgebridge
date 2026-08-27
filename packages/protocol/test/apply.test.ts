@@ -151,3 +151,23 @@ describe('the journal a rollback is replayed from', () => {
     expect(entry.rolledBackAt).toBeNull();
   });
 });
+
+describe('rollbackStatusOf tells complete apart from every-attempt-passed', () => {
+  const partialResult = () =>
+    result({ outcomes: [{ index: 4, ok: true }, { index: 3, ok: true }] });
+
+  it('is rolled_back only when every inverse was accounted for', () => {
+    // Two successful outcomes over five inverses means three inverses are still
+    // applied to the place. Recorded as complete, that is the journal lying
+    // about the one thing it exists to be right about.
+    expect(rollbackStatusOf(partialResult(), 5)).toBe('partial');
+    expect(rollbackStatusOf(partialResult(), 2)).toBe('rolled_back');
+  });
+
+  it('a failure anywhere is still partial or failed, whatever the count', () => {
+    const mixed = result({ outcomes: [{ index: 1, ok: true }, { index: 0, ok: false, error: 'gone' }] });
+    expect(rollbackStatusOf(mixed, 2)).toBe('partial');
+    const none = result({ outcomes: [{ index: 0, ok: false, error: 'gone' }] });
+    expect(rollbackStatusOf(none, 1)).toBe('failed');
+  });
+});

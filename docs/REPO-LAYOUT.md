@@ -79,8 +79,10 @@ The identifiers `B1`–`B4` are the ones the script reports.
    `README.md` and `NOTICE` name the official instance on purpose, and are out of scope by
    design. The scope is a tree with one named exemption rather than a list of neutral
    directories, so an app added tomorrow is in scope the day it lands — `apps/relay`
-   arrived while the scan covered three trees and named the official instance six times
-   without the gate seeing any of them.
+   arrived while the scan covered three trees. Widening it found nothing —
+   `apps/relay` was already neutral. The scope was wrong regardless: a rule
+   stated as "everything outside `apps/web`" that reads three named directories
+   is a rule whose next violation is invisible.
 
 ## Language split
 

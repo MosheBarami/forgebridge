@@ -147,6 +147,15 @@ Two things `npm run check` does not give you, despite appearances:
   # The M30 SDK, installed editable so the conformance driver can import it.
   python3.10 -m venv .venv && .venv/bin/python -m pip install -e "packages/sdk-python[dev]"
   FORGEBRIDGE_PYTHON=$PWD/.venv/bin/python npm run test
+
+> A macOS `python3` is very often 3.9, and the SDK uses `X | None` annotations that 3.9
+> cannot parse — the failure surfaces as `TypeError: unsupported operand type(s) for |`
+> from inside `models.py`, which reads like an SDK bug rather than an interpreter one.
+> If you have a venv at `packages/sdk-python/.venv`, point at its interpreter:
+>
+> ```sh
+> export FORGEBRIDGE_PYTHON=packages/sdk-python/.venv/bin/python
+> ```
   ```
 
   `FORGEBRIDGE_PYTHON` is declared on the `test` task in `turbo.json`. It has to be: turbo 2.x

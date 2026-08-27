@@ -205,4 +205,44 @@ return function(t)
 		t.equal(entries[1].id, "b")
 		t.equal(session:latest().id, "c")
 	end)
+
+	t.test("reports a subtree that came back incomplete rather than claiming a clean restore", function()
+		-- The child's return was discarded and the Source write was pcall'd into
+		-- silence, so a subtree missing whole branches reported success. The journal
+		-- is the one record that must not be wrong about whether the place came back.
+		local parent = Fake.new("Folder", "ServerScriptService")
+		local restored, err = Journal.restoreSubtree(parent, {
+			className = "Folder",
+			name = "Shop",
+			children = {
+				{ className = "Script", name = "Handler", source = "print(1)" },
+			},
+		}, {
+			instanceNew = function(className)
+				if className == "Script" then
+					local child = Fake.new("Script", "Handler")
+					Fake.refuse(child, "Source", "Source is locked in this test")
+					return child
+				end
+				return Fake.new(className, "Shop")
+			end,
+		})
+		t.truthy(err, "a child whose source could not be restored must surface as an error")
+		t.truthy(restored, "the partially restored instance is still handed back for the caller to decide")
+	end)
+
+	t.test("a subtree with nothing wrong still restores clean — the control", function()
+		local parent = Fake.new("Folder", "ServerScriptService")
+		local restored, err = Journal.restoreSubtree(parent, {
+			className = "Folder",
+			name = "Shop",
+			children = { { className = "Folder", name = "Items" } },
+		}, {
+			instanceNew = function(className)
+				return Fake.new(className, "node")
+			end,
+		})
+		t.truthy(restored, "a clean subtree restores")
+		t.falsy(err, "and reports no error")
+	end)
 end

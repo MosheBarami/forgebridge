@@ -774,6 +774,48 @@ describe('recordRollbackResult', () => {
     expect(journalStateOf(base, null)).toBe('applied');
     expect(journalStateOf({ ...base, rollbackRequestedAt: new Date().toISOString() }, null)).toBe('rollback_requested');
   });
+
+    it('refuses to stamp rolledBackAt when inverses were never attempted', async () => {
+      // THE HOLE. A consumer reporting only its successful steps — three outcomes,
+      // all ok, over an entry with more inverses — was recorded as a complete
+      // rollback with rolledBackAt stamped, while the inverses it never reached
+      // were still applied to the place. `rollbackStatusOf` answered `rolled_back`
+      // because every outcome it could see had passed; it could not see how many
+      // there should have been.
+      const { deps, link, entry, record } = await seed();
+      await recordJournalEntry(deps, link, entry);
+      await deps.store.patchJournal(record.id, { rollbackRequestedAt: new Date().toISOString() });
+
+      const shortButHappy = result(record, {
+        outcomes: [
+          { index: 6, ok: true },
+          { index: 5, ok: true },
+          { index: 4, ok: true },
+        ],
+      });
+      expect(shortButHappy.outcomes.length).toBeLessThan(entry.inverses.length);
+
+      const ack = await recordRollbackResult(deps, link, shortButHappy);
+
+      expect(ack.status).toBe('partial');
+      const stored = await deps.store.getJournal(record.id);
+      expect(stored?.rolledBackAt).toBeNull();
+      expect(journalStateOf(stored as JournalRecord, shortButHappy)).toBe('rollback_partial');
+    });
+
+    it('still stamps it when every inverse came back ok — the control', async () => {
+      const { deps, link, entry, record } = await seed();
+      await recordJournalEntry(deps, link, entry);
+      await deps.store.patchJournal(record.id, { rollbackRequestedAt: new Date().toISOString() });
+
+      const complete = result(record, {
+        outcomes: entry.inverses.map((_, i) => ({ index: entry.inverses.length - 1 - i, ok: true })),
+      });
+      const ack = await recordRollbackResult(deps, link, complete);
+
+      expect(ack.status).toBe('rolled_back');
+      expect((await deps.store.getJournal(record.id))?.rolledBackAt).not.toBeNull();
+    });
 });
 
 describe('the refusals are protocol errors, not bare throws', () => {

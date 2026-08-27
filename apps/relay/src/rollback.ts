@@ -423,8 +423,19 @@ export function journalStateOf(
 ): JournalState {
   if (record.rolledBackAt) return 'rolled_back';
   if (result) {
+    // No inverse count here, and none needed. `rolledBackAt` is stamped only by
+    // the daemon's `recordRollbackResult`, which judges completeness WITH the
+    // count in hand. Reaching this line means it did not judge the reversal
+    // complete — so a result whose every attempt passed is one that stopped
+    // short, and calling it `rolled_back` on the strength of those attempts is
+    // the lie the count was added to stop.
+    //
+    // This is a second copy of the daemon's rule, and `test/drift.test.ts`
+    // exists because two copies drift — it caught this one diverging the hour
+    // the daemon's changed. Keep them identical or delete this one.
     const status = rollbackStatusOf(result);
-    return status === 'partial' ? 'rollback_partial' : status === 'failed' ? 'rollback_failed' : 'rolled_back';
+    if (status === 'rolled_back') return 'rollback_partial';
+    return status === 'partial' ? 'rollback_partial' : 'rollback_failed';
   }
   return record.rollbackRequestedAt ? 'rollback_requested' : 'applied';
 }

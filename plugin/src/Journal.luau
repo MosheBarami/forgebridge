@@ -184,26 +184,61 @@ function Journal.restoreSubtree(parent: any, node: any, options: any?): (any?, s
 		end
 	end
 
+	-- Every failure below is COLLECTED, not swallowed.
+	--
+	-- This function used to pcall the Source write, pcall each tag, and discard
+	-- the (nil, error) of every recursive child call — then return `instance, nil`
+	-- unconditionally. A subtree that came back missing whole branches, or with a
+	-- script restored empty, was reported as a clean restore. The journal is the
+	-- one thing in this system that must not be wrong about whether the place
+	-- came back, so an incomplete restore says so.
+	local failures: { string } = {}
+
 	if node.source ~= nil then
-		pcall(function()
+		local ok, err = pcall(function()
 			(instance :: any).Source = node.source
 		end)
+		if not ok then
+			-- Source is the code. A script restored without its body is not a
+			-- restored script.
+			table.insert(failures, string.format("%s: source not restored (%s)", node.name or "?", tostring(err)))
+		end
 	end
 
 	local collectionService = opts.collectionService
 	if collectionService and node.tags then
 		for _, tag in node.tags do
-			pcall(function()
+			local ok, err = pcall(function()
 				collectionService:AddTag(instance, tag)
 			end)
+			if not ok then
+				table.insert(failures, string.format("%s: tag %q not restored (%s)", node.name or "?", tag, tostring(err)))
+			end
 		end
 	end
 
 	for _, child in node.children or {} do
-		Journal.restoreSubtree(instance, child, opts)
+		local restored, childErr = Journal.restoreSubtree(instance, child, opts)
+		if restored == nil or childErr ~= nil then
+			table.insert(failures, childErr or string.format("%s: child not restored", tostring(child.name)))
+		end
 	end
 
-	instance.Parent = parent
+	local parentOk, parentErr = pcall(function()
+		instance.Parent = parent
+	end)
+	if not parentOk then
+		instance:Destroy()
+		return nil, string.format("%s could not be parented: %s", node.name or "?", tostring(parentErr))
+	end
+
+	if #failures > 0 then
+		-- The instance IS returned alongside the error: it exists in the place and
+		-- the caller needs the handle. `Apply:_move` reports a half-landed move the
+		-- same way, so `execute` can record a partial rather than losing it.
+		return instance, table.concat(failures, "; ")
+	end
+
 	return instance, nil
 end
 

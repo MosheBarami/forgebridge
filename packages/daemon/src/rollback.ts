@@ -449,14 +449,30 @@ export async function recordRollbackResult(
   }
 
   const entry = await deps.journals.getJournalEntry(result.journalId);
-  if (entry && result.outcomes.length > entry.inverses.length) {
+  if (!entry) {
+    // Without the entry there is nothing to check the outcomes against, and an
+    // unverifiable reversal must not be recorded as one. Fail closed.
     throw new ForgeBridgeError(
-      'invalid_request',
-      `rollback result reports ${result.outcomes.length} outcomes for ${entry.inverses.length} inverses`,
+      'not_found',
+      `journal ${result.journalId} has no entry to reverse`,
+      'The journal may have been compacted. Nothing was recorded.',
     );
   }
 
-  const status = rollbackStatusOf(result);
+  // A surplus is malformed: the consumer reported an inverse that does not
+  // exist. A SHORTFALL is legitimate — a reversal stops where it fails and
+  // reports only what it attempted — and is handled by passing the count to
+  // `rollbackStatusOf`, which is what stops "every attempt passed" being read as
+  // "complete".
+  if (result.outcomes.length > entry.inverses.length) {
+    throw new ForgeBridgeError(
+      'invalid_request',
+      `rollback result reports ${result.outcomes.length} outcomes for ${entry.inverses.length} inverses`,
+      'Report one outcome per inverse, including the ones that failed.',
+    );
+  }
+
+  const status = rollbackStatusOf(result, entry.inverses.length);
   await deps.journals.putRollbackResult(result);
 
   if (status === 'rolled_back') {
@@ -496,8 +512,15 @@ export function journalStateOf(
 ): 'applied' | 'rollback_requested' | 'rolled_back' | 'rollback_partial' | 'rollback_failed' {
   if (record.rolledBackAt) return 'rolled_back';
   if (result) {
+    // No inverse count here, and none needed. `rolledBackAt` is stamped only
+    // when `recordRollbackResult` judged the reversal complete WITH the count in
+    // hand — so reaching this line means it did not. A result whose every
+    // attempt passed is therefore one that stopped short, and calling it
+    // `rolled_back` on the strength of those attempts is the same lie the count
+    // was added to stop.
     const status = rollbackStatusOf(result);
-    return status === 'partial' ? 'rollback_partial' : status === 'failed' ? 'rollback_failed' : 'rolled_back';
+    if (status === 'rolled_back') return 'rollback_partial';
+    return status === 'partial' ? 'rollback_partial' : 'rollback_failed';
   }
   return record.rollbackRequestedAt ? 'rollback_requested' : 'applied';
 }

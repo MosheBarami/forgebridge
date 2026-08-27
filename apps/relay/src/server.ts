@@ -1388,7 +1388,13 @@ export class ForgeBridgeRelay {
     });
 
     const controller = new AbortController();
-    const onHangUp = (): void => controller.abort();
+    // Whether the CLIENT went away, as opposed to the run failing. The two arrive
+    // at the same catch and must not be treated the same.
+    let clientHungUp = false;
+    const onHangUp = (): void => {
+      clientHungUp = true;
+      controller.abort();
+    };
     res.once('close', onHangUp);
 
     try {
@@ -1403,9 +1409,18 @@ export class ForgeBridgeRelay {
       // Forwarded, not interpreted. See `dispatch.ts`.
       writeJson(res, answer.status, answer.body, context.cors);
     } catch (error) {
-      // The run did not happen, so the capacity was not spent. Releasing is the
-      // half of reserve-then-release that makes the reservation a limit rather
-      // than a tax on failure.
+      // Release ONLY when the run genuinely did not happen. Releasing on every
+      // failure meant a caller could open a sponsored run and close the socket:
+      // the abort rejected `startRun`, this catch refunded the global daily
+      // budget and the per-user, per-IP and per-ASN counters, and the run went on
+      // upstream anyway. One verified account could take unlimited sponsored runs
+      // while /v1/health reported nothing spent.
+      //
+      // A dispatch that genuinely failed still refunds — that is the half of
+      // reserve-then-release that keeps the reservation from being a tax on the
+      // provider's bad day. The line is who decided: a hang-up is the CALLER
+      // deciding, and the caller does not get to decide.
+      if (clientHungUp) throw error;
       await reservation.release();
       throw error;
     } finally {
