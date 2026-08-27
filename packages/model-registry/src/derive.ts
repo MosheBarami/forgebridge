@@ -28,11 +28,14 @@ import { TEXT_MODALITY, TOKEN_UNIT } from './types.js';
  * $0.4186/M input. Deriving freeness from the canonical slug's pricing, or
  * resolving one id to the other anywhere, misreports both price and availability.
  *
- * TODO(M24): locally-served models (Ollama, LM Studio, llama.cpp, vLLM) are free
- * because there is no bill at all, not because a reported price is zero. They
- * carry no provider pricing to derive from, so M24 must add an explicit local
- * path here rather than synthesising a zeroed `Pricing` — a synthesised zero is
- * exactly the kind of asserted-not-derived claim this file exists to prevent.
+ * Locally-served models (Ollama, LM Studio, llama.cpp, vLLM) do not come through
+ * this function at all, and that is M24's answer to the note that used to stand
+ * here. They are free because there is no bill, not because a reported price is
+ * zero, and they carry no provider pricing to derive from — so `local.ts` gives
+ * them their own shape with no `pricing` field and its own stated reason
+ * (`LOCAL_FREE_REASON`). Synthesising a zeroed `Pricing` and feeding it through
+ * `deriveFree` would have meant deriving "free" from zeros we wrote ourselves,
+ * which is the asserted-not-derived claim this file exists to prevent.
  */
 
 const DAY_MS = 86_400_000;
